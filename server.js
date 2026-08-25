@@ -402,6 +402,14 @@ function estilosBase() {
     .pesajes-box {
       margin-top: 12px; padding-top: 10px; border-top: 1px solid #eef0f2;
     }
+    .pesajes-box summary {
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--texto-suave);
+      cursor: pointer; list-style: none;
+    }
+    .pesajes-box summary::-webkit-details-marker { display: none; }
+    .pesajes-box summary::before { content: '▸ '; }
+    .pesajes-box[open] summary::before { content: '▾ '; }
+    .pesajes-box summary + * { margin-top: 6px; }
     .pesaje-fila {
       display: flex; justify-content: space-between; gap: 8px; font-size: 13px;
       padding: 4px 0; color: var(--texto-suave);
@@ -674,46 +682,12 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes) {
 </html>`;
 }
 
-// Detalle de una orden puntual: bultos con indice relativo (no el num_bulto crudo), pesajes de
-// cada bulto y el historial de materia prima (Serial/Referencia/Lote unicamente -- nada de
-// cantidades ni fechas, a pedido del usuario). Los rollos/SEL_EjecucionOrden no aparecen aqui:
-// solo interesan los bultos.
-function renderOrdenDetalle(orden, bultos, pesajesPorBulto, historial, usuario, maquinaCodigo, relevo) {
-  const tarjetas = bultos.map(b => {
-    const pesajes = pesajesPorBulto.get(b.id) || [];
-    const filasPesajes = pesajes.length
-      ? pesajes.map(pe => `
-          <div class="pesaje-fila">
-            <span>Paquete ${pe.ConsecutivoPaquete}</span>
-            <span>${pe.Hora}</span>
-            <span>${Number(pe.PesoPaqueGr).toString()}</span>
-          </div>`).join('')
-      : `<div class="pesaje-vacio">Sin paquetes pesados todavía.</div>`;
-
-    return `
-    <div class="card">
-      <div class="card-top">
-        <span class="bulto-num">Bulto ${b.numRelativo}</span>
-        ${badgeEstado(b.estado)}
-      </div>
-      <div class="card-grid">
-        <div><span class="label">Cant. Total (KG)</span><span class="valor">${b.CantidadTotal ?? '—'}</span></div>
-        <div><span class="label">Golpes</span><span class="valor">${b.Golpes ?? '—'}</span></div>
-        <div><span class="label">Potencia (KW)</span><span class="valor">${b.Potencia ?? '—'}</span></div>
-        <div><span class="label">Hora</span><span class="valor">${b.Hora ?? '—'}</span></div>
-        <div class="full"><span class="label">Serial</span><span class="valor serial">${b.serialPadre ?? '—'}</span></div>
-      </div>
-      <div class="pesajes-box">
-        <div class="label" style="margin-bottom:6px;">Paquetes pesados (${pesajes.length})</div>
-        ${filasPesajes}
-      </div>
-    </div>`;
-  }).join('');
-
-  const contenidoBultos = bultos.length
-    ? `<div class="grid">${tarjetas}</div>`
-    : `<div class="vacio">Esta orden todavía no tiene bultos.</div>`;
-
+// Detalle/especificaciones de una orden puntual y el historial de materia prima
+// (Serial/Referencia/Lote unicamente -- nada de cantidades ni fechas, a pedido del usuario). Los
+// bultos producidos NO viven aqui -- con las columnas de especificaciones esta pagina ya tiene
+// suficiente informacion; los bultos se ven aparte en
+// /selladora/:codigo/orden/:idOrden/bultos (ver renderBultosOrden), enlazados desde aqui.
+function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, relevo) {
   const filasHistorial = historial.length
     ? historial.map(h => `
         <div class="hist-fila">
@@ -764,6 +738,22 @@ function renderOrdenDetalle(orden, bultos, pesajesPorBulto, historial, usuario, 
       </div>
     </div>` : '';
 
+  // Especificaciones del elemento pedido para esta orden -- campos de SEL_OrdenProduccion, a
+  // pedido del usuario (24/08/2026) para no tener que ir a Mirane a consultarlos.
+  const especificaciones = [
+    ['Tipo de sellado', orden.TipoSellado],
+    ['Troquelado', orden.Troquelado],
+    ['Uso previsto', orden.UsoPrevisto],
+    ['Manija', orden.Manija],
+    ['Color manija', orden.ManijaColor],
+    ['Tula', orden.Tula],
+    ['Color tula', orden.TulaColor],
+    ['Parche', orden.Parche],
+    ['Separador', orden.Separador],
+    ['Cierre deslizador', orden.CierreDeslizador],
+    ['Perforaciones', orden.Perforaciones]
+  ].map(([label, valor]) => `<div><span class="label">${label}</span><span class="valor">${valor ?? '—'}</span></div>`).join('');
+
   return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -791,14 +781,132 @@ function renderOrdenDetalle(orden, bultos, pesajesPorBulto, historial, usuario, 
     ${bloqueRelevo}
     ${acciones ? `<div class="orden-cola" style="margin-bottom:18px;"><div class="orden-acciones">${acciones}</div></div>` : ''}
     ${pesoBox}
-    <h2 style="font-size:15px;margin:0 0 10px;">Bultos</h2>
-    ${contenidoBultos}
+    <div class="orden-cola" style="margin-bottom:18px;">
+      <div class="orden-info">
+        <div class="orden-pedido">Bultos producidos</div>
+        <div class="orden-elemento">${totalBultos} bulto(s) en esta orden</div>
+      </div>
+      <div class="orden-acciones">
+        <a class="btn-accion btn-info" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/bultos">📦 Ver bultos</a>
+      </div>
+    </div>
+    <h2 style="font-size:15px;margin:0 0 10px;">Especificaciones</h2>
+    <div class="ejecucion-box"><div class="ejecucion-grid">${especificaciones}</div></div>
     <h2 style="font-size:15px;margin:22px 0 10px;">Historial de materia prima</h2>
     <div class="ejecucion-box">${filasHistorial}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptConfirmarFinalizar()}</script>
   ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo)}</script><script>${scriptPesoEnVivo()}</script>` : ''}
+</body>
+</html>`;
+}
+
+// Tarjetas de bultos con su historial de paquetes (SEL_PesajeElemento) -- separada de
+// renderBultosOrden para poder reusarla tal cual desde /bultos/fragmento (ver mas abajo), que le
+// da al polling del cliente el mismo HTML sin reconstruir la pagina entera. El historial de
+// paquetes va dentro de un <details> (desplegable al hacer click en el bulto, colapsado por
+// defecto) porque con muchos paquetes la tarjeta se volvia demasiado larga.
+function renderTarjetasBultos(bultos, pesajesPorBulto) {
+  const tarjetas = bultos.map(b => {
+    const pesajes = pesajesPorBulto.get(b.id) || [];
+    const filasPesajes = pesajes.length
+      ? pesajes.map(pe => `
+          <div class="pesaje-fila">
+            <span>Paquete ${pe.ConsecutivoPaquete}</span>
+            <span>${pe.Hora}</span>
+            <span>${Number(pe.PesoPaqueGr).toString()}</span>
+          </div>`).join('')
+      : `<div class="pesaje-vacio">Sin paquetes pesados todavía.</div>`;
+
+    return `
+    <div class="card">
+      <div class="card-top">
+        <span class="bulto-num">Bulto ${b.numRelativo}</span>
+        ${badgeEstado(b.estado)}
+      </div>
+      <div class="card-grid">
+        <div><span class="label">Cant. Total (KG)</span><span class="valor">${b.CantidadTotal ?? '—'}</span></div>
+        <div><span class="label">Golpes</span><span class="valor">${b.Golpes ?? '—'}</span></div>
+        <div><span class="label">Potencia (KW)</span><span class="valor">${b.Potencia ?? '—'}</span></div>
+        <div><span class="label">Hora</span><span class="valor">${b.Hora ?? '—'}</span></div>
+        <div class="full"><span class="label">Serial</span><span class="valor serial">${b.serialPadre ?? '—'}</span></div>
+      </div>
+      <details class="pesajes-box" data-bulto="${b.id}">
+        <summary>Paquetes pesados (${pesajes.length})</summary>
+        ${filasPesajes}
+      </details>
+    </div>`;
+  }).join('');
+
+  return bultos.length
+    ? `<div class="grid">${tarjetas}</div>`
+    : `<div class="vacio">Esta orden todavía no tiene bultos.</div>`;
+}
+
+// Script del cliente para /bultos: pide el fragmento renderizado con renderTarjetasBultos cada
+// pocos segundos y reemplaza el contenedor -- asi el numero de paquetes pesados se ve actualizado
+// sin que el operario tenga que recargar la pagina a mano (a pedido del usuario, 24/08/2026: en
+// pruebas el conteo no se actualizaba solo). Guarda que bultos tenian el desplegable abierto antes
+// de reemplazar el HTML y se lo vuelve a abrir despues, para no cerrarlo en cada actualizacion.
+function scriptActualizarBultos() {
+  return `
+    (function() {
+      var contenedor = document.getElementById('contenedor-bultos');
+      if (!contenedor) return;
+
+      async function actualizar() {
+        try {
+          const resp = await fetch(location.pathname + '/fragmento');
+          if (!resp.ok) return;
+          const html = await resp.text();
+          const abiertos = new Set(
+            Array.from(contenedor.querySelectorAll('details[open]')).map(function(d) { return d.dataset.bulto; })
+          );
+          contenedor.innerHTML = html;
+          contenedor.querySelectorAll('details').forEach(function(d) {
+            if (abiertos.has(d.dataset.bulto)) d.open = true;
+          });
+        } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
+      }
+      setInterval(actualizar, 4000);
+    })();
+  `;
+}
+
+// Bultos producidos de una orden puntual, con indice relativo (no el num_bulto crudo -- mismo
+// criterio que EjecucionSelladora.vb:CargarBultos) y los pesajes/paquetes de cada uno
+// (SEL_PesajeElemento, igual que CargarPesajes). Separada de renderOrdenDetalle -- ver comentario
+// ahi arriba.
+function renderBultosOrden(orden, bultos, pesajesPorBulto, usuario, maquinaCodigo) {
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bultos — Pedido ${orden.NumeroPedido || orden.IdOrden}</title>
+  <style>${estilosBase()}</style>
+</head>
+<body>
+  <header>
+    <div class="header-top">
+      <div class="logo-wrap"><img class="logo" src="/logo-carlixplast.png" alt="Carlixplast"></div>
+    </div>
+    <div class="header-inner">
+      <div class="usuario-bar">
+        <span>👤 ${usuario}</span>
+        <a class="salir" href="/logout">Salir</a>
+      </div>
+      <a class="volver" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}">‹ Pedido ${orden.NumeroPedido || '—'}</a>
+      <h1>📦 Bultos</h1>
+      <div class="sub">${orden.Elemento}</div>
+    </div>
+  </header>
+  <main>
+    <div id="contenedor-bultos">${renderTarjetasBultos(bultos, pesajesPorBulto)}</div>
+  </main>
+  <script src="/sweetalert2.min.js"></script>
+  <script>${scriptActualizarBultos()}</script>
 </body>
 </html>`;
 }
@@ -926,7 +1034,9 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
 
     const ordenResult = await p.request().input('idOrden', idOrden).query(`
       SELECT ord.IdOrden, ord.Estado, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento,
-             maq.Nombre AS MaquinaNombre
+             maq.Nombre AS MaquinaNombre,
+             ord.TipoSellado, ord.Troquelado, ord.UsoPrevisto, ord.Manija, ord.ManijaColor, ord.Tula,
+             ord.TulaColor, ord.Parche, ord.Separador, ord.CierreDeslizador, ord.Perforaciones
       FROM SEL_OrdenProduccion ord
       INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
       INNER JOIN PRDMaquinas maq ON maq.Codigo = ord.Maquina
@@ -937,31 +1047,15 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
     }
     const orden = ordenResult.recordset[0];
 
-    const bultosResult = await p.request().input('idOrden', idOrden).query(`
-      SELECT b.id, b.num_bulto, b.serialPadre, b.CantidadTotal, b.estado, ISNULL(b.Golpes,0) AS Golpes, b.Potencia,
-             FORMAT(ISNULL(b.HoraFin, b.HoraInicio), 'dd/MM/yyyy HH:mm') AS Hora
+    // Los bultos producidos viven en su propia pagina (/selladora/:codigo/orden/:idOrden/bultos) --
+    // aqui solo se necesita el conteo para el enlace, ver ese route para el detalle completo.
+    const conteoBultos = await p.request().input('idOrden', idOrden).query(`
+      SELECT COUNT(*) AS Total
       FROM SEL_Bultos b
       INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
       WHERE ej.IdOrden = @idOrden
-      ORDER BY b.num_bulto ASC
     `);
-    const bultos = bultosResult.recordset.map((b, idx) => ({ ...b, numRelativo: idx + 1 }));
-
-    let pesajesPorBulto = new Map();
-    if (bultos.length > 0) {
-      const pesajesResult = await p.request().input('idOrden', idOrden).query(`
-        SELECT pe.id_bulto, pe.ConsecutivoPaquete, FORMAT(pe.FechaHora,'dd/MM/yyyy HH:mm:ss') AS Hora, pe.PesoPaqueGr
-        FROM SEL_PesajeElemento pe
-        INNER JOIN SEL_Bultos b ON b.id = pe.id_bulto
-        INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
-        WHERE ej.IdOrden = @idOrden
-        ORDER BY pe.id_bulto ASC, pe.ConsecutivoPaquete ASC
-      `);
-      for (const row of pesajesResult.recordset) {
-        if (!pesajesPorBulto.has(row.id_bulto)) pesajesPorBulto.set(row.id_bulto, []);
-        pesajesPorBulto.get(row.id_bulto).push(row);
-      }
-    }
+    const totalBultos = conteoBultos.recordset[0].Total;
 
     // Historial MP -- mismo criterio que EjecucionSelladora.vb:btnVerHistorial_Click +
     // SEL_InventarioMP.vb:MostrarHistorialMP (Elemento/Lote del ultimo bulto + LineaOriginal ancla).
@@ -1006,9 +1100,86 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
       }
     }
 
-    res.send(renderOrdenDetalle(orden, bultos, pesajesPorBulto, historial, req.session.usuario.nombre, codigo, relevo));
+    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, relevo));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
+  }
+});
+
+// Bultos (indice relativo) y sus pesajes/paquetes (SEL_PesajeElemento) de una orden -- compartida
+// entre la pagina completa de /bultos y su /bultos/fragmento (el polling de scriptActualizarBultos
+// pide solo el fragmento, para no reconstruir cabecera/estilos en cada actualizacion).
+async function obtenerBultosYPesajes(p, idOrden) {
+  const bultosResult = await p.request().input('idOrden', idOrden).query(`
+    SELECT b.id, b.num_bulto, b.serialPadre, b.CantidadTotal, b.estado, ISNULL(b.Golpes,0) AS Golpes, b.Potencia,
+           FORMAT(ISNULL(b.HoraFin, b.HoraInicio), 'dd/MM/yyyy HH:mm') AS Hora
+    FROM SEL_Bultos b
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+    WHERE ej.IdOrden = @idOrden
+    ORDER BY b.num_bulto ASC
+  `);
+  const bultos = bultosResult.recordset.map((b, idx) => ({ ...b, numRelativo: idx + 1 }));
+
+  let pesajesPorBulto = new Map();
+  if (bultos.length > 0) {
+    const pesajesResult = await p.request().input('idOrden', idOrden).query(`
+      SELECT pe.id_bulto, pe.ConsecutivoPaquete, FORMAT(pe.FechaHora,'dd/MM/yyyy HH:mm:ss') AS Hora, pe.PesoPaqueGr
+      FROM SEL_PesajeElemento pe
+      INNER JOIN SEL_Bultos b ON b.id = pe.id_bulto
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+      WHERE ej.IdOrden = @idOrden
+      ORDER BY pe.id_bulto ASC, pe.ConsecutivoPaquete ASC
+    `);
+    for (const row of pesajesResult.recordset) {
+      if (!pesajesPorBulto.has(row.id_bulto)) pesajesPorBulto.set(row.id_bulto, []);
+      pesajesPorBulto.get(row.id_bulto).push(row);
+    }
+  }
+
+  return { bultos, pesajesPorBulto };
+}
+
+// Bultos producidos de una orden puntual -- separado de /selladora/:codigo/orden/:idOrden (que ya
+// muestra relevo/peso/comandos/especificaciones/historial) porque con las columnas de
+// especificaciones agregadas esa pagina ya tenia demasiada informacion para revisar bultos de
+// paso; misma consulta de bultos/pesajes que antes vivia ahi.
+app.get('/selladora/:codigo/orden/:idOrden/bultos', requireLogin, async (req, res) => {
+  const { codigo, idOrden } = req.params;
+  try {
+    const p = await getPool();
+
+    const ordenResult = await p.request().input('idOrden', idOrden).query(`
+      SELECT ord.IdOrden, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento,
+             maq.Nombre AS MaquinaNombre
+      FROM SEL_OrdenProduccion ord
+      INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
+      INNER JOIN PRDMaquinas maq ON maq.Codigo = ord.Maquina
+      WHERE ord.IdOrden = @idOrden
+    `);
+    if (ordenResult.recordset.length === 0) {
+      return res.status(404).send(renderErrorSimple('Orden no encontrada.', `/selladora/${codigo}`));
+    }
+    const orden = ordenResult.recordset[0];
+
+    const { bultos, pesajesPorBulto } = await obtenerBultosYPesajes(p, idOrden);
+
+    res.send(renderBultosOrden(orden, bultos, pesajesPorBulto, req.session.usuario.nombre, codigo));
+  } catch (err) {
+    res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}/orden/${idOrden}`));
+  }
+});
+
+// Fragmento HTML (solo las tarjetas, sin cabecera/estilos) que el polling del cliente en /bultos
+// pide cada pocos segundos -- ver scriptActualizarBultos(). No devuelve pagina de error renderizada
+// si falla: un 500 en texto plano es suficiente, el cliente simplemente descarta ese tick y reintenta.
+app.get('/selladora/:codigo/orden/:idOrden/bultos/fragmento', requireLogin, async (req, res) => {
+  const { idOrden } = req.params;
+  try {
+    const p = await getPool();
+    const { bultos, pesajesPorBulto } = await obtenerBultosYPesajes(p, idOrden);
+    res.send(renderTarjetasBultos(bultos, pesajesPorBulto));
+  } catch (err) {
+    res.status(500).send('Error: ' + err.message);
   }
 });
 
