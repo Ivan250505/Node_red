@@ -459,11 +459,15 @@ function estilosBase() {
     .peso-estado.conectado { background: var(--verde-fondo); color: var(--verde); }
     .peso-estado.desconectado { background: var(--naranja-fondo); color: var(--naranja); }
     .peso-acciones {
-      display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; padding-top: 12px;
+      display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch; margin-top: 14px; padding-top: 12px;
       border-top: 1px solid #eef0f2;
     }
+    .separador-v { width: 1px; background: #d0d7de; align-self: stretch; }
     .btn-imprimir { background: #0078d7; }
     .btn-cierre-bulto { background: var(--naranja); }
+    .btn-residuo { background: var(--texto-suave); }
+    .btn-accion:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-accion:disabled:active { transform: none; }
     @media (max-width: 480px) {
       .ejecucion-grid { grid-template-columns: 1fr 1fr; }
       .grid { grid-template-columns: 1fr; }
@@ -682,6 +686,21 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes) {
 </html>`;
 }
 
+// Botones de residuos (Retal/Troquelado/Refilado -- columnas PRDProduccion.Retal/
+// ResiduoTroquelado/ResiduoRefilado) para la ejecucion Activa de la orden: cuales aparecen depende
+// del Tipo de la maquina (PRDMaquinas.Tipo). Por ahora solo SELLADORA esta soportada en esta app y
+// solo Retal/Troquelado tienen sentido ahi -- Refilado es de REFILADORA. Los botones no tienen
+// funcion todavia (a pedido del usuario, 24/08/2026: la logica se agrega despues), por eso van
+// deshabilitados -- que aparezcan ya deja lista la ubicacion para cuando se conecte la accion real.
+const BOTONES_RESIDUOS_POR_TIPO = {
+  SELLADORA: ['retal', 'troquelado']
+};
+const BOTONES_RESIDUOS = [
+  { clave: 'retal', label: 'Retal' },
+  { clave: 'troquelado', label: 'Troquelado' },
+  { clave: 'refilado', label: 'Refilado' }
+];
+
 // Detalle/especificaciones de una orden puntual y el historial de materia prima
 // (Serial/Referencia/Lote unicamente -- nada de cantidades ni fechas, a pedido del usuario). Los
 // bultos producidos NO viven aqui -- con las columnas de especificaciones esta pagina ya tiene
@@ -721,8 +740,19 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
       </form>`;
   }
 
-  // Peso en vivo + Imprimir etiqueta/Cierre bulto: solo tienen sentido con la orden Activa
-  // (bascula/impresora actuando sobre el bulto que se esta armando en este momento).
+  // Botones de residuos (Retal/Troquelado) van en el MISMO bloque de acciones que Imprimir
+  // etiqueta/Cierre bulto, separados por una linea vertical -- a pedido del usuario (24/08/2026),
+  // no en una caja aparte.
+  const botonesResiduosHabilitados = BOTONES_RESIDUOS_POR_TIPO[orden.MaquinaTipo] || [];
+  const botonesResiduosHTML = botonesResiduosHabilitados.length ? `
+        <span class="separador-v"></span>
+        ${BOTONES_RESIDUOS
+          .filter(b => botonesResiduosHabilitados.includes(b.clave))
+          .map(b => `<button type="button" class="btn-accion btn-residuo" disabled title="Próximamente">${b.label}</button>`)
+          .join('')}` : '';
+
+  // Peso en vivo + Imprimir etiqueta/Cierre bulto/Residuos: solo tienen sentido con la orden
+  // Activa (bascula/impresora actuando sobre el bulto que se esta armando en este momento).
   const pesoBox = activa ? `
     <div class="peso-box">
       <div class="peso-top">
@@ -735,6 +765,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
       <div class="peso-acciones">
         <button type="button" class="btn-accion btn-imprimir" onclick="enviarComando('imprimir_etiqueta', this)">🖨️ Imprimir etiqueta</button>
         <button type="button" class="btn-accion btn-cierre-bulto" onclick="enviarComando('cierre_bulto', this)">📦 Cierre bulto</button>
+        ${botonesResiduosHTML}
       </div>
     </div>` : '';
 
@@ -1034,7 +1065,7 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
 
     const ordenResult = await p.request().input('idOrden', idOrden).query(`
       SELECT ord.IdOrden, ord.Estado, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento,
-             maq.Nombre AS MaquinaNombre,
+             maq.Nombre AS MaquinaNombre, maq.Tipo AS MaquinaTipo,
              ord.TipoSellado, ord.Troquelado, ord.UsoPrevisto, ord.Manija, ord.ManijaColor, ord.Tula,
              ord.TulaColor, ord.Parche, ord.Separador, ord.CierreDeslizador, ord.Perforaciones
       FROM SEL_OrdenProduccion ord
