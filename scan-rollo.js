@@ -91,6 +91,20 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
   if (!datosOrden) throw new Error('Orden no encontrada.');
   const { elemento: nElemento, maquina: nMaquina, numeroPedido: nNumeroPedido } = datosOrden;
 
+  // FIX 24/08/2026: al Iniciar, este operario pasa a ser el "operario actual" de la maquina --
+  // ver agregar_operarioactualmaquina.sql. trg_SEL_Bultos_CierreBulto la consulta para cada bulto
+  // nuevo que crea solo (el PLC puede seguir corriendo horas sin que nadie toque esta pagina); si
+  // cambia el turno, el operario que confirme "tomar control" (ver /api/selladora/maquina/.../
+  // tomar-control) actualiza esta misma fila.
+  if (codOperario > 0) {
+    await tx.request().input('maquina', nMaquina).input('operario', codOperario).query(`
+      MERGE SEL_OperarioActualMaquina AS destino
+      USING (SELECT @maquina AS Maquina) AS origen ON destino.Maquina = origen.Maquina
+      WHEN MATCHED THEN UPDATE SET Operario = @operario, FechaHora = GETDATE()
+      WHEN NOT MATCHED THEN INSERT (Maquina, Operario, FechaHora) VALUES (@maquina, @operario, GETDATE());
+    `);
+  }
+
   const fHoy = new Date();
   const nAgno = fHoy.getFullYear();
   const nMes = fHoy.getMonth() + 1;

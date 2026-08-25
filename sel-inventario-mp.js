@@ -454,7 +454,10 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
     const nMaquina = dr.id_maquina;
     const nOperario = dr.Operario != null ? Number(dr.Operario) : 0;
     const nBolsasxGolpe = dr.BolsasxGolpe;
-    const nUnidades = dr.NumPaqu;
+    // FIX 24/08/2026: ver mismo fix en SEL_InventarioMP.vb -- Unidades = bolsas TOTALES del bulto
+    // (constante fija confirmada: 100 bolsas por paquete, no confundir con BolsasxGolpe).
+    const BOLSAS_POR_PAQUETE = 100;
+    const nUnidades = dr.NumPaqu * BOLSAS_POR_PAQUETE;
     const fHoraIni = dr.HoraInicio;
     const fHoraFin = dr.HoraFin;
     const fHoraTurno = fHoraFin || fHoraIni || new Date();

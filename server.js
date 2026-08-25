@@ -678,7 +678,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes) {
 // cada bulto y el historial de materia prima (Serial/Referencia/Lote unicamente -- nada de
 // cantidades ni fechas, a pedido del usuario). Los rollos/SEL_EjecucionOrden no aparecen aqui:
 // solo interesan los bultos.
-function renderOrdenDetalle(orden, bultos, pesajesPorBulto, historial, usuario, maquinaCodigo) {
+function renderOrdenDetalle(orden, bultos, pesajesPorBulto, historial, usuario, maquinaCodigo, relevo) {
   const tarjetas = bultos.map(b => {
     const pesajes = pesajesPorBulto.get(b.id) || [];
     const filasPesajes = pesajes.length
@@ -722,6 +722,18 @@ function renderOrdenDetalle(orden, bultos, pesajesPorBulto, historial, usuario, 
           <span>${h.Lote ?? '—'}</span>
         </div>`).join('')
     : `<div class="pesaje-vacio">Sin materia prima registrada todavía.</div>`;
+
+  // FIX 24/08/2026: aviso de relevo -- no se asume el cambio de operario solo por entrar a
+  // mirar la pagina, el operario debe confirmarlo explicitamente (ver
+  // agregar_operarioactualmaquina.sql).
+  const bloqueRelevo = relevo ? `
+    <div class="error" style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+      <span>Esta máquina la está operando <strong>${relevo.nombreOperarioActual}</strong>.</span>
+      <form method="post" action="/api/selladora/maquina/${maquinaCodigo}/tomar-control" style="width:auto;">
+        <input type="hidden" name="idOrden" value="${orden.IdOrden}">
+        <button type="submit" class="btn-accion" style="background:#b46200;">Tomar control</button>
+      </form>
+    </div>` : '';
 
   let acciones = '';
   const activa = orden.Estado === 'Activa';
@@ -776,6 +788,7 @@ function renderOrdenDetalle(orden, bultos, pesajesPorBulto, historial, usuario, 
     </div>
   </header>
   <main>
+    ${bloqueRelevo}
     ${acciones ? `<div class="orden-cola" style="margin-bottom:18px;"><div class="orden-acciones">${acciones}</div></div>` : ''}
     ${pesoBox}
     <h2 style="font-size:15px;margin:0 0 10px;">Bultos</h2>
@@ -975,9 +988,51 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
       historial = historialResult.recordset;
     }
 
-    res.send(renderOrdenDetalle(orden, bultos, pesajesPorBulto, historial, req.session.usuario.nombre, codigo));
+    // FIX 24/08/2026: si esta maquina esta Activa y el "operario actual" (ver
+    // agregar_operarioactualmaquina.sql -- lo consulta trg_SEL_Bultos_CierreBulto para cada bulto
+    // nuevo que crea solo, sin que nadie toque esta pagina) es distinto del que esta viendo la
+    // pagina ahora, se ofrece "Tomar control" -- no se asume el relevo solo por entrar a mirar.
+    let relevo = null;
+    const miOperario = req.session.usuario.codigoOperarioPRD;
+    if (orden.Estado === 'Activa' && miOperario > 0) {
+      const dtActual = await p.request().input('codigo', codigo).query(`
+        SELECT oam.Operario, op.Nombre AS NombreOperario
+        FROM SEL_OperarioActualMaquina oam
+        LEFT JOIN PRDOperarios op ON op.Codigo = oam.Operario
+        WHERE oam.Maquina = @codigo
+      `);
+      if (dtActual.recordset.length > 0 && dtActual.recordset[0].Operario !== miOperario) {
+        relevo = { nombreOperarioActual: dtActual.recordset[0].NombreOperario || 'otro operario' };
+      }
+    }
+
+    res.send(renderOrdenDetalle(orden, bultos, pesajesPorBulto, historial, req.session.usuario.nombre, codigo, relevo));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
+  }
+});
+
+// Relevo de operario (ver agregar_operarioactualmaquina.sql) -- el operario que confirma "Tomar
+// control" queda como el que trg_SEL_Bultos_CierreBulto usara de aqui en adelante para cada bulto
+// nuevo que la maquina cree sola, sin tocar SEL_EjecucionOrden ni SEL_Bultos.
+app.post('/api/selladora/maquina/:codigo/tomar-control', requireLogin, async (req, res) => {
+  const { codigo } = req.params;
+  const idOrden = req.body.idOrden;
+  const miOperario = req.session.usuario.codigoOperarioPRD;
+  if (!miOperario || miOperario <= 0) {
+    return res.status(400).send(renderErrorSimple('Su usuario no tiene un operario de planta asignado.', `/selladora/${codigo}`));
+  }
+  try {
+    const p = await getPool();
+    await p.request().input('maquina', codigo).input('operario', miOperario).query(`
+      MERGE SEL_OperarioActualMaquina AS destino
+      USING (SELECT @maquina AS Maquina) AS origen ON destino.Maquina = origen.Maquina
+      WHEN MATCHED THEN UPDATE SET Operario = @operario, FechaHora = GETDATE()
+      WHEN NOT MATCHED THEN INSERT (Maquina, Operario, FechaHora) VALUES (@maquina, @operario, GETDATE());
+    `);
+    res.redirect(`/selladora/${codigo}/orden/${idOrden}`);
+  } catch (err) {
+    res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}/orden/${idOrden}`));
   }
 });
 
