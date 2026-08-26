@@ -723,10 +723,17 @@ async function resolverContextoBultoParaHijo(db, idBulto) {
 
   // Bodega del residuo hijo: mismo criterio que la version escritorio -- toma un Detalle de
   // materia prima ya consumido en este proceso (anclado a LineaOriginal) y resuelve su bodega.
+  // FIX 26/08/2026: NO filtrar por Fecha aqui. PRDProduccionMateriaPrima.Fecha es smalldatetime y
+  // guarda la hora real de insercion (ej. 11:49:00), mientras que la Fecha reconstruida desde
+  // SEL_Bultos (agno/mes/dia) siempre cae a medianoche -- la igualdad exacta nunca coincide y la
+  // busqueda vuelve 0 filas aunque el registro exista (confirmado contra datos reales: orden 52,
+  // bulto 1, Fecha real 2026-08-24 11:49:00). Lote (MMDD) + Elemento + Linea (bulto ancla) ya es
+  // clave suficiente dentro de un mismo año -- mismo criterio que ya usa la consulta de historial
+  // de materia prima en server.js (que tampoco filtra por Fecha).
   const lineaOriginal = await obtenerLineaOriginalControlSellado(db, idOrden, lineaPadre);
   let bodegaHijo = '';
-  const dtDetalleMP = await db.request().input('fecha', sql.Date, fecha).input('lote', lote).input('elemento', elemento).input('lineaOriginal', lineaOriginal)
-    .query(`SELECT TOP 1 Detalle FROM PRDProduccionMateriaPrima WHERE Fecha = @fecha AND Lote = @lote AND Elemento = @elemento AND Linea = @lineaOriginal`);
+  const dtDetalleMP = await db.request().input('lote', lote).input('elemento', elemento).input('lineaOriginal', lineaOriginal)
+    .query(`SELECT TOP 1 Detalle FROM PRDProduccionMateriaPrima WHERE Lote = @lote AND Elemento = @elemento AND Linea = @lineaOriginal`);
   if (dtDetalleMP.recordset.length > 0) bodegaHijo = await obtenerBodegaDeRollo(db, dtDetalleMP.recordset[0].Detalle.trim());
 
   // Turno: se copia el que ya quedo asignado al padre; si no lo tiene, se resuelve por hora.
