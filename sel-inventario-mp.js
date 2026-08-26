@@ -1,7 +1,8 @@
-// Puerto deliberado (no una llamada) de Source/Produccion/SEL_InventarioMP.vb -- solo las
-// funciones que usan Iniciar/Añadir Rollo/Finalizar de EjecucionSelladora.vb (Residuos/
-// Verificar/Cerrar Definitivo quedan fuera, ver el plan). Cada funcion referencia la linea
-// original de SEL_InventarioMP.vb de la que viene.
+// Puerto deliberado (no una llamada) de Source/Produccion/SEL_InventarioMP.vb -- las funciones que
+// usan Iniciar/Añadir Rollo/Finalizar de EjecucionSelladora.vb, mas (25/08/2026) marcar el bulto
+// Activo con Retal/Troquelado (botones "Retal"/"Troquelado" en server.js). Verificar/Cerrar
+// Definitivo y la digitacion de la cantidad real del residuo siguen solo en el escritorio (Mirane).
+// Cada funcion referencia la linea original de SEL_InventarioMP.vb de la que viene.
 //
 // Todas reciben `db` como primer parametro: un pool o una transaction de `mssql`, lo que sea
 // que tenga en ese momento el caller (deben exponer `.request()`) -- así las mismas funciones
@@ -613,6 +614,195 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
   await db.request().input('idCtrl', nIdCtrl).query(`UPDATE PRDExtrusionControl SET Estado = 'Cerrado' WHERE IdExtrusionControl = @idCtrl`);
 }
 
+// Source/Produccion/SEL_InventarioMP.vb:GenerarEntradaSellado -- version Node. TIPO=35
+// ("Producción"), mismo criterio "un movimiento por dia" (Subempresa/Fecha/Tipo) que
+// generarSalidaRollo. La resolucion de numeracion (SISNumeracion, TipoMovimiento=35) se corre
+// como UN SOLO batch de SQL (en vez de reimplementar PATINDEX/SUBSTRING/FORMAT a mano en JS) --
+// mismo algoritmo exacto que ya vive en nueva produccion/trigger_entrada_bulto_cerrado.sql
+// (trg_SEL_Bultos_GenerarEntradaInventario), para no arriesgar una traduccion distinta con bugs
+// sutiles de formato.
+async function generarEntradaSellado(db, { bodega, detalle, fecha, generadoPor }) {
+  const TIPO = 35;
+
+  const dtReg = await db.request().input('detalle', detalle).query(`
+    SELECT ie.Costo, ie.UnidadMedida, p.Elemento, p.Cantidad - p.PesoCono AS Cantidad, p.Unidades
+    FROM PRDProduccion p INNER JOIN INVElementos ie ON ie.Codigo = p.Elemento
+    WHERE p.Detalle = @detalle
+  `);
+  if (dtReg.recordset.length === 0) return;
+  const reg = dtReg.recordset[0];
+
+  let tNumero;
+  const dtMov = await db.request().input('fecha', sql.Date, fecha).query(
+    `SELECT Numero FROM INVMovimientos WHERE Subempresa = ${SUBEMPRESA} AND Fecha = @fecha AND Tipo = ${TIPO}`
+  );
+  if (dtMov.recordset.length > 0) {
+    tNumero = dtMov.recordset[0].Numero;
+    await db.request().input('fecha', sql.Date, fecha).input('numero', tNumero).input('detalle', detalle).query(
+      `DELETE FROM INVMovimientosElementos WHERE Subempresa = ${SUBEMPRESA} AND Fecha = @fecha AND Tipo = ${TIPO} AND Numero = @numero AND Detalle = @detalle`
+    );
+  } else {
+    const dtNum = await db.request().input('fecha', sql.Date, fecha).query(`
+      DECLARE @Consecutivo int, @FormatoNumero varchar(50), @LineaNum int, @Concepto varchar(100), @NumeroMov varchar(20);
+      SELECT TOP 1 @Consecutivo = Consecutivo, @FormatoNumero = FormatoNumero, @LineaNum = Linea
+      FROM SISNumeracion
+      WHERE TipoMovimiento = ${TIPO} AND (Subempresa IS NULL OR Subempresa = ${SUBEMPRESA})
+        AND Estado = 'Activo' AND Concepto IS NULL AND Dependencia IS NULL
+      ORDER BY Subempresa DESC, FechaDesde;
+
+      IF @Consecutivo IS NULL
+        RAISERROR('No se encontro numeracion activa (simple) para TipoMovimiento=35.', 16, 1);
+
+      IF @FormatoNumero IS NULL OR @FormatoNumero = ''
+        SET @NumeroMov = CAST(@Consecutivo AS varchar(20));
+      ELSE
+      BEGIN
+        DECLARE @PosCero int = PATINDEX('%0%', @FormatoNumero);
+        DECLARE @FmtFecha varchar(20) = CASE WHEN @PosCero > 1 THEN LEFT(@FormatoNumero, @PosCero - 1) ELSE '' END;
+        DECLARE @FmtNum varchar(20) = CASE WHEN @PosCero > 0 THEN SUBSTRING(@FormatoNumero, @PosCero, LEN(@FormatoNumero)) ELSE @FormatoNumero END;
+        SET @NumeroMov = CASE WHEN @FmtFecha <> '' THEN FORMAT(@fecha, @FmtFecha) ELSE '' END
+                        + RIGHT(REPLICATE('0', LEN(@FmtNum)) + CAST(@Consecutivo AS varchar(20)), LEN(@FmtNum));
+      END
+
+      UPDATE SISNumeracion SET Consecutivo = Consecutivo + 1 WHERE TipoMovimiento = ${TIPO} AND Linea = @LineaNum;
+      SELECT @Concepto = Concepto FROM SISTiposMovimiento WHERE Codigo = ${TIPO};
+
+      SELECT @NumeroMov AS NumeroMov, @Concepto AS Concepto;
+    `);
+    tNumero = dtNum.recordset[0].NumeroMov;
+    const concepto = dtNum.recordset[0].Concepto;
+
+    await db.request()
+      .input('fecha', sql.Date, fecha).input('numero', tNumero).input('concepto', concepto).input('generadoPor', generadoPor)
+      .query(`
+        INSERT INTO INVMovimientos (SubEmpresa, Fecha, Tipo, Numero, Concepto, Tercero, Sucursal, GeneradoPor, Observaciones, FechaModificado, Estado)
+        VALUES (${SUBEMPRESA}, @fecha, ${TIPO}, @numero, @concepto, 0, 0, @generadoPor, 'Generado Automáticamente (Selladora)', GETDATE(), 'Registrado')
+      `);
+  }
+
+  const dtLinea = await db.request().input('fecha', sql.Date, fecha).input('numero', tNumero).query(
+    `SELECT ISNULL(MAX(Linea), 0) + 1 AS NL FROM INVMovimientosElementos WHERE Subempresa = ${SUBEMPRESA} AND Fecha = @fecha AND Tipo = ${TIPO} AND Numero = @numero`
+  );
+  const nLinea = dtLinea.recordset[0].NL;
+
+  await db.request()
+    .input('fecha', sql.Date, fecha).input('numero', tNumero).input('linea', nLinea).input('bodega', bodega)
+    .input('elemento', reg.Elemento).input('unidadMedida', reg.UnidadMedida).input('costo', reg.Costo || 0)
+    .input('cantidad', reg.Cantidad).input('unidades', reg.Unidades || 0).input('detalle', detalle)
+    .query(`
+      INSERT INTO INVMovimientosElementos (SubEmpresa, Fecha, Tipo, Numero, Linea, Bodega, Elemento, UnidadMedida, Costo, Cantidad, Unidades, Detalle)
+      VALUES (${SUBEMPRESA}, @fecha, ${TIPO}, @numero, @linea, @bodega, @elemento, @unidadMedida, @costo, @cantidad, @unidades, @detalle)
+    `);
+}
+
+// Source/Produccion/SEL_InventarioMP.vb:ResolverContextoBultoParaHijo -- info del padre necesaria
+// para crear un registro hijo (Retal/Troquelado). Devuelve null si el bulto no existe.
+async function resolverContextoBultoParaHijo(db, idBulto) {
+  const dtBulto = await db.request().input('idBulto', idBulto).query(`
+    SELECT b.agno, b.mes, b.dia, b.num_bulto, b.refsalida, b.id_maquina, b.NumeroPedido,
+      b.HoraInicio, b.HoraFin, ej.Operario, ej.IdOrden
+    FROM SEL_Bultos b
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+    WHERE b.id = @idBulto
+  `);
+  if (dtBulto.recordset.length === 0) return null;
+  const b = dtBulto.recordset[0];
+
+  const elemento = b.refsalida;
+  const fecha = new Date(b.agno, b.mes - 1, b.dia);
+  const lote = String(b.mes).padStart(2, '0') + String(b.dia).padStart(2, '0');
+  const lineaPadre = b.num_bulto;
+  const maquina = b.id_maquina;
+  const idOrden = b.IdOrden;
+  const numeroPedido = b.NumeroPedido || 0;
+  const horaInicio = b.HoraInicio || fecha;
+  const horaFinal = b.HoraFin || new Date();
+  const operario = b.Operario || 0;
+
+  const { codCliente } = await resolverClienteDestino(db, numeroPedido);
+
+  // Bodega del residuo hijo: mismo criterio que la version escritorio -- toma un Detalle de
+  // materia prima ya consumido en este proceso (anclado a LineaOriginal) y resuelve su bodega.
+  const lineaOriginal = await obtenerLineaOriginalControlSellado(db, idOrden, lineaPadre);
+  let bodegaHijo = '';
+  const dtDetalleMP = await db.request().input('fecha', sql.Date, fecha).input('lote', lote).input('elemento', elemento).input('lineaOriginal', lineaOriginal)
+    .query(`SELECT TOP 1 Detalle FROM PRDProduccionMateriaPrima WHERE Fecha = @fecha AND Lote = @lote AND Elemento = @elemento AND Linea = @lineaOriginal`);
+  if (dtDetalleMP.recordset.length > 0) bodegaHijo = await obtenerBodegaDeRollo(db, dtDetalleMP.recordset[0].Detalle.trim());
+
+  // Turno: se copia el que ya quedo asignado al padre; si no lo tiene, se resuelve por hora.
+  const dtTurnoPadre = await db.request().input('fecha', sql.Date, fecha).input('lote', lote).input('elemento', elemento).input('linea', lineaPadre)
+    .query(`SELECT TOP 1 Turno FROM PRDProduccion WHERE Fecha = @fecha AND Lote = @lote AND Elemento = @elemento AND Linea = @linea`);
+  let turnoHijo = (dtTurnoPadre.recordset.length > 0 && dtTurnoPadre.recordset[0].Turno) ? dtTurnoPadre.recordset[0].Turno : 0;
+  if (turnoHijo <= 0) turnoHijo = await resolverTurnoPorHora(db, maquina, horaInicio);
+  if (turnoHijo <= 0) {
+    throw new Error(`No se pudo determinar el Turno para el bulto ${lineaPadre} -- corrija la configuracion de turnos (TURHorariosMaquinas) antes de continuar.`);
+  }
+
+  return { elemento, fecha, lote, lineaPadre, maquina, idOrden, numeroPedido, horaInicio, horaFinal, operario, codCliente, bodegaHijo, turnoHijo };
+}
+
+// Source/Produccion/SEL_InventarioMP.vb:MarcarResiduoHijoPendiente -- llamada por el OPERARIO
+// (server.js, botones "Retal"/"Troquelado" de la orden Activa) mientras el bulto sigue Activo --
+// marca que este bulto va a tener Retal(1) o Troquelado(3), creando el registro hijo con
+// Cantidad=0 como placeholder. El digitador despues escribe la cantidad real en Mirane (escritorio
+// -- "Registro de Residuos" no tiene version Node todavia, ver el plan). Idempotente: si el hijo
+// ya existe (el operario le dio dos veces, o ya estaba marcado), no hace nada -- no se puede
+// "desmarcar" desde aca a proposito, evita borrar sin querer un registro que el digitador ya
+// esta llenando.
+async function marcarResiduoHijoPendiente(db, { idBulto, tipoResiduo, generadoPor }) {
+  const ctx = await resolverContextoBultoParaHijo(db, idBulto);
+  if (!ctx) return;
+  const { elemento, fecha, lote, lineaPadre, maquina, numeroPedido, horaInicio, horaFinal, operario, codCliente, bodegaHijo, turnoHijo } = ctx;
+
+  const tipoTexto = tipoResiduo === 1 ? 'RETAL' : 'TROQUELADO';
+  const linHijo = lineaPadre + 1000 * tipoResiduo;
+  const serial = String(fecha.getFullYear()) + String(valNumerico(lote)).padStart(6, '0') + String(linHijo).padStart(4, '0') + String(elemento).padStart(5, '0');
+
+  const dtExiste = await db.request().input('fecha', sql.Date, fecha).input('lote', lote).input('elemento', elemento).input('linea', linHijo)
+    .query(`SELECT TOP 1 Linea FROM PRDProduccion WHERE Fecha = @fecha AND Lote = @lote AND Elemento = @elemento AND Linea = @linea`);
+  if (dtExiste.recordset.length > 0) return; // ya marcado -- idempotente, no hace nada
+
+  if (!bodegaHijo) {
+    throw new Error(`No se pudo determinar la bodega para el registro hijo ${tipoTexto} -- verifique que el proceso tenga materia prima registrada.`);
+  }
+
+  await db.request()
+    .input('fecha', sql.Date, fecha).input('maquina', maquina).input('turno', turnoHijo).input('lote', lote)
+    .input('elemento', elemento).input('linea', linHijo).input('serial', serial)
+    .input('codCliente', codCliente > 0 ? codCliente : null).input('tipoTexto', tipoTexto)
+    .input('generadoPor', generadoPor).input('horaInicio', horaInicio).input('horaFinal', horaFinal)
+    .input('numeroPedido', numeroPedido > 0 ? String(numeroPedido) : null)
+    .query(`
+      INSERT INTO PRDProduccion (Fecha, Maquina, Turno, Duracion, Lote, Elemento, Linea,
+        Cantidad, PesoCono, Unidades, Detalle, ClienteProduccion, Destino,
+        Grafilado, Abierto, Servicio, Observaciones,
+        GeneradoPor, FechaModificado, HoraInicio, HoraFinal,
+        TipoPedido, NumeroPedido)
+      VALUES (@fecha, @maquina, @turno, 0, @lote, @elemento, @linea,
+        0, 0, NULL, @serial, @codCliente, 16,
+        0, 0, 0, @tipoTexto,
+        @generadoPor, GETDATE(), @horaInicio, @horaFinal,
+        4, @numeroPedido)
+    `);
+
+  // Existencia en 0 -- se corrige sola cuando el digitador escriba la cantidad real (mismo
+  // criterio que la version escritorio: GenerarResiduoHijoSellado, rama "ya existe -> actualizar").
+  const dtNuevaLinea = await db.request().input('bodega', bodegaHijo).input('elemento', elemento)
+    .query(`SELECT ISNULL(MAX(Linea),0)+1 AS NL FROM INVExistencias WHERE Bodega = @bodega AND Elemento = @elemento`);
+  const nuevaLineaInv = dtNuevaLinea.recordset[0].NL;
+  await db.request()
+    .input('bodega', bodegaHijo).input('elemento', elemento).input('linea', nuevaLineaInv).input('serial', serial)
+    .input('serie', numeroPedido > 0 ? String(numeroPedido) : null)
+    .query(`INSERT INTO INVExistencias (Bodega, Elemento, Linea, Cantidad, Unidades, Valor, Detalle, Serie) VALUES (@bodega, @elemento, @linea, 0, 0, 0, @serial, @serie)`);
+
+  await generarEntradaSellado(db, { bodega: bodegaHijo, detalle: serial, fecha, generadoPor });
+
+  if (operario > 0) {
+    await db.request().input('fecha', sql.Date, fecha).input('lote', lote).input('elemento', elemento).input('linea', linHijo).input('operario', operario)
+      .query(`INSERT INTO PRDProduccionOperarios (Fecha, Lote, Elemento, Linea, Operario) VALUES (@fecha, @lote, @elemento, @linea, @operario)`);
+  }
+}
+
 module.exports = {
   obtenerBodegaDeRollo,
   obtenerLoteRollo,
@@ -628,5 +818,8 @@ module.exports = {
   resolverDestinoOrden,
   obtenerOCrearOrdenProduccion,
   finalizarControlParcialSellado,
+  generarEntradaSellado,
+  resolverContextoBultoParaHijo,
+  marcarResiduoHijoPendiente,
   valNumerico
 };

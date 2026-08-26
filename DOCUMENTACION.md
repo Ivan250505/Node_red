@@ -21,6 +21,7 @@ App mínima en Node.js/Express para ver el estado de `SEL_Bultos` (bultos activo
 | `agregar_qr_accesos.sql` | Script SQL: agrega la columna `SISUsuarios.CodigoQR` y crea la tabla `SISAccesos`. Ejecutar una sola vez. |
 | `.env` | Configuración real (servidor de BD, puerto web, secreto de sesión). **No se sube a git.** |
 | `.env.example` | Plantilla de `.env` sin datos sensibles. |
+| `GIT.md` | Guía de Git: clonar, pull, commit, push, conflictos. |
 | `public/` | Archivos estáticos servidos tal cual (logo, librería `html5-qrcode.min.js`). |
 | `package.json` | Dependencias y script `start`. |
 

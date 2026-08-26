@@ -9,7 +9,7 @@ const { validarLogin, requireLogin } = require('./auth');
 const { buscarUsuarioPorQR, registrarEvento } = require('./accesos');
 const { consultarSerial, confirmarRollo } = require('./scan-rollo');
 const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
-const { obtenerLineaOriginalControlSellado } = require('./sel-inventario-mp');
+const { obtenerLineaOriginalControlSellado, marcarResiduoHijoPendiente } = require('./sel-inventario-mp');
 
 const dbConfig = {
   server: process.env.DB_SERVER,
@@ -626,6 +626,38 @@ function scriptComandos(idOrden, maquinaCodigo) {
   `;
 }
 
+// Botones "Retal"/"Troquelado" -- a diferencia de enviarComando() (que reenvia a Node-RED), esto
+// es una escritura DIRECTA a la base de datos (marca el bulto Activo con ese tipo de residuo,
+// SEL_InventarioMP.vb:MarcarResiduoHijoPendiente), no toca Node-RED ni la máquina física. Se
+// deshabilita el boton apenas se marca con exito (queda gris, "Marcado") -- MarcarResiduoHijoPendiente
+// es idempotente igual, pero evita al usuario apretar el mismo boton varias veces sin necesidad.
+function scriptResiduos(idOrden) {
+  return `
+    function marcarResiduo(tipo, boton) {
+      boton.disabled = true;
+      fetch('/api/selladora/orden/${idOrden}/marcar-residuo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tipo: tipo })
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.ok) {
+            boton.textContent = 'Marcado';
+            Swal.fire({ icon: 'success', title: 'Bulto marcado', timer: 1500, showConfirmButton: false });
+          } else {
+            boton.disabled = false;
+            Swal.fire({ icon: 'error', title: 'Error', text: data.error || 'No se pudo marcar el residuo.', confirmButtonColor: '#71bf44' });
+          }
+        })
+        .catch(function(err) {
+          boton.disabled = false;
+          Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo marcar el residuo: ' + err.message, confirmButtonColor: '#71bf44' });
+        });
+    }
+  `;
+}
+
 // Script compartido por renderPage y renderOrdenDetalle -- confirmacion antes de Finalizar.
 function scriptConfirmarFinalizar() {
   return `
@@ -742,13 +774,16 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
 
   // Botones de residuos (Retal/Troquelado) van en el MISMO bloque de acciones que Imprimir
   // etiqueta/Cierre bulto, separados por una linea vertical -- a pedido del usuario (24/08/2026),
-  // no en una caja aparte.
+  // no en una caja aparte. FIX 25/08/2026: conectados -- marcan el bulto Activo con ese tipo de
+  // residuo (SEL_InventarioMP.vb:MarcarResiduoHijoPendiente vía sel-inventario-mp.js), el
+  // digitador despues escribe la cantidad real en Mirane (escritorio). "Refilado" queda sin
+  // conectar (no aplica a SELLADORA, BOTONES_RESIDUOS_POR_TIPO no lo habilita para este tipo).
   const botonesResiduosHabilitados = BOTONES_RESIDUOS_POR_TIPO[orden.MaquinaTipo] || [];
   const botonesResiduosHTML = botonesResiduosHabilitados.length ? `
         <span class="separador-v"></span>
         ${BOTONES_RESIDUOS
           .filter(b => botonesResiduosHabilitados.includes(b.clave))
-          .map(b => `<button type="button" class="btn-accion btn-residuo" disabled title="Próximamente">${b.label}</button>`)
+          .map(b => `<button type="button" class="btn-accion btn-residuo" onclick="marcarResiduo('${b.clave}', this)">${b.label}</button>`)
           .join('')}` : '';
 
   // Peso en vivo + Imprimir etiqueta/Cierre bulto/Residuos: solo tienen sentido con la orden
@@ -828,7 +863,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptConfirmarFinalizar()}</script>
-  ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo)}</script><script>${scriptPesoEnVivo()}</script>` : ''}
+  ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo)}</script><script>${scriptResiduos(orden.IdOrden)}</script><script>${scriptPesoEnVivo()}</script>` : ''}
 </body>
 </html>`;
 }
@@ -1226,6 +1261,15 @@ app.post('/api/selladora/maquina/:codigo/tomar-control', requireLogin, async (re
   }
   try {
     const p = await getPool();
+    // FIX 24/08/2026: aviso explicito en vez de un no-op en silencio -- si por algun motivo la
+    // pagina quedo desactualizada y el aviso de relevo seguia visible aunque ya es el operario
+    // actual, se le avisa en vez de dejarlo pensar que no paso nada.
+    const dtActual = await p.request().input('maquina', codigo).query(`
+      SELECT Operario FROM SEL_OperarioActualMaquina WHERE Maquina = @maquina
+    `);
+    if (dtActual.recordset.length > 0 && dtActual.recordset[0].Operario === miOperario) {
+      return res.status(400).send(renderErrorSimple('Usted ya es el operario actual de esta máquina.', `/selladora/${codigo}/orden/${idOrden}`));
+    }
     await p.request().input('maquina', codigo).input('operario', miOperario).query(`
       MERGE SEL_OperarioActualMaquina AS destino
       USING (SELECT @maquina AS Maquina) AS origen ON destino.Maquina = origen.Maquina
@@ -1499,6 +1543,40 @@ app.post('/api/comando', requireLogin, async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(502).json({ ok: false, error: 'No se pudo contactar a Node-RED: ' + err.message });
+  }
+});
+
+// Botones "Retal"/"Troquelado" -- a diferencia de /api/comando, esto NO pasa por Node-RED: es una
+// escritura directa a la BD que marca el bulto ACTIVO de la orden con ese tipo de residuo
+// (SEL_InventarioMP.vb:MarcarResiduoHijoPendiente). El digitador despues escribe la cantidad real
+// en Mirane (escritorio) -- esta app solo marca, no captura cantidades.
+const TIPOS_RESIDUO_VALIDOS = { retal: 1, troquelado: 3 };
+
+app.post('/api/selladora/orden/:idOrden/marcar-residuo', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  const tipoResiduo = TIPOS_RESIDUO_VALIDOS[req.body.tipo];
+  if (!tipoResiduo) {
+    return res.status(400).json({ ok: false, error: 'Tipo de residuo inválido.' });
+  }
+  try {
+    const p = await getPool();
+    const dtBultoActivo = await p.request().input('idOrden', idOrden).query(`
+      SELECT TOP 1 b.id FROM SEL_Bultos b
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+      WHERE ej.IdOrden = @idOrden AND b.estado = 'Activo'
+      ORDER BY b.id DESC
+    `);
+    if (dtBultoActivo.recordset.length === 0) {
+      return res.status(400).json({ ok: false, error: 'Esta orden no tiene ningún bulto activo en este momento.' });
+    }
+    await marcarResiduoHijoPendiente(p, {
+      idBulto: dtBultoActivo.recordset[0].id,
+      tipoResiduo,
+      generadoPor: req.session.usuario.generadoPor
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
   }
 });
 
