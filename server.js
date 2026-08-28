@@ -9,7 +9,7 @@ const { validarLogin, requireLogin } = require('./auth');
 const { buscarUsuarioPorQR, registrarEvento } = require('./accesos');
 const { consultarSerial, confirmarRollo } = require('./scan-rollo');
 const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
-const { obtenerLineaOriginalControlSellado, marcarResiduoHijoPendiente } = require('./sel-inventario-mp');
+const { obtenerLineaOriginalControlSellado } = require('./sel-inventario-mp');
 
 const dbConfig = {
   server: process.env.DB_SERVER,
@@ -466,8 +466,28 @@ function estilosBase() {
     .btn-imprimir { background: #0078d7; }
     .btn-cierre-bulto { background: var(--naranja); }
     .btn-residuo { background: var(--texto-suave); }
+    .btn-calidad { background: var(--verde); }
+    .btn-no-conforme { background: #c00000; }
     .btn-accion:disabled { opacity: 0.5; cursor: not-allowed; }
     .btn-accion:disabled:active { transform: none; }
+    .calidad-apartado { text-align: left; margin-bottom: 16px; }
+    .calidad-apartado:last-child { margin-bottom: 0; }
+    .calidad-apartado-titulo {
+      font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+      color: var(--azul-osc); background: var(--gris-fondo); padding: 6px 10px; border-radius: 6px;
+      margin-bottom: 4px;
+    }
+    .calidad-pregunta {
+      text-align: left; padding: 12px 4px; border-bottom: 1px solid #eef0f2;
+    }
+    .calidad-pregunta:last-child { border-bottom: none; }
+    .calidad-titulo { font-size: 14px; font-weight: 600; color: var(--texto); margin-bottom: 8px; }
+    .calidad-opciones { display: flex; gap: 18px; }
+    .calidad-opcion {
+      display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: normal;
+      cursor: pointer;
+    }
+    .calidad-opcion input { width: auto; margin: 0; }
     @media (max-width: 480px) {
       .ejecucion-grid { grid-template-columns: 1fr 1fr; }
       .grid { grid-template-columns: 1fr; }
@@ -598,17 +618,83 @@ function scriptPesoEnVivo() {
   `;
 }
 
-// Botones "Imprimir etiqueta" / "Cierre bulto" -- publican en /api/comando (este servidor), que
-// reenvia a Node-RED. idOrden/maquinaCodigo se cierran sobre el scope de la funcion (valores fijos
-// de esta pagina), asi los botones no necesitan mas que el nombre del comando.
-function scriptComandos(idOrden, maquinaCodigo) {
+// Apartados/preguntas del modal de Calidad (a pedido del usuario, 26/08/2026) -- que apartados y
+// que preguntas aparecen depende de datos reales de la orden:
+// - Pelicula: siempre, solo "Color de la película" (apartado propio).
+// - Deslizamiento: siempre, solo "Deslizamiento (caras de película separadas)" (apartado propio).
+// - Impresion: apartado propio, solo si la orden lleva impresion (ver TieneImpresion,
+//   INVElementosReferencia Categoria=12) -- "Nombre de la impresion vs programa" e "Impresion
+//   centrada".
+// - Sellado: siempre (todas las ordenes).
+// - Accesorios: solo si Manija, Tula, Parche, CierreDeslizador, CierreHermetico o CintaAdhesiva
+//   vale 'Sí' (no alcanza con que no sea NULL -- estas columnas casi siempre traen 'Sí'/'No').
+// - Troquelado/Perforaciones: aparece si hay Troquelado (columna != 'SinTroquelado') o
+//   Perforaciones (!= 0/NULL). Con solo Troquelado van 2 preguntas (Posicion correcta/Estado de
+//   corte); si hay Perforaciones (con o sin Troquelado) se agrega la 3ra ("No. Perforaciones vs
+//   programa") -- por eso alcanza con revisar tienePerforaciones para decidir si van 2 o 3.
+function construirApartadosCalidad({ tieneImpresion, tieneAccesorios, tieneTroquelado, tienePerforaciones }) {
+  const apartados = [
+    { titulo: 'Película', preguntas: [{ clave: 'color_pelicula', titulo: 'Color de la película' }] },
+    { titulo: 'Deslizamiento', preguntas: [{ clave: 'deslizamiento', titulo: 'Deslizamiento (caras de película separadas)' }] }
+  ];
+
+  if (tieneImpresion) {
+    apartados.push({
+      titulo: 'Impresión',
+      preguntas: [
+        { clave: 'impresion_nombre_programa', titulo: 'Nombre de la impresión vs programa' },
+        { clave: 'impresion_centrada', titulo: 'Impresión centrada' }
+      ]
+    });
+  }
+
+  apartados.push({
+    titulo: 'Sellado',
+    preguntas: [
+      { clave: 'sellado_fisuras', titulo: 'Fisuras' },
+      { clave: 'sellado_resistencia', titulo: 'Resistencia (prueba de elongación e impacto)' }
+    ]
+  });
+
+  if (tieneAccesorios) {
+    apartados.push({
+      titulo: 'Accesorios',
+      preguntas: [
+        { clave: 'accesorios_color', titulo: 'Color vs programa' },
+        { clave: 'accesorios_resistencia', titulo: 'Resistencia / Adhesión' }
+      ]
+    });
+  }
+
+  if (tieneTroquelado || tienePerforaciones) {
+    const preguntasTroquelado = [
+      { clave: 'troquelado_posicion', titulo: 'Posición correcta' },
+      { clave: 'troquelado_corte', titulo: 'Estado de corte' }
+    ];
+    if (tienePerforaciones) {
+      preguntasTroquelado.push({ clave: 'perforaciones_cantidad', titulo: 'No. Perforaciones vs programa' });
+    }
+    apartados.push({ titulo: 'Troquelado/Perforaciones', preguntas: preguntasTroquelado });
+  }
+
+  return apartados;
+}
+
+// Botones "Imprimir etiqueta" / "Cierre bulto" / "Retal" / "Troquelado" -- publican en
+// /api/comando (este servidor), que reenvia a Node-RED. idOrden/maquinaCodigo se cierran sobre el
+// scope de la funcion (valores fijos de esta pagina), asi los botones no necesitan mas que el
+// nombre del comando. `datos` es opcional -- lo usa el modal de Calidad para mandar las
+// respuestas junto con el comando (ver abrirCalidad() mas abajo). `calidadFlags` decide que
+// apartados/preguntas de Calidad aplican para esta orden, ver construirApartadosCalidad().
+function scriptComandos(idOrden, maquinaCodigo, calidadFlags) {
+  const apartadosCalidad = construirApartadosCalidad(calidadFlags);
   return `
-    function enviarComando(comando, boton) {
-      boton.disabled = true;
+    function enviarComando(comando, boton, datos) {
+      if (boton) boton.disabled = true;
       fetch('/api/comando', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ comando: comando, idOrden: ${JSON.stringify(idOrden)}, maquinaCodigo: ${jsString(maquinaCodigo)} })
+        body: JSON.stringify({ comando: comando, idOrden: ${JSON.stringify(idOrden)}, maquinaCodigo: ${jsString(maquinaCodigo)}, datos: datos })
       })
         .then(function(r) { return r.json(); })
         .then(function(data) {
@@ -621,39 +707,81 @@ function scriptComandos(idOrden, maquinaCodigo) {
         .catch(function(err) {
           Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo enviar el comando: ' + err.message, confirmButtonColor: '#71bf44' });
         })
-        .finally(function() { boton.disabled = false; });
+        .finally(function() { if (boton) boton.disabled = false; });
     }
-  `;
-}
 
-// Botones "Retal"/"Troquelado" -- a diferencia de enviarComando() (que reenvia a Node-RED), esto
-// es una escritura DIRECTA a la base de datos (marca el bulto Activo con ese tipo de residuo,
-// SEL_InventarioMP.vb:MarcarResiduoHijoPendiente), no toca Node-RED ni la máquina física. Se
-// deshabilita el boton apenas se marca con exito (queda gris, "Marcado") -- MarcarResiduoHijoPendiente
-// es idempotente igual, pero evita al usuario apretar el mismo boton varias veces sin necesidad.
-function scriptResiduos(idOrden) {
-  return `
-    function marcarResiduo(tipo, boton) {
-      boton.disabled = true;
-      fetch('/api/selladora/orden/${idOrden}/marcar-residuo', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tipo: tipo })
-      })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-          if (data.ok) {
-            boton.textContent = 'Marcado';
-            Swal.fire({ icon: 'success', title: 'Bulto marcado', timer: 1500, showConfirmButton: false });
-          } else {
-            boton.disabled = false;
-            Swal.fire({ icon: 'error', title: 'Error', text: data.error || 'No se pudo marcar el residuo.', confirmButtonColor: '#71bf44' });
+    // Apartado de Calidad: pantalla emergente con las preguntas agrupadas por apartado (Pelicula,
+    // Sellado, Accesorios, Troquelado/Perforaciones -- ver construirApartadosCalidad() en
+    // server.js, que decide cuales apartados/preguntas aplican segun los datos reales de esta
+    // orden). Cada pregunta es Conforme/No conforme via checkbox (los dos checkboxes de una misma
+    // pregunta son mutuamente excluyentes -- marcar uno desmarca el otro). No deja confirmar si
+    // falta alguna respuesta. Publica comando 'calidad' con TODAS las respuestas (de todos los
+    // apartados) en 'datos', mismo mecanismo que los demas botones.
+    var APARTADOS_CALIDAD = ${JSON.stringify(apartadosCalidad)};
+
+    function abrirCalidad() {
+      var html = APARTADOS_CALIDAD.map(function(ap) {
+        var preguntasHtml = ap.preguntas.map(function(p) {
+          return '<div class="calidad-pregunta">' +
+            '<div class="calidad-titulo">' + p.titulo + '</div>' +
+            '<div class="calidad-opciones">' +
+              '<label class="calidad-opcion"><input type="checkbox" name="' + p.clave + '" value="conforme"> Conforme</label>' +
+              '<label class="calidad-opcion"><input type="checkbox" name="' + p.clave + '" value="no_conforme"> No conforme</label>' +
+            '</div>' +
+          '</div>';
+        }).join('');
+        return '<div class="calidad-apartado">' +
+          '<div class="calidad-apartado-titulo">' + ap.titulo + '</div>' +
+          preguntasHtml +
+        '</div>';
+      }).join('');
+
+      Swal.fire({
+        title: 'Calidad',
+        html: html,
+        width: 520,
+        confirmButtonText: 'Guardar',
+        confirmButtonColor: '#71bf44',
+        showCancelButton: true,
+        cancelButtonText: 'Cancelar',
+        cancelButtonColor: '#c0392b',
+        focusConfirm: false,
+        didOpen: function() {
+          var contenedor = Swal.getHtmlContainer();
+          APARTADOS_CALIDAD.forEach(function(ap) {
+            ap.preguntas.forEach(function(p) {
+              var checks = contenedor.querySelectorAll('input[name="' + p.clave + '"]');
+              checks.forEach(function(actual) {
+                actual.addEventListener('change', function() {
+                  if (actual.checked) {
+                    checks.forEach(function(otro) { if (otro !== actual) otro.checked = false; });
+                  }
+                });
+              });
+            });
+          });
+        },
+        preConfirm: function() {
+          var contenedor = Swal.getHtmlContainer();
+          var respuestas = {};
+          var faltantes = [];
+          APARTADOS_CALIDAD.forEach(function(ap) {
+            ap.preguntas.forEach(function(p) {
+              var marcado = contenedor.querySelector('input[name="' + p.clave + '"]:checked');
+              if (!marcado) faltantes.push(p.titulo);
+              else respuestas[p.clave] = marcado.value;
+            });
+          });
+          if (faltantes.length > 0) {
+            Swal.showValidationMessage('Falta responder: ' + faltantes.join(', '));
+            return false;
           }
-        })
-        .catch(function(err) {
-          boton.disabled = false;
-          Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo marcar el residuo: ' + err.message, confirmButtonColor: '#71bf44' });
-        });
+          return respuestas;
+        }
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        enviarComando('calidad', null, resultado.value);
+      });
     }
   `;
 }
@@ -721,9 +849,11 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes) {
 // Botones de residuos (Retal/Troquelado/Refilado -- columnas PRDProduccion.Retal/
 // ResiduoTroquelado/ResiduoRefilado) para la ejecucion Activa de la orden: cuales aparecen depende
 // del Tipo de la maquina (PRDMaquinas.Tipo). Por ahora solo SELLADORA esta soportada en esta app y
-// solo Retal/Troquelado tienen sentido ahi -- Refilado es de REFILADORA. Los botones no tienen
-// funcion todavia (a pedido del usuario, 24/08/2026: la logica se agrega despues), por eso van
-// deshabilitados -- que aparezcan ya deja lista la ubicacion para cuando se conecte la accion real.
+// solo Retal/Troquelado tienen sentido ahi -- Refilado es de REFILADORA. FIX 26/08/2026: este
+// servidor ya NO escribe nada en la BD para estos botones -- publican 'residuo:retal'/
+// 'residuo:troquelado' en /api/comando (mismo mecanismo que Imprimir etiqueta/Cierre bulto,
+// fire-and-forget hacia Node-RED, ver enviarComando() en scriptComandos()). Toda la logica de
+// insertar el registro hijo vive ahora en Node-RED, no aqui.
 const BOTONES_RESIDUOS_POR_TIPO = {
   SELLADORA: ['retal', 'troquelado']
 };
@@ -774,16 +904,16 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
 
   // Botones de residuos (Retal/Troquelado) van en el MISMO bloque de acciones que Imprimir
   // etiqueta/Cierre bulto, separados por una linea vertical -- a pedido del usuario (24/08/2026),
-  // no en una caja aparte. FIX 25/08/2026: conectados -- marcan el bulto Activo con ese tipo de
-  // residuo (SEL_InventarioMP.vb:MarcarResiduoHijoPendiente vía sel-inventario-mp.js), el
-  // digitador despues escribe la cantidad real en Mirane (escritorio). "Refilado" queda sin
-  // conectar (no aplica a SELLADORA, BOTONES_RESIDUOS_POR_TIPO no lo habilita para este tipo).
+  // no en una caja aparte. FIX 26/08/2026: usan el mismo enviarComando()/POST /api/comando que
+  // Imprimir etiqueta/Cierre bulto (publican 'residuo:retal' o 'residuo:troquelado' para que
+  // Node-RED los lea) -- ya no hacen ninguna escritura directa en esta BD. "Refilado" queda sin
+  // boton (no aplica a SELLADORA, BOTONES_RESIDUOS_POR_TIPO no lo habilita para este tipo).
   const botonesResiduosHabilitados = BOTONES_RESIDUOS_POR_TIPO[orden.MaquinaTipo] || [];
   const botonesResiduosHTML = botonesResiduosHabilitados.length ? `
         <span class="separador-v"></span>
         ${BOTONES_RESIDUOS
           .filter(b => botonesResiduosHabilitados.includes(b.clave))
-          .map(b => `<button type="button" class="btn-accion btn-residuo" onclick="marcarResiduo('${b.clave}', this)">${b.label}</button>`)
+          .map(b => `<button type="button" class="btn-accion btn-residuo" onclick="enviarComando('${b.clave}', this)">${b.label}</button>`)
           .join('')}` : '';
 
   // Peso en vivo + Imprimir etiqueta/Cierre bulto/Residuos: solo tienen sentido con la orden
@@ -801,11 +931,30 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
         <button type="button" class="btn-accion btn-imprimir" onclick="enviarComando('imprimir_etiqueta', this)">🖨️ Imprimir etiqueta</button>
         <button type="button" class="btn-accion btn-cierre-bulto" onclick="enviarComando('cierre_bulto', this)">📦 Cierre bulto</button>
         ${botonesResiduosHTML}
+        <span class="separador-v"></span>
+        <button type="button" class="btn-accion btn-calidad" onclick="abrirCalidad()">✅ Calidad</button>
+        <span class="separador-v"></span>
+        <button type="button" class="btn-accion btn-no-conforme" onclick="enviarComando('no_conforme', this)">🚫 Salida no conforme</button>
       </div>
     </div>` : '';
 
   // Especificaciones del elemento pedido para esta orden -- campos de SEL_OrdenProduccion, a
-  // pedido del usuario (24/08/2026) para no tener que ir a Mirane a consultarlos.
+  // pedido del usuario (24/08/2026) para no tener que ir a Mirane a consultarlos. "Separador" se
+  // quito (26/08/2026, esa columna va a eliminarse). "Lleva impresion" se resuelve por
+  // INVElementosReferencia Categoria=12 (mismo criterio que Referencia.vb:175, ver TieneImpresion
+  // en la consulta de arriba) -- de esto tambien depende si la pregunta "Impresion" aparece en el
+  // modal de Calidad (ver scriptComandos).
+  const tieneImpresion = orden.TieneImpresion === 1;
+
+  // Condiciones que deciden que apartados/preguntas de Calidad aplican -- ver
+  // construirApartadosCalidad(). "Sí" exacto para accesorios (no alcanza con no-NULL, ver
+  // conversacion 26/08/2026); Troquelado != 'SinTroquelado'; Perforaciones != 0/NULL.
+  const tieneAccesorios = ['Manija', 'Tula', 'Parche', 'CierreDeslizador', 'CierreHermetico', 'CintaAdhesiva']
+    .some(campo => orden[campo] === 'Sí');
+  const tieneTroquelado = !!orden.Troquelado && orden.Troquelado !== 'SinTroquelado';
+  const tienePerforaciones = orden.Perforaciones != null && Number(orden.Perforaciones) !== 0;
+  const calidadFlags = { tieneImpresion, tieneAccesorios, tieneTroquelado, tienePerforaciones };
+
   const especificaciones = [
     ['Tipo de sellado', orden.TipoSellado],
     ['Troquelado', orden.Troquelado],
@@ -815,9 +964,9 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     ['Tula', orden.Tula],
     ['Color tula', orden.TulaColor],
     ['Parche', orden.Parche],
-    ['Separador', orden.Separador],
     ['Cierre deslizador', orden.CierreDeslizador],
-    ['Perforaciones', orden.Perforaciones]
+    ['Perforaciones', orden.Perforaciones],
+    ['Lleva impresión', tieneImpresion ? (orden.TipoImpresionDescripcion || 'Sí') : 'No']
   ].map(([label, valor]) => `<div><span class="label">${label}</span><span class="valor">${valor ?? '—'}</span></div>`).join('');
 
   return `<!DOCTYPE html>
@@ -863,7 +1012,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptConfirmarFinalizar()}</script>
-  ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo)}</script><script>${scriptResiduos(orden.IdOrden)}</script><script>${scriptPesoEnVivo()}</script>` : ''}
+  ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo, calidadFlags)}</script><script>${scriptPesoEnVivo()}</script>` : ''}
 </body>
 </html>`;
 }
@@ -1102,10 +1251,16 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
       SELECT ord.IdOrden, ord.Estado, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento,
              maq.Nombre AS MaquinaNombre, maq.Tipo AS MaquinaTipo,
              ord.TipoSellado, ord.Troquelado, ord.UsoPrevisto, ord.Manija, ord.ManijaColor, ord.Tula,
-             ord.TulaColor, ord.Parche, ord.Separador, ord.CierreDeslizador, ord.Perforaciones
+             ord.TulaColor, ord.Parche, ord.CierreDeslizador, ord.Perforaciones,
+             ord.CierreHermetico, ord.CintaAdhesiva,
+             CASE WHEN er12.Valor IS NOT NULL THEN 1 ELSE 0 END AS TieneImpresion,
+             ti.Descripcion AS TipoImpresionDescripcion
       FROM SEL_OrdenProduccion ord
       INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
       INNER JOIN PRDMaquinas maq ON maq.Codigo = ord.Maquina
+      LEFT JOIN INVElementosReferencia er12 ON er12.Elemento = ord.Elemento AND er12.Categoria = 12
+      LEFT JOIN INVElementosReferencia er13 ON er13.Elemento = ord.Elemento AND er13.Categoria = 13
+      LEFT JOIN INVReferencia ti ON ti.Categoria = 13 AND ti.Codigo = er13.Valor
       WHERE ord.IdOrden = @idOrden
     `);
     if (ordenResult.recordset.length === 0) {
@@ -1522,14 +1677,20 @@ app.post('/api/selladora/orden/:idOrden/rollo', requireLogin, async (req, res) =
   }
 });
 
-// Botones "Imprimir etiqueta" / "Cierre bulto" de la pagina de Informacion (solo visibles con la
-// orden Activa, ver renderOrdenDetalle) -- reenvia el comando a Node-RED via enviarComandoANodeRed().
-// El idOrden/maquinaCodigo vienen del propio navegador (ya los tiene la pagina renderizada), no se
+// Botones "Imprimir etiqueta" / "Cierre bulto" / "Retal" / "Troquelado" / "Refilado" / "Calidad" /
+// "Salida no conforme" de la pagina de Informacion (solo visibles con la orden Activa, ver
+// renderOrdenDetalle) -- reenvia el comando a Node-RED via enviarComandoANodeRed(). El
+// idOrden/maquinaCodigo vienen del propio navegador (ya los tiene la pagina renderizada), no se
 // vuelven a consultar en BD: esto solo dispara la accion en Node-RED, no toca la BD directamente.
-const COMANDOS_VALIDOS = new Set(['imprimir_etiqueta', 'cierre_bulto']);
+// `datos` es opcional -- lo usa 'calidad' para mandar las respuestas (Conforme/No conforme) del
+// formulario, ver abrirCalidad() en scriptComandos(). FIX 26/08/2026: los comandos de residuo van
+// sin prefijo ('retal'/'troquelado'/'refilado', no 'residuo:retal').
+const COMANDOS_VALIDOS = new Set([
+  'imprimir_etiqueta', 'cierre_bulto', 'retal', 'troquelado', 'refilado', 'calidad', 'no_conforme'
+]);
 
 app.post('/api/comando', requireLogin, async (req, res) => {
-  const { comando, idOrden, maquinaCodigo } = req.body;
+  const { comando, idOrden, maquinaCodigo, datos } = req.body;
   if (!COMANDOS_VALIDOS.has(comando)) {
     return res.status(400).json({ ok: false, error: 'Comando inválido.' });
   }
@@ -1538,45 +1699,12 @@ app.post('/api/comando', requireLogin, async (req, res) => {
       comando,
       idOrden: Number(idOrden),
       maquinaCodigo,
-      usuario: req.session.usuario.codigo
+      usuario: req.session.usuario.codigo,
+      datos: datos || null
     });
     res.json({ ok: true });
   } catch (err) {
     res.status(502).json({ ok: false, error: 'No se pudo contactar a Node-RED: ' + err.message });
-  }
-});
-
-// Botones "Retal"/"Troquelado" -- a diferencia de /api/comando, esto NO pasa por Node-RED: es una
-// escritura directa a la BD que marca el bulto ACTIVO de la orden con ese tipo de residuo
-// (SEL_InventarioMP.vb:MarcarResiduoHijoPendiente). El digitador despues escribe la cantidad real
-// en Mirane (escritorio) -- esta app solo marca, no captura cantidades.
-const TIPOS_RESIDUO_VALIDOS = { retal: 1, troquelado: 3 };
-
-app.post('/api/selladora/orden/:idOrden/marcar-residuo', requireLogin, async (req, res) => {
-  const idOrden = Number(req.params.idOrden);
-  const tipoResiduo = TIPOS_RESIDUO_VALIDOS[req.body.tipo];
-  if (!tipoResiduo) {
-    return res.status(400).json({ ok: false, error: 'Tipo de residuo inválido.' });
-  }
-  try {
-    const p = await getPool();
-    const dtBultoActivo = await p.request().input('idOrden', idOrden).query(`
-      SELECT TOP 1 b.id FROM SEL_Bultos b
-      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
-      WHERE ej.IdOrden = @idOrden AND b.estado = 'Activo'
-      ORDER BY b.id DESC
-    `);
-    if (dtBultoActivo.recordset.length === 0) {
-      return res.status(400).json({ ok: false, error: 'Esta orden no tiene ningún bulto activo en este momento.' });
-    }
-    await marcarResiduoHijoPendiente(p, {
-      idBulto: dtBultoActivo.recordset[0].id,
-      tipoResiduo,
-      generadoPor: req.session.usuario.generadoPor
-    });
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(400).json({ ok: false, error: err.message });
   }
 });
 
