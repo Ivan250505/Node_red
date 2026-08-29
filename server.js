@@ -452,18 +452,20 @@ function estilosBase() {
       background: white; border-radius: 14px; padding: 16px 18px; margin-bottom: 18px;
       box-shadow: 0 1px 4px rgba(0,0,0,0.08);
     }
-    .peso-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .peso-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; }
     .peso-valor { font-size: 30px; font-weight: 700; color: var(--azul-osc); }
     .peso-valor .unidad { font-size: 15px; font-weight: 600; color: var(--texto-suave); margin-left: 4px; }
     .peso-estado { font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; }
     .peso-estado.conectado { background: var(--verde-fondo); color: var(--verde); }
     .peso-estado.desconectado { background: var(--naranja-fondo); color: var(--naranja); }
-    .peso-acciones {
-      display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch; margin-top: 14px; padding-top: 12px;
-      border-top: 1px solid #eef0f2;
+    .botones-fila {
+      display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch;
     }
     .separador-v { width: 1px; background: #d0d7de; align-self: stretch; }
-    .btn-imprimir { background: #0078d7; }
+    .btn-imprimir {
+      background: #0078d7; min-height: 80px; width: 100%;
+      display: flex; align-items: center; justify-content: center;
+    }
     .btn-cierre-bulto { background: var(--naranja); }
     .btn-residuo { background: var(--texto-suave); }
     .btn-calidad { background: var(--verde); }
@@ -614,6 +616,33 @@ function scriptPesoEnVivo() {
         };
       }
       conectar();
+    })();
+  `;
+}
+
+// Resumen del bulto Activo (paquetes pesados + peso acumulado) -- a pedido del usuario
+// (27/08/2026), se actualiza solo cada 4s pidiendo /resumen-bulto-activo (no viene por el
+// websocket de peso: ese es la lectura instantanea de la bascula, esto es la suma acumulada de
+// los paquetes ya registrados en SEL_PesajeElemento para el bulto Activo).
+function scriptResumenBultoActivo(idOrden, maquinaCodigo) {
+  return `
+    (function() {
+      var elPaquetes = document.getElementById('resumen-paquetes');
+      var elPeso = document.getElementById('resumen-peso-acumulado');
+      if (!elPaquetes || !elPeso) return;
+
+      async function actualizar() {
+        try {
+          const resp = await fetch('/selladora/' + ${jsString(maquinaCodigo)} + '/orden/' + ${JSON.stringify(idOrden)} + '/resumen-bulto-activo');
+          if (!resp.ok) return;
+          const datos = await resp.json();
+          if (!datos.ok) return;
+          elPaquetes.textContent = datos.paquetes;
+          elPeso.textContent = datos.pesoTotalGr;
+        } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
+      }
+      actualizar();
+      setInterval(actualizar, 4000);
     })();
   `;
 }
@@ -918,6 +947,8 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
 
   // Peso en vivo + Imprimir etiqueta/Cierre bulto/Residuos: solo tienen sentido con la orden
   // Activa (bascula/impresora actuando sobre el bulto que se esta armando en este momento).
+  // Peso en vivo + resumen del bulto actual (paquetes/acumulado) van juntos, uno al lado del otro
+  // (a pedido del usuario, 27/08/2026) -- ya no comparten caja con los botones de accion.
   const pesoBox = activa ? `
     <div class="peso-box">
       <div class="peso-top">
@@ -925,10 +956,30 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
           <div class="label">Peso en vivo (báscula)</div>
           <div class="peso-valor"><span id="peso-numero">—</span><span class="unidad">kg</span></div>
         </div>
+        <div>
+          <div class="label">Paquetes bulto actual</div>
+          <div class="peso-valor"><span id="resumen-paquetes">—</span></div>
+        </div>
+        <div>
+          <div class="label">Peso acumulado</div>
+          <div class="peso-valor"><span id="resumen-peso-acumulado">—</span><span class="unidad">g</span></div>
+        </div>
         <span class="peso-estado desconectado" id="peso-estado">Conectando…</span>
       </div>
-      <div class="peso-acciones">
-        <button type="button" class="btn-accion btn-imprimir" onclick="enviarComando('imprimir_etiqueta', this)">🖨️ Imprimir etiqueta</button>
+    </div>` : '';
+
+  // Imprimir etiqueta en su propia caja, independiente del resto de acciones (a pedido del
+  // usuario, 27/08/2026).
+  const imprimirBox = activa ? `
+    <div class="peso-box">
+      <button type="button" class="btn-accion btn-imprimir" onclick="enviarComando('imprimir_etiqueta', this)">🖨️ Imprimir etiqueta</button>
+    </div>` : '';
+
+  // Resto de acciones (Cierre bulto/Retal/Troquelado/Refilado/Calidad/Salida no conforme) juntas
+  // en su propia caja, separadas de Imprimir etiqueta.
+  const accionesBox = activa ? `
+    <div class="peso-box">
+      <div class="botones-fila">
         <button type="button" class="btn-accion btn-cierre-bulto" onclick="enviarComando('cierre_bulto', this)">📦 Cierre bulto</button>
         ${botonesResiduosHTML}
         <span class="separador-v"></span>
@@ -966,7 +1017,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     ['Parche', orden.Parche],
     ['Cierre deslizador', orden.CierreDeslizador],
     ['Perforaciones', orden.Perforaciones],
-    ['Lleva impresión', tieneImpresion ? (orden.TipoImpresionDescripcion || 'Sí') : 'No']
+    ['Nombre impresión', tieneImpresion ? (orden.TipoImpresionDescripcion || 'Sí') : 'No']
   ].map(([label, valor]) => `<div><span class="label">${label}</span><span class="valor">${valor ?? '—'}</span></div>`).join('');
 
   return `<!DOCTYPE html>
@@ -996,6 +1047,8 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     ${bloqueRelevo}
     ${acciones ? `<div class="orden-cola" style="margin-bottom:18px;"><div class="orden-acciones">${acciones}</div></div>` : ''}
     ${pesoBox}
+    ${imprimirBox}
+    ${accionesBox}
     <div class="orden-cola" style="margin-bottom:18px;">
       <div class="orden-info">
         <div class="orden-pedido">Bultos producidos</div>
@@ -1012,7 +1065,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptConfirmarFinalizar()}</script>
-  ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo, calidadFlags)}</script><script>${scriptPesoEnVivo()}</script>` : ''}
+  ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo, calidadFlags)}</script><script>${scriptPesoEnVivo()}</script><script>${scriptResumenBultoActivo(orden.IdOrden, maquinaCodigo)}</script>` : ''}
 </body>
 </html>`;
 }
@@ -1043,7 +1096,7 @@ function renderTarjetasBultos(bultos, pesajesPorBulto) {
       <div class="card-grid">
         <div><span class="label">Cant. Total (KG)</span><span class="valor">${b.CantidadTotal ?? '—'}</span></div>
         <div><span class="label">Golpes</span><span class="valor">${b.Golpes ?? '—'}</span></div>
-        <div><span class="label">Potencia (KW)</span><span class="valor">${b.Potencia ?? '—'}</span></div>
+        <div><span class="label">Potencia (W)</span><span class="valor">${b.Potencia ?? '—'}</span></div>
         <div><span class="label">Hora</span><span class="valor">${b.Hora ?? '—'}</span></div>
         <div class="full"><span class="label">Serial</span><span class="valor serial">${b.serialPadre ?? '—'}</span></div>
       </div>
@@ -1401,6 +1454,34 @@ app.get('/selladora/:codigo/orden/:idOrden/bultos/fragmento', requireLogin, asyn
     res.send(renderTarjetasBultos(bultos, pesajesPorBulto));
   } catch (err) {
     res.status(500).send('Error: ' + err.message);
+  }
+});
+
+// Resumen del bulto Activo (paquetes pesados + peso acumulado) para la pagina de Informacion --
+// a pedido del usuario (27/08/2026), en vivo via polling (ver scriptResumenBultoActivo()). Si la
+// orden no tiene bulto Activo en este momento devuelve ceros, no un error (puede pasar entre que
+// se cierra un bulto y se abre el siguiente).
+app.get('/selladora/:codigo/orden/:idOrden/resumen-bulto-activo', requireLogin, async (req, res) => {
+  const { idOrden } = req.params;
+  try {
+    const p = await getPool();
+    const dtBultoActivo = await p.request().input('idOrden', idOrden).query(`
+      SELECT TOP 1 b.id FROM SEL_Bultos b
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+      WHERE ej.IdOrden = @idOrden AND b.estado = 'Activo'
+      ORDER BY b.id DESC
+    `);
+    if (dtBultoActivo.recordset.length === 0) {
+      return res.json({ ok: true, paquetes: 0, pesoTotalGr: 0 });
+    }
+    const idBulto = dtBultoActivo.recordset[0].id;
+    const resumen = await p.request().input('idBulto', idBulto).query(`
+      SELECT COUNT(*) AS Paquetes, ISNULL(SUM(PesoPaqueGr), 0) AS PesoTotalGr
+      FROM SEL_PesajeElemento WHERE id_bulto = @idBulto
+    `);
+    res.json({ ok: true, paquetes: resumen.recordset[0].Paquetes, pesoTotalGr: Number(resumen.recordset[0].PesoTotalGr) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
