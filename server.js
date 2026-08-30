@@ -1,4 +1,5 @@
 require('dotenv').config();
+const crypto = require('crypto');
 const http = require('http');
 const WebSocket = require('ws');
 const express = require('express');
@@ -40,6 +41,49 @@ app.use(session({
   saveUninitialized: false,
   cookie: { maxAge: 8 * 60 * 60 * 1000 } // 8 horas, un turno
 }));
+
+// --- Tablet fija a una maquina -----------------------------------------------
+// A pedido del usuario (29/08/2026): cada tablet queda pegada a una sola selladora fisicamente, asi
+// que no tiene sentido que el operario tenga que elegir la maquina del dashboard cada vez que entra.
+// En vez de un ID de hardware (MAC/IMEI -- no viable desde un navegador: la MAC no la ve el
+// servidor HTTP, y Android/iOS la aleatorizan por red desde hace años), se usa un TOKEN OPAQUE
+// (UUID aleatorio, sin significado por si solo) guardado en la tabla SEL_TabletsFijas, con una
+// cookie propia (NO la de express-session, esa expira a las 8h/turno -- esta dura 1 año) que solo
+// lleva ese token. FIX 30/08/2026 (a pedido del usuario, "mas segura"): antes la cookie llevaba el
+// codigo de maquina en texto plano -- cualquiera podia editarla a mano (devtools) y hacerse pasar
+// por otra maquina. Con el token, editar la cookie a un UUID inventado simplemente no matchea nada
+// en la tabla y cae al dashboard normal -- no hay forma de "adivinar" o fabricar un token valido.
+// No se agrega cookie-parser (dependencia nueva) para esto solo -- se parsea el header Cookie a
+// mano, es una sola cookie de un solo valor.
+const COOKIE_MAQUINA_FIJA = 'tabletToken';
+function leerCookie(req, nombre) {
+  const header = req.headers.cookie;
+  if (!header) return null;
+  for (const parte of header.split(';')) {
+    const igual = parte.indexOf('=');
+    if (igual === -1) continue;
+    const clave = decodeURIComponent(parte.slice(0, igual).trim());
+    if (clave === nombre) return decodeURIComponent(parte.slice(igual + 1).trim());
+  }
+  return null;
+}
+
+// Resuelve el token de la cookie (si existe) a un codigo de maquina real, consultando
+// SEL_TabletsFijas -- devuelve null si no hay cookie, o si el token no matchea ninguna fila (cookie
+// manipulada/vencida/borrada de la tabla).
+async function resolverMaquinaFija(req) {
+  const token = leerCookie(req, COOKIE_MAQUINA_FIJA);
+  if (!token) return null;
+  try {
+    const p = await getPool();
+    const r = await p.request().input('token', token).query(
+      `SELECT Maquina FROM SEL_TabletsFijas WHERE Token = @token`
+    );
+    return r.recordset[0] ? r.recordset[0].Maquina : null;
+  } catch (err) {
+    return null; // no bloquear la navegacion normal si esto falla -- solo se pierde el "fijado"
+  }
+}
 
 // --- Peso en vivo via Node-RED --------------------------------------------
 // Node-RED (mismo servidor, puerto por defecto 1880) expone un websocket-out node en /ws/peso
@@ -837,7 +881,7 @@ function scriptConfirmarFinalizar() {
 
 // Solo la cola de ordenes de la maquina -- el detalle de bultos/pesajes/historial de cada orden
 // vive en /selladora/:codigo/orden/:idOrden (boton "Informacion").
-function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes) {
+function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, bFija) {
   return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -864,6 +908,9 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes) {
   <main>
     <div class="barra">
       <span class="actualizado">Actualizado: ${new Date().toLocaleTimeString('es-CO')}</span>
+      ${bFija
+        ? `<a class="btn-accion" style="background:#607d8b;" href="/quitar-fija">📌 Tablet fija aquí (quitar)</a>`
+        : `<a class="btn-accion" style="background:#607d8b;" href="/selladora/${maquinaCodigo}/fijar">📌 Fijar esta tablet a esta máquina</a>`}
       <form method="get" action="/selladora/${maquinaCodigo}"><button type="submit">↻ Actualizar</button></form>
     </div>
     ${renderColaOrdenes(colaOrdenes || [], maquinaCodigo)}
@@ -1241,6 +1288,8 @@ app.post('/marcar/registrar', async (req, res) => {
 // luego PendienteValidacion) via CROSS APPLY -- el detalle de la maquina (/selladora/:codigo)
 // lista TODAS sus ordenes en cola, esto es solo la tarjeta resumen.
 app.get('/', requireLogin, async (req, res) => {
+  const maquinaFija = await resolverMaquinaFija(req);
+  if (maquinaFija) return res.redirect('/selladora/' + encodeURIComponent(maquinaFija));
   try {
     const p = await getPool();
     const result = await p.request().query(`
@@ -1266,6 +1315,7 @@ app.get('/', requireLogin, async (req, res) => {
 
 app.get('/selladora/:codigo', requireLogin, async (req, res) => {
   const codigo = req.params.codigo;
+  let fija = false;
   try {
     const p = await getPool();
 
@@ -1284,10 +1334,47 @@ app.get('/selladora/:codigo', requireLogin, async (req, res) => {
                ISNULL(ord.Prioridad, 99999) ASC, ord.IdOrden ASC
     `);
 
-    res.send(renderPage(null, req.session.usuario.nombre, nombre, codigo, colaResult.recordset));
+    const maquinaFija = await resolverMaquinaFija(req);
+    fija = maquinaFija !== null && String(maquinaFija) === String(codigo);
+    res.send(renderPage(null, req.session.usuario.nombre, nombre, codigo, colaResult.recordset, fija));
   } catch (err) {
-    res.status(500).send(renderPage(err.message, req.session.usuario.nombre, 'Selladora', codigo, []));
+    res.status(500).send(renderPage(err.message, req.session.usuario.nombre, 'Selladora', codigo, [], fija));
   }
+});
+
+// Fija esta tablet a esta maquina -- genera un token opaco (UUID), lo guarda en SEL_TabletsFijas
+// junto con la maquina, y la cookie (1 año) solo lleva ese token. Requiere haber corrido
+// Source/Produccion/nueva produccion/agregar_tabletsfijas.sql (repo Mirane) contra la base primero.
+app.get('/selladora/:codigo/fijar', requireLogin, async (req, res) => {
+  const codigo = req.params.codigo;
+  try {
+    const token = crypto.randomUUID();
+    const p = await getPool();
+    await p.request().input('token', token).input('maquina', codigo).query(
+      `INSERT INTO SEL_TabletsFijas (Token, Maquina, FechaCreacion) VALUES (@token, @maquina, GETDATE())`
+    );
+    res.setHeader('Set-Cookie', `${COOKIE_MAQUINA_FIJA}=${encodeURIComponent(token)}; Max-Age=${60 * 60 * 24 * 365}; Path=/; HttpOnly; SameSite=Lax`);
+    res.redirect('/selladora/' + encodeURIComponent(codigo));
+  } catch (err) {
+    res.status(500).send(renderPage(err.message, req.session.usuario.nombre, 'Selladora', codigo, [], false));
+  }
+});
+
+// Quita el vinculo -- borra la fila del token en SEL_TabletsFijas (ya no sirve para nada, no hace
+// falta dejarla) y limpia la cookie. Vuelve a mostrar el dashboard de todas las selladoras.
+app.get('/quitar-fija', requireLogin, async (req, res) => {
+  const token = leerCookie(req, COOKIE_MAQUINA_FIJA);
+  if (token) {
+    try {
+      const p = await getPool();
+      await p.request().input('token', token).query(`DELETE FROM SEL_TabletsFijas WHERE Token = @token`);
+    } catch (err) {
+      // no bloquear -- si falla el DELETE, la fila queda huerfana en la tabla pero la cookie de
+      // este navegador igual se limpia abajo y deja de usarse.
+    }
+  }
+  res.setHeader('Set-Cookie', `${COOKIE_MAQUINA_FIJA}=; Max-Age=0; Path=/`);
+  res.redirect('/');
 });
 
 // Detalle de una orden puntual: bultos (indice relativo 1,2,3... no el num_bulto crudo -- mismo
