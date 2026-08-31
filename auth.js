@@ -36,4 +36,15 @@ function requireLogin(req, res, next) {
   res.redirect('/marcar');
 }
 
-module.exports = { validarLogin, requireLogin };
+// No hay un sistema de roles en SISUsuarios (no existe una columna tipo "EsAdmin") -- el unico
+// usuario administrador de esta app es el codigo literal 'ADMIN' (ver qr-admin.png, generado con
+// generar-qr-usuario.js admin). Usado para restringir la asignacion de "tablet fija" (SEL_TabletsFijas)
+// a un unico apartado que solo el administrador puede tocar, a pedido del usuario (30/08/2026).
+const ADMIN_CODIGO = 'ADMIN';
+
+function requireAdmin(req, res, next) {
+  if (req.session && req.session.usuario && req.session.usuario.codigo === ADMIN_CODIGO) return next();
+  res.status(403).send('Acceso restringido al usuario administrador.');
+}
+
+module.exports = { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO };
