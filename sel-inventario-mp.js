@@ -442,6 +442,14 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
     .query(`SELECT TOP 1 Cliente FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden AND Cliente IS NOT NULL`);
   const nCodClienteOrden = dtClienteOrden.recordset.length > 0 ? dtClienteOrden.recordset[0].Cliente : 0;
 
+  // FIX 31/08/2026 (bug real encontrado -- pedidos alfanumericos como "A0003" nunca resolvian
+  // Destino): NumeroPedido se toma de SEL_OrdenProduccion (siempre texto, la fuente confiable) en
+  // vez de SEL_Bultos.NumeroPedido (columna INT que queda en null para pedidos alfanumericos) --
+  // mismo criterio que SEL_InventarioMP.vb:FinalizarControlParcialSellado.
+  const dtPedidoOrden = await db.request().input('idOrden', idOrden)
+    .query(`SELECT TOP 1 NumeroPedido FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden AND NumeroPedido IS NOT NULL`);
+  const tNumeroPedidoOrden = dtPedidoOrden.recordset.length > 0 ? String(dtPedidoOrden.recordset[0].NumeroPedido) : '';
+
   for (const dr of dtBultos.recordset) {
     const nElemento = dr.refsalida;
     const nAgno = dr.agno, nMes = dr.mes, nDia = dr.dia;
@@ -463,7 +471,7 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
     const fHoraTurno = fHoraFin || fHoraIni || new Date();
 
     const nCodCliente = nCodClienteOrden;
-    const nCodDestino = await resolverDestinoOrden(db, idOrden, nNumeroPedido);
+    const nCodDestino = await resolverDestinoOrden(db, idOrden, tNumeroPedidoOrden);
 
     const dtYaExiste = await db.request().input('serial', tSerial).query(`SELECT 1 AS X FROM PRDProduccion WHERE Detalle = @serial`);
     const nDuracion = dateDiffMinutos(fHoraIni, fHoraFin);
@@ -528,9 +536,9 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
   const nLineaOriginal = dtPrimero.recordset[0].num_bulto;
   const fFechaOriginal = new Date(nAgnoOriginal, dtPrimero.recordset[0].mes - 1, dtPrimero.recordset[0].dia);
   const tLoteOriginal = String(dtPrimero.recordset[0].mes).padStart(2, '0') + String(dtPrimero.recordset[0].dia).padStart(2, '0');
-  const nNumeroPedidoOriginal = dtPrimero.recordset[0].NumeroPedido != null ? Number(dtPrimero.recordset[0].NumeroPedido) : 0;
-
-  const nCodDestinoOriginal = await resolverDestinoOrden(db, idOrden, nNumeroPedidoOriginal);
+  // FIX 31/08/2026: reusa tNumeroPedidoOrden (SEL_OrdenProduccion, confiable) en vez de releer
+  // SEL_Bultos.NumeroPedido -- mismo criterio que la otra llamada a resolverDestinoOrden mas arriba.
+  const nCodDestinoOriginal = await resolverDestinoOrden(db, idOrden, tNumeroPedidoOrden);
   const tOP = await obtenerOCrearOrdenProduccion(db, {
     elemento: nUltimoElemento, fecha: fFechaOriginal, lineaAncla: nLineaOriginal, lote: tLoteOriginal,
     codigoDestino: nCodDestinoOriginal, generadoPor
@@ -586,31 +594,17 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
       WHERE Elemento = @elemento AND Year(Fecha) = @year AND Lote = @lote AND Linea = @linea
     `);
 
-  try {
-    const dtMP = await db.request()
-      .input('elemento', nUltimoElemento).input('year', nAgnoOriginal).input('lote', tLoteOriginal).input('linea', nLineaOriginal)
-      .query(`SELECT ISNULL(SUM(Cantidad),0) AS TotalMP FROM PRDProduccionMateriaPrima WHERE Elemento = @elemento AND Year(Fecha) = @year AND Lote = @lote AND Linea = @linea`);
-    const nTotalMP = dtMP.recordset.length > 0 ? Number(dtMP.recordset[0].TotalMP) : 0;
-
-    const dtRollos = await db.request().input('idCtrl', nIdCtrl).query(`
-      SELECT ISNULL(SUM((p.Cantidad - ISNULL(p.PesoCono,0)) + ISNULL(p.Torta,0) + ISNULL(p.ResiduoTroquelado,0) + ISNULL(p.ResiduoRefilado,0)),0) AS Cant
-      FROM PRDExtrusionRollos er
-      INNER JOIN PRDProduccion p ON p.Elemento=er.Elemento AND p.Fecha=er.Fecha AND p.Lote=er.Lote AND p.Linea=er.Linea
-      WHERE er.IdExtrusionControl = @idCtrl
-    `);
-    const nSalidaRollos = dtRollos.recordset.length > 0 ? Number(dtRollos.recordset[0].Cant) : 0;
-
-    let nMerma = nTotalMP - nSalidaRollos;
-    if (nMerma < 0) nMerma = 0;
-
-    await db.request()
-      .input('merma', nMerma).input('elemento', nUltimoElemento).input('year', nUltimoAgno).input('lote', tUltimoLote).input('linea', nUltimaLinea)
-      .query(`UPDATE PRDProduccion SET Retal = @merma WHERE Elemento = @elemento AND Year(Fecha) = @year AND Lote = @lote AND Linea = @linea`);
-  } catch (err) {
-    // no bloquear el cierre por esto -- igual que el Catch silencioso de SEL_InventarioMP.vb
-  }
-
-  await db.request().input('idCtrl', nIdCtrl).query(`UPDATE PRDExtrusionControl SET Estado = 'Cerrado' WHERE IdExtrusionControl = @idCtrl`);
+  // CAMBIO 31/08/2026 (bug real encontrado -- Finalizar desde la tablet calculaba Merma y cerraba
+  // PRDExtrusionControl, cuando ya no debe hacerlo): esta funcion es el puerto de
+  // SEL_InventarioMP.vb:FinalizarControlParcialSellado, y ese lado YA se corrigio para que
+  // Finalizar (el operario, en planta) solo deje la orden en 'PendienteValidacion' -- el calculo
+  // de Merma y el cierre real de PRDExtrusionControl se movieron a "Cerrar Definitivo"
+  // (frmValidacionSelladora.vb:HandleCerrar), que sigue siendo exclusivamente del escritorio.
+  // Este cambio nunca se replico aca -- Finalizar desde la tablet seguia calculando Merma y
+  // cerrando el proceso en el mismo paso, adelantandose al digitador. Se saca ese bloque
+  // completo (antes calculaba Merma y hacia UPDATE PRDExtrusionControl SET Estado='Cerrado' acá
+  // mismo) -- ahora ninguna ruta de Node cierra PRDExtrusionControl, solo "Cerrar Definitivo" en
+  // el escritorio.
 }
 
 module.exports = {
