@@ -18,12 +18,18 @@ function formatMMDD(d) {
 }
 
 // frmScanRollo.vb:154-165 (Elemento/Maquina/NumeroPedido de la orden)
+// FIX 31/08/2026 (bug real encontrado -- pedidos alfanumericos como "A0003" nunca resolvian
+// Cliente/Destino, ni guardaban NumeroPedido en PRDProduccion): numeroPedido pasa de
+// valNumerico(...) (parseInt, devuelve 0 para cualquier string que no empiece con un digito) a
+// texto crudo. NumeroPedido vive como varchar en SEL_OrdenProduccion (viene de
+// VENMovimientos.Numero) -- forzarlo a numero acá era la causa raiz del bug, ver
+// SEL_InventarioMP.vb:ResolverClienteDestino (mismo fix del lado VB).
 async function obtenerDatosOrden(db, idOrden) {
   const dt = await db.request().input('idOrden', idOrden)
     .query(`SELECT Elemento, Maquina, NumeroPedido FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
   if (dt.recordset.length === 0) return null;
   const r = dt.recordset[0];
-  return { elemento: r.Elemento, maquina: r.Maquina, numeroPedido: valNumerico(r.NumeroPedido) };
+  return { elemento: r.Elemento, maquina: r.Maquina, numeroPedido: r.NumeroPedido != null ? String(r.NumeroPedido).trim() : '' };
 }
 
 // frmScanRollo.vb:57-139 (ConsultarSerial) -- validacion previa a confirmar, no escribe nada.
@@ -89,7 +95,7 @@ async function consultarSerial(db, { idOrden, serial, esNuevoRollo }) {
 async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial, cantidad, lote, bolsasXGolpe, generadoPor }) {
   const datosOrden = await obtenerDatosOrden(tx, idOrden);
   if (!datosOrden) throw new Error('Orden no encontrada.');
-  const { elemento: nElemento, maquina: nMaquina, numeroPedido: nNumeroPedido } = datosOrden;
+  const { elemento: nElemento, maquina: nMaquina, numeroPedido: tNumeroPedido } = datosOrden;
 
   // FIX 24/08/2026: al Iniciar, este operario pasa a ser el "operario actual" de la maquina --
   // ver agregar_operarioactualmaquina.sql. trg_SEL_Bultos_CierreBulto la consulta para cada bulto
@@ -110,6 +116,15 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
   const nMes = fHoy.getMonth() + 1;
   const nDia = fHoy.getDate();
   const tLote = formatMMDD(fHoy);
+  // FIX 31/08/2026 (bug real encontrado -- Operario/historial en null/vacio al escanear desde
+  // la tablet): en Mirane (escritorio), la columna Fecha SIEMPRE se guarda a medianoche
+  // (dtpFecha solo tiene el dia, sin hora) -- todo el resto del sistema (busqueda de historial,
+  // ancla de OrdenProduccion, PRDProduccionOperarios) compara "WHERE Fecha = @fecha" asumiendo
+  // eso. Acá se usaba fHoy (con hora real, ej. 08:39:00) tanto para Fecha como para HoraInicio
+  // -- las filas quedaban con Fecha "manchada" de hora, y cualquier lookup posterior con Fecha a
+  // medianoche (sql.Date) nunca las encontraba. fFechaSolo es SOLO para la columna Fecha (el
+  // "dia" del proceso); fHoy se sigue usando para HoraInicio y lo que sí necesita la hora real.
+  const fFechaSolo = new Date(nAgno, fHoy.getMonth(), nDia);
 
   const dtLinea = await tx.request()
     .input('agno', nAgno).input('lote', tLote).input('elemento', nElemento).input('mes', nMes).input('dia', nDia)
@@ -139,29 +154,35 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
   // ejecucion, en vez de esperar al cierre -- mismo cambio que frmScanRollo.vb:CrearBultoInicial
   // (23/08/2026). Asi queda disponible para estampar en PRDProduccionMateriaPrima desde el
   // primer rollo (incluidos los que llegan luego via "Añadir Rollo").
-  const nCodDestinoBulto = await resolverDestinoOrden(tx, idOrden, nNumeroPedido);
+  const nCodDestinoBulto = await resolverDestinoOrden(tx, idOrden, tNumeroPedido);
   const tOrdenProduccion = await obtenerOCrearOrdenProduccion(tx, {
-    elemento: nElemento, fecha: fHoy, lineaAncla: nLineaOriginal, lote: tLote,
+    elemento: nElemento, fecha: fFechaSolo, lineaAncla: nLineaOriginal, lote: tLote,
     codigoDestino: nCodDestinoBulto, generadoPor
   });
 
   await registrarMateriaPrimaRollo(tx, {
-    fecha: fHoy, lote: tLote, elementoProducto: nElemento, linea: nLineaOriginal,
+    fecha: fFechaSolo, lote: tLote, elementoProducto: nElemento, linea: nLineaOriginal,
     detalleRollo: serial, cantidad, loteMP: lote, bodega: tBodegaRollo, ordenProduccion: tOrdenProduccion
   });
   await generarSalidaRollo(tx, {
-    idOrden, fecha: fHoy, lote: tLote, elementoProducto: nElemento, linea: nNumBulto,
+    idOrden, fecha: fFechaSolo, lote: tLote, elementoProducto: nElemento, linea: nNumBulto,
     detalleRollo: serial, cantidad, generadoPor
   });
   await registrarControlParcialSellado(tx, {
-    idOrden, elemento: nElemento, fecha: fHoy, anio: nAgno, numBultoActual: nNumBulto,
+    idOrden, elemento: nElemento, fecha: fFechaSolo, anio: nAgno, numBultoActual: nNumBulto,
     lote: tLote, pesoRolloBruto: cantidad, generadoPor
   });
+
+  // SEL_Bultos.NumeroPedido es INT (a diferencia de PRDProduccion/SEL_OrdenProduccion, que son
+  // varchar) -- para un pedido alfanumerico como "A0003" esta columna puntual no lo puede guardar
+  // tal cual, queda en null (mismo criterio que ya usaba antes de este fix, solo que ahora es
+  // explicito). Si hace falta guardarlo completo aca tambien, hay que ALTER la columna a varchar.
+  const nNumeroPedidoBultoSQL = /^\d+$/.test(tNumeroPedido) ? parseInt(tNumeroPedido, 10) : null;
 
   await tx.request()
     .input('agno', nAgno).input('mes', nMes).input('dia', nDia).input('numBulto', nNumBulto)
     .input('elemento', nElemento).input('serialPadre', tSerialPadre).input('maquina', nMaquina)
-    .input('idEjecucion', idEjecucion).input('numeroPedido', nNumeroPedido > 0 ? nNumeroPedido : null).input('horaInicio', fHoy)
+    .input('idEjecucion', idEjecucion).input('numeroPedido', nNumeroPedidoBultoSQL).input('horaInicio', fHoy)
     .query(`
       INSERT INTO SEL_Bultos (agno, mes, dia, number_paqu, num_bulto, refsalida, estado, serialArmado, serialPadre, id_maquina, id_ejecucion, NumeroPedido, HoraInicio)
       VALUES (@agno, @mes, @dia, 0, @numBulto, @elemento, 'Activo', @serialPadre, @serialPadre, @maquina, @idEjecucion, @numeroPedido, @horaInicio)
@@ -172,14 +193,14 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
     throw new Error('No se encontró un turno activo configurado para esta máquina a esta hora en TURHorariosMaquinas.\nTurno es un campo obligatorio en PRDProduccion -- corrija la configuración de turnos antes de continuar.');
   }
 
-  const { codCliente: nCodClienteBulto } = await resolverClienteDestino(tx, nNumeroPedido);
+  const { codCliente: nCodClienteBulto } = await resolverClienteDestino(tx, tNumeroPedido);
 
   await tx.request()
-    .input('fecha', fHoy).input('maquina', nMaquina).input('turno', String(nTurnoBulto))
+    .input('fecha', fFechaSolo).input('horaInicio', fHoy).input('maquina', nMaquina).input('turno', String(nTurnoBulto))
     .input('lote', tLote).input('elemento', nElemento).input('linea', nNumBulto).input('serialPadre', tSerialPadre)
     .input('cliente', nCodClienteBulto > 0 ? nCodClienteBulto : null).input('destino', nCodDestinoBulto > 0 ? nCodDestinoBulto : null)
     .input('generadoPor', generadoPor).input('bolsas', bolsasXGolpe)
-    .input('numeroPedido', nNumeroPedido > 0 ? String(nNumeroPedido) : null)
+    .input('numeroPedido', tNumeroPedido || null)
     .input('ordenProduccion', tOrdenProduccion || null)
     .query(`
       INSERT INTO PRDProduccion (Fecha, Maquina, Turno, Duracion, Lote, Elemento, Linea, Cantidad, PesoCono, Unidades, Detalle,
@@ -187,12 +208,12 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
         FechaModificado, HoraInicio, HoraFinal, Torta, BolsasxGolpe, TipoPedido, NumeroPedido, OrdenProduccion)
       VALUES (@fecha, @maquina, @turno, 0, @lote, @elemento, @linea, 0, 0, 0, @serialPadre,
         @cliente, @destino, 0, 0, 0, 0, @generadoPor,
-        GETDATE(), @fecha, NULL, 0, @bolsas, 4, @numeroPedido, @ordenProduccion)
+        GETDATE(), @horaInicio, NULL, 0, @bolsas, 4, @numeroPedido, @ordenProduccion)
     `);
 
   if (codOperario > 0) {
     await tx.request()
-      .input('fecha', fHoy).input('lote', tLote).input('elemento', nElemento).input('linea', nNumBulto).input('operario', codOperario)
+      .input('fecha', fFechaSolo).input('lote', tLote).input('elemento', nElemento).input('linea', nNumBulto).input('operario', codOperario)
       .query(`INSERT INTO PRDProduccionOperarios (Fecha, Lote, Elemento, Linea, Operario) VALUES (@fecha, @lote, @elemento, @linea, @operario)`);
   }
 }
