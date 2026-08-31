@@ -631,10 +631,10 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
     if (necesitaTomarControl) {
       const esElMismo = miOperario != null && o.OperarioEjecucionCodigo === miOperario;
       const nombreAsignado = o.OperarioEjecucionNombre || 'un operario sin nombre configurado';
-      const textoBoton = esElMismo ? '▶ Reanudar ejecución' : '🔓 Tomar control de la ejecución';
-      infoOperarioAsignado = `<div class="orden-elemento" style="color:var(--naranja);font-weight:600;">Operario asignado: ${nombreAsignado}</div>`;
+      const textoBoton = esElMismo ? '▶ Reanudar ejecución' : '🔓 Retomar ejecución';
+      infoOperarioAsignado = `<div class="orden-elemento" style="color:var(--naranja);font-weight:600;">Operario anterior: ${nombreAsignado}</div>`;
       acciones += `
-        <form method="post" action="/api/selladora/orden/${o.IdOrden}/tomar-control-ejecucion" onsubmit="return confirmarTomarControlEjecucion(event, this, ${esElMismo});">
+        <form method="post" action="/api/selladora/orden/${o.IdOrden}/tomar-control-ejecucion" onsubmit="return confirmarTomarControlEjecucion(event, this, ${esElMismo}, ${jsString(nombreAsignado).replace(/"/g, '&quot;')});">
           <button type="submit" class="btn-accion" style="background:#b46200;">${textoBoton}</button>
         </form>`;
     } else if (o.Estado === 'Pendiente') {
@@ -661,7 +661,7 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
         <div class="orden-acciones">${acciones}</div>
       </div>`;
   }).join('');
-  return `<h2 style="font-size:15px;margin:0 0 10px;">Órdenes de esta máquina</h2>${filas}`;
+  return `<h2 style="font-size:15px;margin:0 0 10px;">Programación máquina</h2>${filas}`;
 }
 
 // Widget de peso en vivo (pagina de Informacion de la orden, solo con la orden Activa) -- se
@@ -692,7 +692,7 @@ function scriptPesoEnVivo() {
           var texto = '—';
           try {
             var json = JSON.parse(evento.data);
-            if (json && typeof json.peso === 'number') texto = json.peso.toFixed(3);
+            if (json && typeof json.peso === 'number') texto = json.peso.toFixed(2);
           } catch (e) { /* mensaje no valido -- se deja el guion */ }
           pesoNumero.textContent = texto;
         };
@@ -705,7 +705,9 @@ function scriptPesoEnVivo() {
 // Resumen del bulto Activo (paquetes pesados + peso acumulado) -- a pedido del usuario
 // (27/08/2026), se actualiza solo cada 4s pidiendo /resumen-bulto-activo (no viene por el
 // websocket de peso: ese es la lectura instantanea de la bascula, esto es la suma acumulada de
-// los paquetes ya registrados en SEL_PesajeElemento para el bulto Activo).
+// los paquetes ya registrados en SEL_PesajeElemento para el bulto Activo). El endpoint devuelve
+// pesoTotalGr en gramos (asi esta la columna en BD); se muestra en kg con 2 decimales (a pedido
+// del usuario, 31/08/2026).
 function scriptResumenBultoActivo(idOrden, maquinaCodigo) {
   return `
     (function() {
@@ -720,7 +722,7 @@ function scriptResumenBultoActivo(idOrden, maquinaCodigo) {
           const datos = await resp.json();
           if (!datos.ok) return;
           elPaquetes.textContent = datos.paquetes;
-          elPeso.textContent = datos.pesoTotalGr;
+          elPeso.textContent = (datos.pesoTotalGr / 1000).toFixed(2);
         } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
       }
       actualizar();
@@ -1105,16 +1107,14 @@ function scriptConfirmarFinalizar() {
       return false;
     }
 
-    function confirmarTomarControlEjecucion(evento, formulario, esElMismo) {
+    function confirmarTomarControlEjecucion(evento, formulario, esElMismo, nombreOperarioAnterior) {
       evento.preventDefault();
       Swal.fire({
         icon: 'question',
-        title: esElMismo ? '¿Reanudar esta ejecución?' : '¿Tomar control de esta ejecución?',
-        text: esElMismo
-          ? 'Esta ejecución sigue activa a su nombre, pero su sesión anterior ya no está disponible. Al confirmar, la retoma.'
-          : 'Esta ejecución está asignada a otro operario en este momento. Al confirmar, queda a su nombre.',
+        title: esElMismo ? '¿Reanudar esta ejecución?' : '¿Retomar esta ejecución?',
+        text: 'Esta ejecución estaba siendo ejecutada por "' + nombreOperarioAnterior + '". Al confirmar la retoma con su usuario.',
         showCancelButton: true,
-        confirmButtonText: esElMismo ? 'Sí, reanudar' : 'Sí, tomar control',
+        confirmButtonText: esElMismo ? 'Sí, reanudar' : 'Sí, retomar',
         cancelButtonText: 'Cancelar',
         confirmButtonColor: '#b46200',
         cancelButtonColor: '#71bf44'
@@ -1124,9 +1124,117 @@ function scriptConfirmarFinalizar() {
   `;
 }
 
+// Antes de entrar a producir -- al Iniciar una orden con su primer rollo (renderEscanear, nuevo=0
+// unicamente, NO aplica a +Rollo) o al Retomar/Reanudar una ejecucion tras un cambio de operario
+// (confirmarTomarControlEjecucion arriba) -- se pregunta si hay alguna actividad de las que se
+// registran como pausa (Alistamiento, Mantenimiento, etc.) por hacer primero, o si se entra directo
+// a producir (a pedido del usuario, 31/08/2026). Si elige una actividad, queda registrada igual que
+// si hubiera usado el boton "Pausa" normal (mismo POST /pausar) -- la ejecucion arranca/vuelve en
+// 'En pausa' desde ese momento, en vez de tener que pausarla a mano despues de haber entrado.
+// Comparte los mismos motivos/submotivos que abrirPausa() en scriptComandos(), pero se duplican aca
+// (MOTIVOS_PAUSA_INICIAL) porque esta funcion se usa en paginas (renderEscanear, renderPage) que no
+// cargan scriptComandos.
+function scriptPreguntaActividadInicial() {
+  return `
+    var MOTIVOS_PAUSA_INICIAL = [
+      { clave: 'descanso', titulo: 'Descanso' },
+      { clave: 'mantenimiento', titulo: 'Mantenimiento' },
+      { clave: 'alistamiento', titulo: 'Alistamiento' },
+      { clave: 'limpieza', titulo: 'Limpieza y desinfección' },
+      { clave: 'otro', titulo: 'Otro' }
+    ];
+    var SUBMOTIVOS_ALISTAMIENTO_INICIAL = [
+      { clave: 'materiales', titulo: 'Materiales' },
+      { clave: 'mecanico', titulo: 'Mecánico' },
+      { clave: 'espacio_trabajo', titulo: 'Espacio de trabajo' }
+    ];
+
+    function preguntarActividadInicial(idOrden, alTerminar) {
+      Swal.fire({
+        icon: 'question',
+        title: '¿Va a realizar alguna actividad antes de producir?',
+        text: 'Por ejemplo alistamiento, mantenimiento o limpieza. Si no, entra directo a producción.',
+        showCancelButton: true,
+        confirmButtonText: 'Sí, registrar actividad',
+        cancelButtonText: '▶ Entrar a producción',
+        confirmButtonColor: '#b46200',
+        cancelButtonColor: '#4a9c2e'
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) { elegirMotivoInicial(idOrden, alTerminar); }
+        else { alTerminar(); }
+      });
+    }
+
+    function elegirMotivoInicial(idOrden, alTerminar) {
+      var htmlSubmotivos = SUBMOTIVOS_ALISTAMIENTO_INICIAL.map(function(s) {
+        return '<label style="display:flex;margin-bottom:6px;"><input type="radio" name="subtipoPausaInicial" value="' + s.clave + '"> ' + s.titulo + '</label>';
+      }).join('');
+      var htmlMotivos = MOTIVOS_PAUSA_INICIAL.map(function(m) {
+        var item = '<label style="display:flex;margin-bottom:8px;"><input type="radio" name="motivoPausaInicial" value="' + m.clave + '"> ' + m.titulo + '</label>';
+        if (m.clave === 'alistamiento') {
+          item += '<div id="pausa-inicial-submotivos" style="display:none;margin:0 0 8px 24px;">' + htmlSubmotivos + '</div>';
+        }
+        return item;
+      }).join('');
+      var html =
+        '<div style="text-align:left;">' + htmlMotivos + '</div>' +
+        '<div id="pausa-inicial-observaciones-wrap" style="display:none;text-align:left;margin-top:8px;">' +
+          '<label for="pausa-inicial-observaciones" style="display:block;font-size:13px;font-weight:600;margin:10px 0 6px;">Describa el motivo</label>' +
+          '<input type="text" id="pausa-inicial-observaciones" maxlength="200" style="width:100%;padding:10px 12px;border:1px solid #d0d7de;border-radius:10px;font-size:16px;box-sizing:border-box;">' +
+        '</div>';
+      Swal.fire({
+        title: 'Motivo de la actividad',
+        html: html,
+        confirmButtonText: 'Registrar',
+        confirmButtonColor: '#71bf44',
+        showCancelButton: true,
+        cancelButtonText: 'Cancelar',
+        didOpen: function() {
+          var radios = document.getElementsByName('motivoPausaInicial');
+          for (var i = 0; i < radios.length; i++) {
+            radios[i].addEventListener('change', function() {
+              document.getElementById('pausa-inicial-submotivos').style.display = (this.value === 'alistamiento') ? 'block' : 'none';
+              document.getElementById('pausa-inicial-observaciones-wrap').style.display = (this.value === 'otro') ? 'block' : 'none';
+            });
+          }
+        },
+        preConfirm: function() {
+          var tipoEl = document.querySelector('input[name=motivoPausaInicial]:checked');
+          if (!tipoEl) { Swal.showValidationMessage('Seleccione un motivo.'); return false; }
+          var tipo = tipoEl.value;
+          var subtipo = null;
+          if (tipo === 'alistamiento') {
+            var subEl = document.querySelector('input[name=subtipoPausaInicial]:checked');
+            if (!subEl) { Swal.showValidationMessage('Seleccione el motivo de alistamiento.'); return false; }
+            subtipo = subEl.value;
+          }
+          var observaciones = null;
+          if (tipo === 'otro') {
+            observaciones = document.getElementById('pausa-inicial-observaciones').value.trim();
+            if (!observaciones) { Swal.showValidationMessage('Describa el motivo.'); return false; }
+          }
+          return fetch('/api/selladora/orden/' + idOrden + '/pausar', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tipo: tipo, subtipo: subtipo, observaciones: observaciones })
+          }).then(function(r) { return r.json(); }).then(function(data) {
+            if (!data.ok) { Swal.showValidationMessage(data.error || 'No se pudo registrar.'); return false; }
+            return true;
+          }).catch(function(err) {
+            Swal.showValidationMessage('Error de conexión: ' + err.message);
+            return false;
+          });
+        }
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) { alTerminar(); }
+        else { preguntarActividadInicial(idOrden, alTerminar); }
+      });
+    }
+  `;
+}
+
 // Solo la cola de ordenes de la maquina -- el detalle de bultos/pesajes/historial de cada orden
 // vive en /selladora/:codigo/orden/:idOrden (boton "Informacion").
-function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, miOperario) {
+function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, miOperario, idOrdenPreguntarActividad) {
   return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -1147,7 +1255,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
       </div>
       <a class="volver" href="/">‹ Selladoras</a>
       <h1>🏭 ${maquinaNombre}</h1>
-      <div class="sub">Órdenes de esta máquina</div>
+      <div class="sub">Programación máquina</div>
     </div>
   </header>
   <main>
@@ -1159,6 +1267,14 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptConfirmarFinalizar()}</script>
+  <script>${scriptPreguntaActividadInicial()}</script>
+  ${idOrdenPreguntarActividad ? `<script>
+    // Termine con actividad o directo a produccion, se entra a Informacion de la orden retomada --
+    // no se queda en la cola de la maquina (a pedido del usuario, 31/08/2026).
+    preguntarActividadInicial(${JSON.stringify(idOrdenPreguntarActividad)}, function() {
+      window.location.href = ${JSON.stringify(`/selladora/${maquinaCodigo}/orden/${idOrdenPreguntarActividad}`)};
+    });
+  </script>` : ''}
   ${error ? `<script>Swal.fire({ icon: 'error', title: 'Error', text: ${jsString(error)}, confirmButtonColor: '#71bf44' });</script>` : ''}
 </body>
 </html>`;
@@ -1299,7 +1415,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     <div class="peso-box">
       <div class="peso-top">
         <div>
-          <div class="label">Peso en vivo (báscula)</div>
+          <div class="label">Peso paquete (báscula)</div>
           <div class="peso-valor"><span id="peso-numero">—</span><span class="unidad">kg</span></div>
         </div>
         <div>
@@ -1308,7 +1424,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
         </div>
         <div>
           <div class="label">Peso acumulado</div>
-          <div class="peso-valor"><span id="resumen-peso-acumulado">—</span><span class="unidad">g</span></div>
+          <div class="peso-valor"><span id="resumen-peso-acumulado">—</span><span class="unidad">kg</span></div>
         </div>
         <span class="peso-estado desconectado" id="peso-estado">Conectando…</span>
       </div>
@@ -1654,9 +1770,15 @@ app.get('/selladora/:codigo', requireLogin, async (req, res) => {
                ISNULL(ord.Prioridad, 99999) ASC, ord.IdOrden ASC
     `);
 
-    res.send(renderPage(null, req.session.usuario.nombre, nombre, codigo, colaResult.recordset, req.session.usuario.codigoOperarioPRD));
+    // FIX 31/08/2026: ?preguntarActividad=<idOrden> lo agrega el redirect de tomar-control-ejecucion
+    // cuando la ejecucion retomada quedo Activa -- dispara la pregunta "¿va a hacer alguna actividad
+    // antes de producir?" (preguntarActividadInicial, ver scriptPreguntaActividadInicial) apenas
+    // carga la pagina. Se valida que sea un entero positivo antes de pasarlo al HTML.
+    const idOrdenPreguntarActividad = /^\d+$/.test(req.query.preguntarActividad || '') ? Number(req.query.preguntarActividad) : null;
+
+    res.send(renderPage(null, req.session.usuario.nombre, nombre, codigo, colaResult.recordset, req.session.usuario.codigoOperarioPRD, idOrdenPreguntarActividad));
   } catch (err) {
-    res.status(500).send(renderPage(err.message, req.session.usuario.nombre, 'Selladora', codigo, [], req.session.usuario.codigoOperarioPRD));
+    res.status(500).send(renderPage(err.message, req.session.usuario.nombre, 'Selladora', codigo, [], req.session.usuario.codigoOperarioPRD, null));
   }
 });
 
@@ -1959,7 +2081,12 @@ app.post('/api/selladora/orden/:idOrden/tomar-control-ejecucion', requireLogin, 
       WHEN MATCHED THEN UPDATE SET Operario = @operario, FechaHora = GETDATE()
       WHEN NOT MATCHED THEN INSERT (Maquina, Operario, FechaHora) VALUES (@maquina, @operario, GETDATE());
     `);
-    res.redirect(`/selladora/${Maquina}`);
+    // FIX 31/08/2026: si la ejecucion NO estaba 'En pausa' (o sea, con este cambio quedo 'Activa' --
+    // ver el CASE de arriba), se pregunta en la cola de la maquina si hay alguna actividad por hacer
+    // antes de producir o si entra directo (a pedido del usuario). Si ya estaba 'En pausa', no se
+    // pregunta -- el cronometro de esa pausa ya la cubre, se veria al entrar a Informacion.
+    const destino = Estado === 'En pausa' ? `/selladora/${Maquina}` : `/selladora/${Maquina}?preguntarActividad=${idOrden}`;
+    res.redirect(destino);
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, '/'));
   }
@@ -2009,10 +2136,14 @@ function renderEscanear(maquinaCodigo, maquinaNombre, idOrden, nuevo, bolsasActu
 
   <script src="/html5-qrcode.min.js"></script>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptPreguntaActividadInicial()}</script>
   <script>
     const idOrden = ${JSON.stringify(idOrden)};
     const esNuevoRollo = ${nuevo ? 'true' : 'false'};
     const bolsasActual = ${Number(bolsasActual) || 0};
+    // Al Iniciar (no al +Rollo), termine con actividad o directo a produccion, se entra a
+    // Informacion de la orden -- no a la cola de la maquina (a pedido del usuario, 31/08/2026).
+    const destinoTrasIniciar = ${JSON.stringify(`/selladora/${maquinaCodigo}/orden/${idOrden}`)};
     const divResultado = document.getElementById('resultado');
     let procesando = false;
     let ultimaConsulta = null;
@@ -2079,7 +2210,13 @@ function renderEscanear(maquinaCodigo, maquinaNombre, idOrden, nuevo, bolsasActu
         Swal.fire({
           icon: 'success', title: esNuevoRollo ? 'Rollo añadido' : 'Ejecución iniciada',
           timer: 1000, showConfirmButton: false
-        }).then(() => { window.location.href = datos.redirect; });
+        }).then(() => {
+          // Al Iniciar (primer rollo, no al +Rollo de mitad de produccion) se pregunta si hay
+          // alguna actividad de las que se registran como pausa por hacer antes de producir (a
+          // pedido del usuario, 31/08/2026) -- ver scriptPreguntaActividadInicial().
+          if (esNuevoRollo) { window.location.href = datos.redirect; }
+          else { preguntarActividadInicial(idOrden, function() { window.location.href = destinoTrasIniciar; }); }
+        });
       } catch (err) {
         mostrarError('Error de conexión: ' + err.message);
       }
