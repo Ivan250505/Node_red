@@ -749,6 +749,10 @@ function scriptResumenBultoActivo(idOrden, maquinaCodigo) {
           if (!datos.ok) return;
           elPaquetes.textContent = datos.paquetes;
           elPeso.textContent = (datos.pesoTotalGr / 1000).toFixed(2);
+          // Se guarda en window (no en una var local del IIFE) para que confirmarPesoYEnviar, que
+          // vive en otro <script> (scriptComandos), pueda leer cual es el bulto Activo ahora mismo
+          // al marcar un residuo/salida no conforme (01/09/2026, a pedido del usuario).
+          window.idBultoActivo = datos.idBulto;
         } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
       }
       actualizar();
@@ -896,8 +900,10 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva) {
 
     // Retal/Troquelado/Refilado/Salida no conforme (a pedido del usuario, 01/09/2026) piden el peso
     // del residuo/bulto en una ventana emergente (numerico, no un simple "¿Esta seguro?") -- al
-    // confirmar, se manda igual que los demas por /api/comando pero con datos:{peso:...} para que
-    // Node-RED lo use al imprimir la etiqueta del residuo. inputValidator bloquea pesos vacios/no
+    // confirmar, se manda igual que los demas por /api/comando pero con datos:{peso, idBulto} para
+    // que Node-RED sepa a que bulto pertenece e imprima la etiqueta del residuo. idBulto sale de
+    // window.idBultoActivo (lo actualiza scriptResumenBultoActivo cada 4s, ver ahi -- puede ser
+    // null si no hay bulto Activo en este momento). inputValidator bloquea pesos vacios/no
     // numericos/<=0 sin llegar a enviar el comando.
     function confirmarPesoYEnviar(mensaje, comando, boton) {
       Swal.fire({
@@ -917,7 +923,9 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva) {
           return null;
         }
       }).then(function(resultado) {
-        if (resultado.isConfirmed) enviarComando(comando, boton, { peso: Number(resultado.value) });
+        if (resultado.isConfirmed) {
+          enviarComando(comando, boton, { peso: Number(resultado.value), idBulto: window.idBultoActivo || null });
+        }
       });
     }
 
@@ -926,16 +934,17 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva) {
     // escribe directo en la BD (Estado='En pausa' + fila en SEL_TiempoMuerto) y recarga la pagina
     // -- la recarga dispara abrirModalPausaActiva() mas abajo, que muestra el cronometro.
     var MOTIVOS_PAUSA = [
-      { clave: 'descanso', titulo: 'Descanso' },
-      { clave: 'mantenimiento', titulo: 'Mantenimiento' },
-      { clave: 'alistamiento', titulo: 'Alistamiento' },
-      { clave: 'limpieza', titulo: 'Limpieza y desinfección' },
-      { clave: 'otro', titulo: 'Otro' }
+      { clave: 'descanso', titulo: '😴 Descanso' },
+      { clave: 'mantenimiento', titulo: '🔧 Mantenimiento' },
+      { clave: 'alistamiento', titulo: '⚙️ Alistamiento' },
+      { clave: 'orden_aseo', titulo: '🧹 Orden y aseo' },
+      { clave: 'limpieza', titulo: '🧼 Limpieza y desinfección' },
+      { clave: 'otro', titulo: '❓ Otro' }
     ];
     var SUBMOTIVOS_ALISTAMIENTO = [
-      { clave: 'materiales', titulo: 'Materiales' },
-      { clave: 'mecanico', titulo: 'Mecánico' },
-      { clave: 'espacio_trabajo', titulo: 'Espacio de trabajo' }
+      { clave: 'materiales', titulo: '📦 Materiales' },
+      { clave: 'mecanico', titulo: '🔩 Mecánico' },
+      { clave: 'espacio_trabajo', titulo: '📐 Espacio de trabajo' }
     ];
 
     function abrirPausa() {
@@ -1218,16 +1227,17 @@ function scriptConfirmarFinalizar() {
 function scriptPreguntaActividadInicial() {
   return `
     var MOTIVOS_PAUSA_INICIAL = [
-      { clave: 'descanso', titulo: 'Descanso' },
-      { clave: 'mantenimiento', titulo: 'Mantenimiento' },
-      { clave: 'alistamiento', titulo: 'Alistamiento' },
-      { clave: 'limpieza', titulo: 'Limpieza y desinfección' },
-      { clave: 'otro', titulo: 'Otro' }
+      { clave: 'descanso', titulo: '😴 Descanso' },
+      { clave: 'mantenimiento', titulo: '🔧 Mantenimiento' },
+      { clave: 'alistamiento', titulo: '⚙️ Alistamiento' },
+      { clave: 'orden_aseo', titulo: '🧹 Orden y aseo' },
+      { clave: 'limpieza', titulo: '🧼 Limpieza y desinfección' },
+      { clave: 'otro', titulo: '❓ Otro' }
     ];
     var SUBMOTIVOS_ALISTAMIENTO_INICIAL = [
-      { clave: 'materiales', titulo: 'Materiales' },
-      { clave: 'mecanico', titulo: 'Mecánico' },
-      { clave: 'espacio_trabajo', titulo: 'Espacio de trabajo' }
+      { clave: 'materiales', titulo: '📦 Materiales' },
+      { clave: 'mecanico', titulo: '🔩 Mecánico' },
+      { clave: 'espacio_trabajo', titulo: '📐 Espacio de trabajo' }
     ];
 
     function preguntarActividadInicial(idOrden, alTerminar) {
@@ -2171,7 +2181,9 @@ app.get('/selladora/:codigo/orden/:idOrden/bultos/fragmento', requireLogin, asyn
 // Resumen del bulto Activo (paquetes pesados + peso acumulado) para la pagina de Informacion --
 // a pedido del usuario (27/08/2026), en vivo via polling (ver scriptResumenBultoActivo()). Si la
 // orden no tiene bulto Activo en este momento devuelve ceros, no un error (puede pasar entre que
-// se cierra un bulto y se abre el siguiente).
+// se cierra un bulto y se abre el siguiente). Tambien devuelve idBulto (01/09/2026) -- lo guarda
+// scriptResumenBultoActivo en window.idBultoActivo para que confirmarPesoYEnviar (scriptComandos)
+// lo mande junto con el peso al marcar un residuo/salida no conforme.
 app.get('/selladora/:codigo/orden/:idOrden/resumen-bulto-activo', requireLogin, async (req, res) => {
   const { idOrden } = req.params;
   try {
@@ -2183,14 +2195,14 @@ app.get('/selladora/:codigo/orden/:idOrden/resumen-bulto-activo', requireLogin, 
       ORDER BY b.id DESC
     `);
     if (dtBultoActivo.recordset.length === 0) {
-      return res.json({ ok: true, paquetes: 0, pesoTotalGr: 0 });
+      return res.json({ ok: true, paquetes: 0, pesoTotalGr: 0, idBulto: null });
     }
     const idBulto = dtBultoActivo.recordset[0].id;
     const resumen = await p.request().input('idBulto', idBulto).query(`
       SELECT COUNT(*) AS Paquetes, ISNULL(SUM(PesoPaqueGr), 0) AS PesoTotalGr
       FROM SEL_PesajeElemento WHERE id_bulto = @idBulto
     `);
-    res.json({ ok: true, paquetes: resumen.recordset[0].Paquetes, pesoTotalGr: Number(resumen.recordset[0].PesoTotalGr) });
+    res.json({ ok: true, paquetes: resumen.recordset[0].Paquetes, pesoTotalGr: Number(resumen.recordset[0].PesoTotalGr), idBulto });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -2294,7 +2306,7 @@ function renderEscanear(maquinaCodigo, maquinaNombre, idOrden, nuevo, bolsasActu
     <button type="button" onclick="consultar(document.getElementById('txtManual').value)">Buscar</button>
   </div>
   <div id="resultado"></div>
-  <a class="volver" href="/selladora/${maquinaCodigo}">‹ Volver</a>
+  <a class="volver" href="${nuevo ? `/selladora/${maquinaCodigo}/orden/${idOrden}` : `/selladora/${maquinaCodigo}`}">‹ Volver</a>
 
   <script src="/html5-qrcode.min.js"></script>
   <script src="/sweetalert2.min.js"></script>
@@ -2517,9 +2529,11 @@ app.post('/api/selladora/orden/:idOrden/rollo', requireLogin, async (req, res) =
 // reimprimir_etiqueta va con `datos` describiendo un paquete YA pesado (idBulto/serialBulto/
 // consecutivoPaquete/pesoGr, ver reimprimirPaquete() en renderBultosOrden) para que Node-RED sepa
 // cual de todos hay que volver a imprimir, no necesariamente el que esta activo ahora.
-// 'retal'/'troquelado'/'refilado'/'no_conforme' (01/09/2026) van con `datos: {peso}` -- el operario
-// lo escribe en una ventana emergente (confirmarPesoYEnviar en scriptComandos) antes de enviarse,
-// para que Node-RED lo use al imprimir la etiqueta del residuo/salida no conforme.
+// 'retal'/'troquelado'/'refilado'/'no_conforme' (01/09/2026) van con `datos: {peso, idBulto}` -- el
+// peso lo escribe el operario en una ventana emergente (confirmarPesoYEnviar en scriptComandos)
+// antes de enviarse; idBulto es el bulto Activo en ese momento (window.idBultoActivo, lo mantiene
+// scriptResumenBultoActivo -- puede ser null si no hay bulto Activo). Ambos van para que Node-RED
+// sepa a que bulto pertenece e imprima la etiqueta del residuo/salida no conforme.
 const COMANDOS_VALIDOS = new Set([
   'imprimir_etiqueta', 'reimprimir_etiqueta', 'cierre_bulto', 'retal', 'troquelado', 'refilado', 'calidad', 'no_conforme'
 ]);
@@ -2529,7 +2543,7 @@ const COMANDOS_VALIDOS = new Set([
 // inventario/numeracion como Retal/Troquelado, asi que no hacia falta migrarlo. "SEL_EjecucionOrden
 // debe quedar UN solo registro por orden" (mismo criterio que scan-rollo.js) -- se busca por
 // IdOrden, no hay que resolver bulto activo para esto.
-const MOTIVOS_PAUSA_VALIDOS = new Set(['descanso', 'mantenimiento', 'alistamiento', 'limpieza', 'otro']);
+const MOTIVOS_PAUSA_VALIDOS = new Set(['descanso', 'mantenimiento', 'alistamiento', 'orden_aseo', 'limpieza', 'otro']);
 const SUBMOTIVOS_ALISTAMIENTO_VALIDOS = new Set(['materiales', 'mecanico', 'espacio_trabajo']);
 
 app.post('/api/selladora/orden/:idOrden/pausar', requireLogin, async (req, res) => {
