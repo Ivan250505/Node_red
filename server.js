@@ -150,6 +150,16 @@ function jsString(texto) {
   return JSON.stringify(texto == null ? '' : String(texto)).replace(/</g, '\\u003c');
 }
 
+// Formatea una fecha/hora de la BD (mssql devuelve DATETIME como objeto Date de JS) para mostrar en
+// el HTML -- ej. "01/09/2026 14:32". Usado en la cola de ordenes para mostrar cuando se finalizo una
+// orden (SEL_EjecucionOrden.HoraFinReal, ver renderColaOrdenes), a pedido del usuario (01/09/2026).
+function formatearFechaHora(fecha) {
+  if (!fecha) return '';
+  return new Date(fecha).toLocaleString('es-CO', {
+    day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false
+  });
+}
+
 function renderLogin(error) {
   return `<!DOCTYPE html>
 <html lang="es">
@@ -460,10 +470,14 @@ function estilosBase() {
     .pesajes-box[open] summary::before { content: '▾ '; }
     .pesajes-box summary + * { margin-top: 6px; }
     .pesaje-fila {
-      display: flex; justify-content: space-between; gap: 8px; font-size: 13px;
+      display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13px;
       padding: 4px 0; color: var(--texto-suave);
     }
     .pesaje-vacio { font-size: 13px; color: var(--texto-suave); }
+    .link-reimprimir {
+      color: #00a2cb; text-decoration: underline; font-size: 13px; flex-shrink: 0; cursor: pointer;
+    }
+    .link-reimprimir.deshabilitado { pointer-events: none; opacity: 0.5; }
     .hist-fila {
       display: grid; grid-template-columns: 1.4fr 1fr 0.7fr; gap: 8px; font-size: 13px;
       padding: 8px 0; border-bottom: 1px solid #eef0f2;
@@ -511,13 +525,15 @@ function estilosBase() {
       display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch;
     }
     .separador-v { width: 1px; background: #d0d7de; align-self: stretch; }
+    .imprimir-acciones-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: stretch;
+    }
     .btn-imprimir {
-      background: #0078d7; min-height: 110px; width: auto; margin: 0 auto;
+      background: #0078d7; min-height: 110px; width: 100%;
       display: flex; align-items: center; justify-content: center;
     }
     .btn-cierre-bulto { background: var(--naranja); }
     .btn-residuo { background: var(--texto-suave); }
-    .btn-calidad { background: var(--verde); }
     .btn-no-conforme { background: #c00000; }
     .btn-pausa { background: var(--naranja); }
     .btn-accion:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -543,6 +559,7 @@ function estilosBase() {
     @media (max-width: 480px) {
       .ejecucion-grid { grid-template-columns: 1fr 1fr; }
       .grid { grid-template-columns: 1fr; }
+      .imprimir-acciones-grid { grid-template-columns: 1fr; }
       header h1 { font-size: 18px; }
       .barra { flex-direction: column; align-items: stretch; }
       .actualizado { text-align: center; }
@@ -606,11 +623,36 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
 // mismas reglas de habilitacion que EjecucionSelladora.vb (dgvEjecuciones_CellFormatting +
 // HandleIniciar/HandleAnadirRollo): Pendiente -> Iniciar, Activa -> +Rollo y Finalizar,
 // PendienteValidacion -> sin accion (Residuos/Verificar/Cerrar Definitivo quedan en el escritorio).
-function renderColaOrdenes(ordenes, maquinaCodigo) {
+function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
   if (ordenes.length === 0) return '';
   const filas = ordenes.map(o => {
     let acciones = `<a class="btn-accion btn-info" href="/selladora/${maquinaCodigo}/orden/${o.IdOrden}">ℹ Información</a>`;
-    if (o.Estado === 'Pendiente') {
+    // FIX 01/09/2026: no basta con EstadoEjecucion='PendienteOperador' -- ese flag solo se pone si
+    // el operario anterior cerro sesion con el boton Salir; si el servidor se reinicia a mitad de
+    // turno, las sesiones se pierden pero esa fila nunca se marca. Por eso se combinan dos señales
+    // (OR, no se reemplaza una por la otra):
+    //  1) el flag 'PendienteOperador' -- cubre el logout explicito, y a proposito NO se apaga solo
+    //     porque el operario coincida: aunque sea el mismo que se fue, debe confirmar "Reanudar"
+    //     explicitamente (esa confirmacion fue pedida a proposito, no es un no-op).
+    //  2) comparacion EN VIVO del Operario de la ejecucion contra quien esta mirando esta pagina
+    //     ahora -- cubre el reinicio del servidor sin logout, donde el flag nunca se puso.
+    // Si nadie de las dos aplica (el operario coincide Y no hay flag), es continuidad normal: no
+    // hace falta boton, +Rollo/Finalizar quedan disponibles de una.
+    const flagPendienteOperador = o.Estado === 'Activa' && o.EstadoEjecucion === 'PendienteOperador';
+    const operarioDistintoEnVivo = o.Estado === 'Activa' && o.EstadoEjecucion != null && !!miOperario && o.OperarioEjecucionCodigo !== miOperario;
+    const necesitaTomarControl = flagPendienteOperador || operarioDistintoEnVivo;
+    let infoOperarioAsignado = '';
+    let infoFinalizada = '';
+    if (necesitaTomarControl) {
+      const esElMismo = miOperario != null && o.OperarioEjecucionCodigo === miOperario;
+      const nombreAsignado = o.OperarioEjecucionNombre || 'un operario sin nombre configurado';
+      const textoBoton = esElMismo ? '▶ Reanudar ejecución' : '🔓 Retomar ejecución';
+      infoOperarioAsignado = `<div class="orden-elemento" style="color:var(--naranja);font-weight:600;">Operario anterior: ${nombreAsignado}</div>`;
+      acciones += `
+        <form method="post" action="/api/selladora/orden/${o.IdOrden}/tomar-control-ejecucion" onsubmit="return confirmarTomarControlEjecucion(event, this, ${esElMismo}, ${jsString(nombreAsignado).replace(/"/g, '&quot;')});">
+          <button type="submit" class="btn-accion" style="background:#b46200;">${textoBoton}</button>
+        </form>`;
+    } else if (o.Estado === 'Pendiente') {
       acciones += `<a class="btn-accion btn-iniciar" href="/selladora/${maquinaCodigo}/orden/${o.IdOrden}/escanear?nuevo=0">▶ Iniciar</a>`;
     } else if (o.Estado === 'Activa') {
       acciones += `
@@ -620,17 +662,28 @@ function renderColaOrdenes(ordenes, maquinaCodigo) {
         </form>`;
     } else {
       acciones += `<span class="label">Esperando validación del digitador</span>`;
+      // FIX 01/09/2026: se muestra la hora en la que se finalizo (SEL_EjecucionOrden.HoraFinReal,
+      // la pone finalizarOrden() al dar "Finalizar") -- a pedido del usuario, para saber desde
+      // cuando esta orden quedo esperando validacion, no solo que esta esperando. Debajo de la
+      // referencia del pedido (orden-elemento), no pegado al texto de estado -- quedaba mal ahi.
+      const horaFin = formatearFechaHora(o.HoraFinReal);
+      if (horaFin) infoFinalizada = `<div class="orden-elemento">Finalizada: ${horaFin}</div>`;
     }
+    const badge = necesitaTomarControl
+      ? `<span class="badge badge-temporal">Pendiente de operador</span>`
+      : badgeEstadoOrden(o.Estado);
     return `
       <div class="orden-cola">
         <div class="orden-info">
-          <div class="orden-pedido">Pedido ${o.NumeroPedido || '—'} ${badgeEstadoOrden(o.Estado)}</div>
+          <div class="orden-pedido">Pedido ${o.NumeroPedido || '—'} ${badge}</div>
           <div class="orden-elemento">${o.Elemento}</div>
+          ${infoOperarioAsignado}
+          ${infoFinalizada}
         </div>
         <div class="orden-acciones">${acciones}</div>
       </div>`;
   }).join('');
-  return `<h2 style="font-size:15px;margin:0 0 10px;">Órdenes de esta máquina</h2>${filas}`;
+  return `<h2 style="font-size:15px;margin:0 0 10px;">Programación máquina</h2>${filas}`;
 }
 
 // Widget de peso en vivo (pagina de Informacion de la orden, solo con la orden Activa) -- se
@@ -661,7 +714,7 @@ function scriptPesoEnVivo() {
           var texto = '—';
           try {
             var json = JSON.parse(evento.data);
-            if (json && typeof json.peso === 'number') texto = json.peso.toFixed(3);
+            if (json && typeof json.peso === 'number') texto = json.peso.toFixed(2);
           } catch (e) { /* mensaje no valido -- se deja el guion */ }
           pesoNumero.textContent = texto;
         };
@@ -674,7 +727,9 @@ function scriptPesoEnVivo() {
 // Resumen del bulto Activo (paquetes pesados + peso acumulado) -- a pedido del usuario
 // (27/08/2026), se actualiza solo cada 4s pidiendo /resumen-bulto-activo (no viene por el
 // websocket de peso: ese es la lectura instantanea de la bascula, esto es la suma acumulada de
-// los paquetes ya registrados en SEL_PesajeElemento para el bulto Activo).
+// los paquetes ya registrados en SEL_PesajeElemento para el bulto Activo). El endpoint devuelve
+// pesoTotalGr en gramos (asi esta la columna en BD); se muestra en kg con 2 decimales (a pedido
+// del usuario, 31/08/2026).
 function scriptResumenBultoActivo(idOrden, maquinaCodigo) {
   return `
     (function() {
@@ -689,10 +744,37 @@ function scriptResumenBultoActivo(idOrden, maquinaCodigo) {
           const datos = await resp.json();
           if (!datos.ok) return;
           elPaquetes.textContent = datos.paquetes;
-          elPeso.textContent = datos.pesoTotalGr;
+          elPeso.textContent = (datos.pesoTotalGr / 1000).toFixed(2);
         } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
       }
       actualizar();
+      setInterval(actualizar, 4000);
+    })();
+  `;
+}
+
+// Cola de ordenes de la maquina (renderPage/"Programacion máquina") -- se refresca sola cada 4s
+// pidiendo el fragmento ya renderizado (/selladora/:codigo/cola-fragmento, ver obtenerColaOrdenes)
+// y reemplazando el innerHTML del contenedor, en vez de depender de un boton "Actualizar" manual (a
+// pedido del usuario, 01/09/2026). El contenido inicial ya viene renderizado por el servidor en la
+// carga de la pagina, por eso el primer tick es a los 4s (no de una, a diferencia de
+// scriptResumenBultoActivo que arranca con placeholders "—").
+function scriptActualizarCola(maquinaCodigo) {
+  return `
+    (function() {
+      var contenedor = document.getElementById('cola-ordenes');
+      var elActualizado = document.getElementById('cola-actualizado');
+      if (!contenedor) return;
+
+      async function actualizar() {
+        try {
+          const resp = await fetch('/selladora/' + ${jsString(maquinaCodigo)} + '/cola-fragmento');
+          if (!resp.ok) return;
+          const html = await resp.text();
+          contenedor.innerHTML = html;
+          if (elActualizado) elActualizado.textContent = 'Actualizado: ' + new Date().toLocaleTimeString('es-CO');
+        } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
+      }
       setInterval(actualizar, 4000);
     })();
   `;
@@ -808,9 +890,9 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva) {
     }
 
     // Pausa (SEL_TiempoMuerto) -- pantalla emergente para elegir el motivo (Alistamiento
-    // despliega sus 3 subopciones, Otro pide una breve descripcion). Al confirmar, escribe
-    // directo en la BD (Estado='En pausa' + fila en SEL_TiempoMuerto) y recarga la pagina para
-    // mostrar pausaBox con el cronometro arrancando desde la HoraInicio real.
+    // despliega sus 3 subopciones justo debajo, Otro pide una breve descripcion). Al confirmar,
+    // escribe directo en la BD (Estado='En pausa' + fila en SEL_TiempoMuerto) y recarga la pagina
+    // -- la recarga dispara abrirModalPausaActiva() mas abajo, que muestra el cronometro.
     var MOTIVOS_PAUSA = [
       { clave: 'descanso', titulo: 'Descanso' },
       { clave: 'mantenimiento', titulo: 'Mantenimiento' },
@@ -825,16 +907,22 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva) {
     ];
 
     function abrirPausa() {
-      var htmlMotivos = MOTIVOS_PAUSA.map(function(m) {
-        return '<label class="calidad-opcion" style="display:flex;margin-bottom:8px;"><input type="radio" name="motivoPausa" value="' + m.clave + '"> ' + m.titulo + '</label>';
-      }).join('');
       var htmlSubmotivos = SUBMOTIVOS_ALISTAMIENTO.map(function(s) {
-        return '<label class="calidad-opcion" style="display:flex;margin-bottom:8px;padding-left:20px;"><input type="radio" name="subtipoPausa" value="' + s.clave + '"> ' + s.titulo + '</label>';
+        return '<label class="calidad-opcion" style="display:flex;margin-bottom:6px;"><input type="radio" name="subtipoPausa" value="' + s.clave + '"> ' + s.titulo + '</label>';
+      }).join('');
+
+      // Las subopciones de Alistamiento van justo debajo de esa opcion (a pedido del usuario,
+      // 31/08/2026), no en un bloque aparte al final de la lista.
+      var htmlMotivos = MOTIVOS_PAUSA.map(function(m) {
+        var item = '<label class="calidad-opcion" style="display:flex;margin-bottom:8px;"><input type="radio" name="motivoPausa" value="' + m.clave + '"> ' + m.titulo + '</label>';
+        if (m.clave === 'alistamiento') {
+          item += '<div id="pausa-submotivos" style="display:none;margin:0 0 8px 24px;">' + htmlSubmotivos + '</div>';
+        }
+        return item;
       }).join('');
 
       var html =
         '<div style="text-align:left;">' + htmlMotivos + '</div>' +
-        '<div id="pausa-submotivos" style="display:none;text-align:left;">' + htmlSubmotivos + '</div>' +
         '<div id="pausa-observaciones-wrap" style="display:none;text-align:left;margin-top:8px;">' +
           '<label for="pausa-observaciones">Describa el motivo</label>' +
           '<input type="text" id="pausa-observaciones" maxlength="200">' +
@@ -895,38 +983,66 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva) {
       });
     }
 
-    function reanudarEjecucion(boton) {
-      boton.disabled = true;
-      fetch('/api/selladora/orden/${idOrden}/reanudar', { method: 'POST' })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-          if (data.ok) { location.reload(); }
-          else {
-            boton.disabled = false;
-            Swal.fire({ icon: 'error', title: 'Error', text: data.error || 'No se pudo reanudar.', confirmButtonColor: '#71bf44' });
+    // Cronometro de la pausa: ventana emergente BLOQUEANTE (a pedido del usuario, 31/08/2026) --
+    // sin boton cancelar/cerrar, sin cerrar por click afuera ni Escape (allowOutsideClick/
+    // allowEscapeKey en false). La UNICA forma de cerrarla es "Reanudar", y eso pasa por
+    // preConfirm: si /reanudar falla, la ventana se queda abierta mostrando el error (no se cierra
+    // "en falso"). Arranca desde pausaInfo.HoraInicio (la real, guardada en BD), no desde que se
+    // abre la ventana -- por eso tambien se auto-abre sola al cargar la pagina si la ejecucion ya
+    // esta en pausa (ver el llamado mas abajo), y no solo cuando el operario acaba de pausar.
+    function abrirModalPausaActiva(pausaInfo) {
+      var motivo = MOTIVOS_PAUSA.find(function(m) { return m.clave === pausaInfo.Tipo; });
+      var motivoTexto = motivo ? motivo.titulo : pausaInfo.Tipo;
+      if (pausaInfo.Subtipo) {
+        var sub = SUBMOTIVOS_ALISTAMIENTO.find(function(s) { return s.clave === pausaInfo.Subtipo; });
+        motivoTexto += ' · ' + (sub ? sub.titulo : pausaInfo.Subtipo);
+      }
+      if (pausaInfo.Observaciones) motivoTexto += ' — ' + pausaInfo.Observaciones;
+
+      var inicio = new Date(pausaInfo.HoraInicio).getTime();
+      var intervalId;
+
+      Swal.fire({
+        title: '⏸ En pausa',
+        html: '<div style="font-size:14px;color:#64748b;margin-bottom:10px;">' + motivoTexto + '</div>' +
+              '<div style="font-size:36px;font-weight:700;color:#006984;" id="pausa-cronometro-modal">00:00:00</div>',
+        confirmButtonText: '▶ Reanudar',
+        confirmButtonColor: '#4a9c2e',
+        showCancelButton: false,
+        showCloseButton: false,
+        allowOutsideClick: false,
+        allowEscapeKey: false,
+        didOpen: function() {
+          var el = document.getElementById('pausa-cronometro-modal');
+          function actualizar() {
+            var seg = Math.max(0, Math.floor((Date.now() - inicio) / 1000));
+            var hh = String(Math.floor(seg / 3600)).padStart(2, '0');
+            var mm = String(Math.floor((seg % 3600) / 60)).padStart(2, '0');
+            var ss = String(seg % 60).padStart(2, '0');
+            el.textContent = hh + ':' + mm + ':' + ss;
           }
-        })
-        .catch(function(err) {
-          boton.disabled = false;
-          Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo reanudar: ' + err.message, confirmButtonColor: '#71bf44' });
-        });
+          actualizar();
+          intervalId = setInterval(actualizar, 1000);
+        },
+        willClose: function() { clearInterval(intervalId); },
+        preConfirm: function() {
+          return fetch('/api/selladora/orden/${idOrden}/reanudar', { method: 'POST' })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+              if (!data.ok) { Swal.showValidationMessage(data.error || 'No se pudo reanudar.'); return false; }
+              return true;
+            })
+            .catch(function(err) {
+              Swal.showValidationMessage('No se pudo reanudar: ' + err.message);
+              return false;
+            });
+        }
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) location.reload();
+      });
     }
 
-    ${pausaActiva ? `
-    (function() {
-      var el = document.getElementById('pausa-cronometro');
-      if (!el) return;
-      var inicio = new Date(${JSON.stringify(pausaActiva.HoraInicio)}).getTime();
-      function actualizar() {
-        var seg = Math.max(0, Math.floor((Date.now() - inicio) / 1000));
-        var hh = String(Math.floor(seg / 3600)).padStart(2, '0');
-        var mm = String(Math.floor((seg % 3600) / 60)).padStart(2, '0');
-        var ss = String(seg % 60).padStart(2, '0');
-        el.textContent = hh + ':' + mm + ':' + ss;
-      }
-      actualizar();
-      setInterval(actualizar, 1000);
-    })();` : ''}
+    ${pausaActiva ? `abrirModalPausaActiva(${JSON.stringify(pausaActiva)});` : 'programarCalidadAleatoria();'}
 
     // Apartado de Calidad: pantalla emergente con las preguntas agrupadas por apartado (Pelicula,
     // Sellado, Accesorios, Troquelado/Perforaciones -- ver construirApartadosCalidad() en
@@ -1001,10 +1117,28 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva) {
         enviarComando('calidad', null, resultado.value);
       });
     }
+
+    // Calidad ya no tiene boton (a pedido del usuario, 31/08/2026) -- sale sola, en un momento
+    // aleatorio entre 20 y 30 minutos desde que la orden esta Activa, y se repite mientras siga
+    // asi (cada vez que se cierra el modal se programa el siguiente, con un nuevo intervalo
+    // aleatorio). Solo corre en esta carga de pagina -- un refresh reinicia la cuenta, no hay
+    // forma de "recordar" el tiempo transcurrido de una carga a otra sin guardar algo en el
+    // servidor, que no se pidio. No se programa mientras hay una pausa activa (ver el llamado al
+    // final del archivo) para no competir con esa ventana bloqueante.
+    function programarCalidadAleatoria() {
+      var minMs = 20 * 60 * 1000;
+      var maxMs = 30 * 60 * 1000;
+      var espera = minMs + Math.random() * (maxMs - minMs);
+      setTimeout(function() {
+        abrirCalidad();
+        programarCalidadAleatoria();
+      }, espera);
+    }
   `;
 }
 
-// Script compartido por renderPage y renderOrdenDetalle -- confirmacion antes de Finalizar.
+// Script compartido por renderPage y renderOrdenDetalle -- confirmacion antes de Finalizar, y
+// (31/08/2026) antes de Tomar control de una ejecucion PendienteOperador.
 function scriptConfirmarFinalizar() {
   return `
     function confirmarFinalizar(evento, formulario) {
@@ -1021,12 +1155,135 @@ function scriptConfirmarFinalizar() {
       }).then(resultado => { if (resultado.isConfirmed) formulario.submit(); });
       return false;
     }
+
+    function confirmarTomarControlEjecucion(evento, formulario, esElMismo, nombreOperarioAnterior) {
+      evento.preventDefault();
+      Swal.fire({
+        icon: 'question',
+        title: esElMismo ? '¿Reanudar esta ejecución?' : '¿Retomar esta ejecución?',
+        text: 'Esta ejecución estaba siendo ejecutada por "' + nombreOperarioAnterior + '". Al confirmar la retoma con su usuario.',
+        showCancelButton: true,
+        confirmButtonText: esElMismo ? 'Sí, reanudar' : 'Sí, retomar',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#b46200',
+        cancelButtonColor: '#71bf44'
+      }).then(resultado => { if (resultado.isConfirmed) formulario.submit(); });
+      return false;
+    }
+  `;
+}
+
+// Antes de entrar a producir -- al Iniciar una orden con su primer rollo (renderEscanear, nuevo=0
+// unicamente, NO aplica a +Rollo) o al Retomar/Reanudar una ejecucion tras un cambio de operario
+// (confirmarTomarControlEjecucion arriba) -- se pregunta si hay alguna actividad de las que se
+// registran como pausa (Alistamiento, Mantenimiento, etc.) por hacer primero, o si se entra directo
+// a producir (a pedido del usuario, 31/08/2026). Si elige una actividad, queda registrada igual que
+// si hubiera usado el boton "Pausa" normal (mismo POST /pausar) -- la ejecucion arranca/vuelve en
+// 'En pausa' desde ese momento, en vez de tener que pausarla a mano despues de haber entrado.
+// Comparte los mismos motivos/submotivos que abrirPausa() en scriptComandos(), pero se duplican aca
+// (MOTIVOS_PAUSA_INICIAL) porque esta funcion se usa en paginas (renderEscanear, renderPage) que no
+// cargan scriptComandos.
+function scriptPreguntaActividadInicial() {
+  return `
+    var MOTIVOS_PAUSA_INICIAL = [
+      { clave: 'descanso', titulo: 'Descanso' },
+      { clave: 'mantenimiento', titulo: 'Mantenimiento' },
+      { clave: 'alistamiento', titulo: 'Alistamiento' },
+      { clave: 'limpieza', titulo: 'Limpieza y desinfección' },
+      { clave: 'otro', titulo: 'Otro' }
+    ];
+    var SUBMOTIVOS_ALISTAMIENTO_INICIAL = [
+      { clave: 'materiales', titulo: 'Materiales' },
+      { clave: 'mecanico', titulo: 'Mecánico' },
+      { clave: 'espacio_trabajo', titulo: 'Espacio de trabajo' }
+    ];
+
+    function preguntarActividadInicial(idOrden, alTerminar) {
+      Swal.fire({
+        icon: 'question',
+        title: '¿Va a realizar alguna actividad antes de producir?',
+        text: 'Por ejemplo alistamiento, mantenimiento o limpieza. Si no, entra directo a producción.',
+        showCancelButton: true,
+        confirmButtonText: 'Sí, registrar actividad',
+        cancelButtonText: '▶ Entrar a producción',
+        confirmButtonColor: '#b46200',
+        cancelButtonColor: '#4a9c2e'
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) { elegirMotivoInicial(idOrden, alTerminar); }
+        else { alTerminar(); }
+      });
+    }
+
+    function elegirMotivoInicial(idOrden, alTerminar) {
+      var htmlSubmotivos = SUBMOTIVOS_ALISTAMIENTO_INICIAL.map(function(s) {
+        return '<label style="display:flex;margin-bottom:6px;"><input type="radio" name="subtipoPausaInicial" value="' + s.clave + '"> ' + s.titulo + '</label>';
+      }).join('');
+      var htmlMotivos = MOTIVOS_PAUSA_INICIAL.map(function(m) {
+        var item = '<label style="display:flex;margin-bottom:8px;"><input type="radio" name="motivoPausaInicial" value="' + m.clave + '"> ' + m.titulo + '</label>';
+        if (m.clave === 'alistamiento') {
+          item += '<div id="pausa-inicial-submotivos" style="display:none;margin:0 0 8px 24px;">' + htmlSubmotivos + '</div>';
+        }
+        return item;
+      }).join('');
+      var html =
+        '<div style="text-align:left;">' + htmlMotivos + '</div>' +
+        '<div id="pausa-inicial-observaciones-wrap" style="display:none;text-align:left;margin-top:8px;">' +
+          '<label for="pausa-inicial-observaciones" style="display:block;font-size:13px;font-weight:600;margin:10px 0 6px;">Describa el motivo</label>' +
+          '<input type="text" id="pausa-inicial-observaciones" maxlength="200" style="width:100%;padding:10px 12px;border:1px solid #d0d7de;border-radius:10px;font-size:16px;box-sizing:border-box;">' +
+        '</div>';
+      Swal.fire({
+        title: 'Motivo de la actividad',
+        html: html,
+        confirmButtonText: 'Registrar',
+        confirmButtonColor: '#71bf44',
+        showCancelButton: true,
+        cancelButtonText: 'Cancelar',
+        didOpen: function() {
+          var radios = document.getElementsByName('motivoPausaInicial');
+          for (var i = 0; i < radios.length; i++) {
+            radios[i].addEventListener('change', function() {
+              document.getElementById('pausa-inicial-submotivos').style.display = (this.value === 'alistamiento') ? 'block' : 'none';
+              document.getElementById('pausa-inicial-observaciones-wrap').style.display = (this.value === 'otro') ? 'block' : 'none';
+            });
+          }
+        },
+        preConfirm: function() {
+          var tipoEl = document.querySelector('input[name=motivoPausaInicial]:checked');
+          if (!tipoEl) { Swal.showValidationMessage('Seleccione un motivo.'); return false; }
+          var tipo = tipoEl.value;
+          var subtipo = null;
+          if (tipo === 'alistamiento') {
+            var subEl = document.querySelector('input[name=subtipoPausaInicial]:checked');
+            if (!subEl) { Swal.showValidationMessage('Seleccione el motivo de alistamiento.'); return false; }
+            subtipo = subEl.value;
+          }
+          var observaciones = null;
+          if (tipo === 'otro') {
+            observaciones = document.getElementById('pausa-inicial-observaciones').value.trim();
+            if (!observaciones) { Swal.showValidationMessage('Describa el motivo.'); return false; }
+          }
+          return fetch('/api/selladora/orden/' + idOrden + '/pausar', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tipo: tipo, subtipo: subtipo, observaciones: observaciones })
+          }).then(function(r) { return r.json(); }).then(function(data) {
+            if (!data.ok) { Swal.showValidationMessage(data.error || 'No se pudo registrar.'); return false; }
+            return true;
+          }).catch(function(err) {
+            Swal.showValidationMessage('Error de conexión: ' + err.message);
+            return false;
+          });
+        }
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) { alTerminar(); }
+        else { preguntarActividadInicial(idOrden, alTerminar); }
+      });
+    }
   `;
 }
 
 // Solo la cola de ordenes de la maquina -- el detalle de bultos/pesajes/historial de cada orden
 // vive en /selladora/:codigo/orden/:idOrden (boton "Informacion").
-function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes) {
+function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, miOperario, idOrdenPreguntarActividad) {
   return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -1047,18 +1304,26 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes) {
       </div>
       <a class="volver" href="/">‹ Selladoras</a>
       <h1>🏭 ${maquinaNombre}</h1>
-      <div class="sub">Órdenes de esta máquina</div>
+      <div class="sub">Programación máquina</div>
     </div>
   </header>
   <main>
     <div class="barra">
-      <span class="actualizado">Actualizado: ${new Date().toLocaleTimeString('es-CO')}</span>
-      <form method="get" action="/selladora/${maquinaCodigo}"><button type="submit">↻ Actualizar</button></form>
+      <span class="actualizado" id="cola-actualizado">Actualizado: ${new Date().toLocaleTimeString('es-CO')}</span>
     </div>
-    ${renderColaOrdenes(colaOrdenes || [], maquinaCodigo)}
+    <div id="cola-ordenes">${renderColaOrdenes(colaOrdenes || [], maquinaCodigo, miOperario)}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptConfirmarFinalizar()}</script>
+  <script>${scriptPreguntaActividadInicial()}</script>
+  <script>${scriptActualizarCola(maquinaCodigo)}</script>
+  ${idOrdenPreguntarActividad ? `<script>
+    // Termine con actividad o directo a produccion, se entra a Informacion de la orden retomada --
+    // no se queda en la cola de la maquina (a pedido del usuario, 31/08/2026).
+    preguntarActividadInicial(${JSON.stringify(idOrdenPreguntarActividad)}, function() {
+      window.location.href = ${JSON.stringify(`/selladora/${maquinaCodigo}/orden/${idOrdenPreguntarActividad}`)};
+    });
+  </script>` : ''}
   ${error ? `<script>Swal.fire({ icon: 'error', title: 'Error', text: ${jsString(error)}, confirmButtonColor: '#71bf44' });</script>` : ''}
 </body>
 </html>`;
@@ -1151,7 +1416,11 @@ const BOTONES_RESIDUOS = [
 // bultos producidos NO viven aqui -- con las columnas de especificaciones esta pagina ya tiene
 // suficiente informacion; los bultos se ven aparte en
 // /selladora/:codigo/orden/:idOrden/bultos (ver renderBultosOrden), enlazados desde aqui.
-function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, relevo, pausaActiva) {
+// FIX 31/08/2026: el aviso de relevo ("Esta máquina la está operando X" + "Tomar control") que
+// vivia aca se elimino -- a pedido del usuario, esa accion (MERGE SEL_OperarioActualMaquina) ahora
+// la hacen los botones condicionales de la cola de ordenes de la maquina (renderColaOrdenes,
+// "Tomar control de la ejecución"/"Reanudar ejecución"), asi que ya no hacia falta duplicarla aca.
+function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva) {
   const filasHistorial = historial.length
     ? historial.map(h => `
         <div class="hist-fila">
@@ -1160,18 +1429,6 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
           <span>${h.Lote ?? '—'}</span>
         </div>`).join('')
     : `<div class="pesaje-vacio">Sin materia prima registrada todavía.</div>`;
-
-  // FIX 24/08/2026: aviso de relevo -- no se asume el cambio de operario solo por entrar a
-  // mirar la pagina, el operario debe confirmarlo explicitamente (ver
-  // agregar_operarioactualmaquina.sql).
-  const bloqueRelevo = relevo ? `
-    <div class="error" style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
-      <span>Esta máquina la está operando <strong>${relevo.nombreOperarioActual}</strong>.</span>
-      <form method="post" action="/api/selladora/maquina/${maquinaCodigo}/tomar-control" style="width:auto;">
-        <input type="hidden" name="idOrden" value="${orden.IdOrden}">
-        <button type="submit" class="btn-accion" style="background:#b46200;">Tomar control</button>
-      </form>
-    </div>` : '';
 
   let acciones = '';
   const activa = orden.Estado === 'Activa';
@@ -1207,7 +1464,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     <div class="peso-box">
       <div class="peso-top">
         <div>
-          <div class="label">Peso en vivo (báscula)</div>
+          <div class="label">Peso paquete (báscula)</div>
           <div class="peso-valor"><span id="peso-numero">—</span><span class="unidad">kg</span></div>
         </div>
         <div>
@@ -1216,55 +1473,30 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
         </div>
         <div>
           <div class="label">Peso acumulado</div>
-          <div class="peso-valor"><span id="resumen-peso-acumulado">—</span><span class="unidad">g</span></div>
+          <div class="peso-valor"><span id="resumen-peso-acumulado">—</span><span class="unidad">kg</span></div>
         </div>
         <span class="peso-estado desconectado" id="peso-estado">Conectando…</span>
       </div>
     </div>` : '';
 
-  // Imprimir etiqueta en su propia caja, independiente del resto de acciones (a pedido del
-  // usuario, 27/08/2026).
-  const imprimirBox = activa ? `
+  // Imprimir etiqueta + resto de acciones (Cierre bulto/Retal/Troquelado/Refilado/Calidad/Salida
+  // no conforme/Pausa) van en la MISMA fila, en dos columnas (a pedido del usuario, 31/08/2026):
+  // izquierda Imprimir etiqueta, derecha el resto. El boton de Pausa solo aparece si NO esta ya
+  // pausada -- mientras esta pausada, el cronometro sale como ventana emergente aparte (ver
+  // abrirModalPausaActiva en scriptComandos), no hay caja para eso en la pagina.
+  const imprimirYAccionesBox = activa ? `
     <div class="peso-box">
-      <button type="button" class="btn-accion btn-imprimir" onclick="confirmarYEnviar('¿Está seguro de imprimir la etiqueta?', 'imprimir_etiqueta', this)">🖨️ Imprimir etiqueta</button>
-    </div>` : '';
-
-  // Resto de acciones (Cierre bulto/Retal/Troquelado/Refilado/Calidad/Salida no conforme/Pausa)
-  // juntas en su propia caja, separadas de Imprimir etiqueta. El boton de Pausa solo aparece si NO
-  // esta ya pausada (mientras esta pausada, se reemplaza por pausaBox con el cronometro).
-  const accionesBox = activa ? `
-    <div class="peso-box">
-      <div class="botones-fila">
-        <button type="button" class="btn-accion btn-cierre-bulto" onclick="confirmarYEnviar('¿Está seguro de cerrar el bulto?', 'cierre_bulto', this)">📦 Cierre bulto</button>
-        ${botonesResiduosHTML}
-        <span class="separador-v"></span>
-        <button type="button" class="btn-accion btn-calidad" onclick="abrirCalidad()">✅ Calidad</button>
-        <span class="separador-v"></span>
-        <button type="button" class="btn-accion btn-no-conforme" onclick="confirmarYEnviar('¿Está seguro de marcar esta salida como no conforme?', 'no_conforme', this)">🚫 Salida no conforme</button>
-        ${!pausaActiva ? `
-        <span class="separador-v"></span>
-        <button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>` : ''}
-      </div>
-    </div>` : '';
-
-  // Caja de pausa (SEL_TiempoMuerto) -- reemplaza el boton "Pausa" mientras la ejecucion sigue "En
-  // pausa": muestra el motivo y un cronometro contando desde la HoraInicio REAL (columna en BD,
-  // no desde que carga la pagina) hasta que se aprieta "Reanudar".
-  const ETIQUETAS_MOTIVO_PAUSA = {
-    descanso: 'Descanso', mantenimiento: 'Mantenimiento', alistamiento: 'Alistamiento',
-    limpieza: 'Limpieza y desinfección', otro: 'Otro'
-  };
-  const ETIQUETAS_SUBTIPO_PAUSA = { materiales: 'Materiales', mecanico: 'Mecánico', espacio_trabajo: 'Espacio de trabajo' };
-  const pausaBox = (activa && pausaActiva) ? `
-    <div class="peso-box" style="border-left:4px solid var(--naranja);">
-      <div class="peso-top">
-        <div>
-          <div class="label">⏸ En pausa — ${ETIQUETAS_MOTIVO_PAUSA[pausaActiva.Tipo] || pausaActiva.Tipo}${
-            pausaActiva.Subtipo ? ' · ' + (ETIQUETAS_SUBTIPO_PAUSA[pausaActiva.Subtipo] || pausaActiva.Subtipo) : ''
-          }${pausaActiva.Observaciones ? ' — ' + pausaActiva.Observaciones : ''}</div>
-          <div class="peso-valor"><span id="pausa-cronometro">00:00:00</span></div>
+      <div class="imprimir-acciones-grid">
+        <button type="button" class="btn-accion btn-imprimir" onclick="confirmarYEnviar('¿Está seguro de imprimir la etiqueta?', 'imprimir_etiqueta', this)">🖨️ Imprimir etiqueta</button>
+        <div class="botones-fila">
+          <button type="button" class="btn-accion btn-cierre-bulto" onclick="confirmarYEnviar('¿Está seguro de cerrar el bulto?', 'cierre_bulto', this)">📦 Cierre bulto</button>
+          ${botonesResiduosHTML}
+          <span class="separador-v"></span>
+          <button type="button" class="btn-accion btn-no-conforme" onclick="confirmarYEnviar('¿Está seguro de marcar esta salida como no conforme?', 'no_conforme', this)">🚫 Salida no conforme</button>
+          ${!pausaActiva ? `
+          <span class="separador-v"></span>
+          <button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>` : ''}
         </div>
-        <button type="button" class="btn-accion" style="background:var(--verde);width:auto;" onclick="reanudarEjecucion(this)">▶ Reanudar</button>
       </div>
     </div>` : '';
 
@@ -1323,12 +1555,9 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     </div>
   </header>
   <main>
-    ${bloqueRelevo}
     ${acciones ? `<div class="orden-cola" style="margin-bottom:18px;"><div class="orden-acciones">${acciones}</div></div>` : ''}
     ${pesoBox}
-    ${imprimirBox}
-    ${accionesBox}
-    ${pausaBox}
+    ${imprimirYAccionesBox}
     <div class="orden-cola" style="margin-bottom:18px;">
       <div class="orden-info">
         <div class="orden-pedido">Bultos producidos</div>
@@ -1364,6 +1593,8 @@ function renderTarjetasBultos(bultos, pesajesPorBulto) {
             <span>Paquete ${pe.ConsecutivoPaquete}</span>
             <span>${pe.Hora}</span>
             <span>${Number(pe.PesoPaqueGr).toString()}</span>
+            <a href="javascript:void(0)" class="link-reimprimir" title="Reimprimir etiqueta de este paquete"
+              onclick="reimprimirPaquete(this, ${JSON.stringify(b.id)}, ${JSON.stringify(pe.ConsecutivoPaquete)}, ${JSON.stringify(Number(pe.PesoPaqueGr))}, ${jsString(b.serialPadre).replace(/"/g, '&quot;')})">🖨️ Reimprimir</a>
           </div>`).join('')
       : `<div class="pesaje-vacio">Sin paquetes pesados todavía.</div>`;
 
@@ -1390,6 +1621,55 @@ function renderTarjetasBultos(bultos, pesajesPorBulto) {
   return bultos.length
     ? `<div class="grid">${tarjetas}</div>`
     : `<div class="vacio">Esta orden todavía no tiene bultos.</div>`;
+}
+
+// Boton "🖨️" de cada paquete ya pesado (dentro del desplegable "Paquetes pesados" de cada bulto,
+// ver renderTarjetasBultos) -- a pedido del usuario (01/09/2026), reimprime la etiqueta de un
+// paquete puntual del historial, no solo la del que la bascula tiene activo ahora mismo (eso ya lo
+// cubre el boton "Imprimir etiqueta" de Informacion). Reusa el mismo comando 'reimprimir_etiqueta'
+// (distinto de 'imprimir_etiqueta', ver COMANDOS_VALIDOS) via POST /api/comando -- no toca la BD
+// directamente, solo publica el comando para que Node-RED lo lea. idOrden/maquinaCodigo quedan
+// fijos en el closure (misma orden en toda la pagina de bultos), lo unico que cambia por boton es
+// el paquete puntual (idBulto/consecutivoPaquete/pesoGr/serialBulto).
+function scriptReimprimir(idOrden, maquinaCodigo) {
+  return `
+    function reimprimirPaquete(enlace, idBulto, consecutivoPaquete, pesoGr, serialBulto) {
+      Swal.fire({
+        icon: 'warning',
+        title: '¿Reimprimir la etiqueta del paquete ' + consecutivoPaquete + '?',
+        showCancelButton: true,
+        confirmButtonText: 'Sí, reimprimir',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#71bf44',
+        cancelButtonColor: '#c0392b'
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        enlace.classList.add('deshabilitado');
+        fetch('/api/comando', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            comando: 'reimprimir_etiqueta',
+            idOrden: ${JSON.stringify(idOrden)},
+            maquinaCodigo: ${jsString(maquinaCodigo)},
+            datos: { idBulto: idBulto, consecutivoPaquete: consecutivoPaquete, pesoGr: pesoGr, serialBulto: serialBulto }
+          })
+        })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (data.ok) {
+              Swal.fire({ icon: 'success', title: 'Comando enviado', timer: 1500, showConfirmButton: false });
+            } else {
+              Swal.fire({ icon: 'error', title: 'Error', text: data.error || 'No se pudo enviar el comando.', confirmButtonColor: '#71bf44' });
+            }
+          })
+          .catch(function(err) {
+            Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo enviar el comando: ' + err.message, confirmButtonColor: '#71bf44' });
+          })
+          .finally(function() { enlace.classList.remove('deshabilitado'); });
+      });
+    }
+  `;
 }
 
 // Script del cliente para /bultos: pide el fragmento renderizado con renderTarjetasBultos cada
@@ -1454,6 +1734,7 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, usuario, maquinaCodig
     <div id="contenedor-bultos">${renderTarjetasBultos(bultos, pesajesPorBulto)}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptReimprimir(orden.IdOrden, maquinaCodigo)}</script>
   <script>${scriptActualizarBultos()}</script>
 </body>
 </html>`;
@@ -1484,6 +1765,16 @@ app.get('/logout', async (req, res) => {
     if (usuario) {
       const p = await getPool();
       await registrarEvento(p, usuario.codigo, 'Salida', 'Manual');
+      // FIX 31/08/2026 (a pedido del usuario): si este operario tenia alguna ejecucion Activa a su
+      // nombre, queda "PendienteOperador" al cerrar sesion -- nadie la esta operando hasta que
+      // alguien la retome. Solo toca SEL_EjecucionOrden.Estado, NO SEL_OrdenProduccion.Estado (esa
+      // sigue en 'Activa' -- si se tocara, la orden desaparecería del dashboard/cola de la maquina,
+      // que solo filtra por 'Activa'/'Pendiente'/'PendienteValidacion').
+      if (usuario.codigoOperarioPRD) {
+        await p.request().input('operario', usuario.codigoOperarioPRD).query(
+          `UPDATE SEL_EjecucionOrden SET Estado = 'PendienteOperador' WHERE Operario = @operario AND Estado = 'Activa'`
+        );
+      }
     }
   } catch (err) {
     console.error('Error registrando Salida:', err.message);
@@ -1552,6 +1843,32 @@ app.get('/', requireLogin, async (req, res) => {
   }
 });
 
+// Cola de ordenes de una maquina, mismo criterio y orden que EjecucionSelladora.vb:CargarGrid.
+// El detalle de bultos/pesajes/historial de cada orden vive en /selladora/:codigo/orden/:idOrden
+// (boton "Informacion" de cada fila) -- esta pagina es solo la lista. FIX 31/08/2026: se agrega
+// ej.Estado (EstadoEjecucion) -- una orden con ord.Estado='Activa' puede tener su ejecucion en
+// 'PendienteOperador' (ver /logout), y esta lista es donde se ofrece "Retomar la ejecucion" para
+// esas -- filtrar solo por ord.Estado no alcanza para distinguir ese caso. Se trae tambien el
+// operario/nombre que la dejo pendiente, para mostrarlo y para distinguir si quien esta mirando
+// ahora es el mismo (en ese caso el boton dice "Reanudar", no "Retomar"). Factorizada (01/09/2026)
+// para reusarla desde /selladora/:codigo (carga completa) y /selladora/:codigo/cola-fragmento (el
+// polling de scriptActualizarCola, que reemplazo al boton "Actualizar").
+async function obtenerColaOrdenes(p, codigo) {
+  const colaResult = await p.request().input('codigo', codigo).query(`
+    SELECT ord.IdOrden, ord.Estado, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento,
+           ej.Estado AS EstadoEjecucion, ej.Operario AS OperarioEjecucionCodigo, op.Nombre AS OperarioEjecucionNombre,
+           ej.HoraFinReal
+    FROM SEL_OrdenProduccion ord
+    INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
+    LEFT JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
+    LEFT JOIN PRDOperarios op ON op.Codigo = ej.Operario
+    WHERE ord.Maquina = @codigo AND ord.Estado IN ('Activa','Pendiente','PendienteValidacion')
+    ORDER BY CASE ord.Estado WHEN 'Activa' THEN 0 WHEN 'Pendiente' THEN 1 ELSE 2 END ASC,
+             ISNULL(ord.Prioridad, 99999) ASC, ord.IdOrden ASC
+  `);
+  return colaResult.recordset;
+}
+
 app.get('/selladora/:codigo', requireLogin, async (req, res) => {
   const codigo = req.params.codigo;
   try {
@@ -1560,21 +1877,34 @@ app.get('/selladora/:codigo', requireLogin, async (req, res) => {
     const maquina = await p.request().input('codigo', codigo).query(`SELECT Nombre FROM PRDMaquinas WHERE Codigo = @codigo`);
     const nombre = maquina.recordset[0] ? maquina.recordset[0].Nombre : 'Selladora';
 
-    // Cola de ordenes de esta maquina, mismo criterio y orden que EjecucionSelladora.vb:CargarGrid.
-    // El detalle de bultos/pesajes/historial de cada orden vive en /selladora/:codigo/orden/:idOrden
-    // (boton "Informacion" de cada fila) -- esta pagina es solo la lista.
-    const colaResult = await p.request().input('codigo', codigo).query(`
-      SELECT ord.IdOrden, ord.Estado, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento
-      FROM SEL_OrdenProduccion ord
-      INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
-      WHERE ord.Maquina = @codigo AND ord.Estado IN ('Activa','Pendiente','PendienteValidacion')
-      ORDER BY CASE ord.Estado WHEN 'Activa' THEN 0 WHEN 'Pendiente' THEN 1 ELSE 2 END ASC,
-               ISNULL(ord.Prioridad, 99999) ASC, ord.IdOrden ASC
-    `);
+    const ordenes = await obtenerColaOrdenes(p, codigo);
 
-    res.send(renderPage(null, req.session.usuario.nombre, nombre, codigo, colaResult.recordset));
+    // FIX 31/08/2026: ?preguntarActividad=<idOrden> lo agrega el redirect de tomar-control-ejecucion
+    // cuando la ejecucion retomada quedo Activa -- dispara la pregunta "¿va a hacer alguna actividad
+    // antes de producir?" (preguntarActividadInicial, ver scriptPreguntaActividadInicial) apenas
+    // carga la pagina. Se valida que sea un entero positivo antes de pasarlo al HTML.
+    const idOrdenPreguntarActividad = /^\d+$/.test(req.query.preguntarActividad || '') ? Number(req.query.preguntarActividad) : null;
+
+    res.send(renderPage(null, req.session.usuario.nombre, nombre, codigo, ordenes, req.session.usuario.codigoOperarioPRD, idOrdenPreguntarActividad));
   } catch (err) {
-    res.status(500).send(renderPage(err.message, req.session.usuario.nombre, 'Selladora', codigo, []));
+    res.status(500).send(renderPage(err.message, req.session.usuario.nombre, 'Selladora', codigo, [], req.session.usuario.codigoOperarioPRD, null));
+  }
+});
+
+// Fragmento HTML de la cola de ordenes -- lo pide solo scriptActualizarCola (polling cada 4s, mismo
+// criterio que scriptResumenBultoActivo) para refrescar la pagina sola, sin el boton "Actualizar"
+// (a pedido del usuario, 01/09/2026). Devuelve el HTML ya renderizado por renderColaOrdenes (no
+// JSON) para no duplicar ese marcado del lado del cliente -- se reemplaza tal cual el innerHTML del
+// contenedor, los onsubmit inline de cada fila (confirmarTomarControlEjecucion, etc.) quedan
+// funcionando porque son parte del HTML nuevo, no listeners agregados aparte.
+app.get('/selladora/:codigo/cola-fragmento', requireLogin, async (req, res) => {
+  const codigo = req.params.codigo;
+  try {
+    const p = await getPool();
+    const ordenes = await obtenerColaOrdenes(p, codigo);
+    res.type('html').send(renderColaOrdenes(ordenes, codigo, req.session.usuario.codigoOperarioPRD));
+  } catch (err) {
+    res.status(500).type('html').send('');
   }
 });
 
@@ -1719,25 +2049,7 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
       historial = historialResult.recordset;
     }
 
-    // FIX 24/08/2026: si esta maquina esta Activa y el "operario actual" (ver
-    // agregar_operarioactualmaquina.sql -- lo consulta trg_SEL_Bultos_CierreBulto para cada bulto
-    // nuevo que crea solo, sin que nadie toque esta pagina) es distinto del que esta viendo la
-    // pagina ahora, se ofrece "Tomar control" -- no se asume el relevo solo por entrar a mirar.
-    let relevo = null;
-    const miOperario = req.session.usuario.codigoOperarioPRD;
-    if (orden.Estado === 'Activa' && miOperario > 0) {
-      const dtActual = await p.request().input('codigo', codigo).query(`
-        SELECT oam.Operario, op.Nombre AS NombreOperario
-        FROM SEL_OperarioActualMaquina oam
-        LEFT JOIN PRDOperarios op ON op.Codigo = oam.Operario
-        WHERE oam.Maquina = @codigo
-      `);
-      if (dtActual.recordset.length > 0 && dtActual.recordset[0].Operario !== miOperario) {
-        relevo = { nombreOperarioActual: dtActual.recordset[0].NombreOperario || 'otro operario' };
-      }
-    }
-
-    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, relevo, pausaActiva));
+    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
@@ -1848,36 +2160,61 @@ app.get('/selladora/:codigo/orden/:idOrden/resumen-bulto-activo', requireLogin, 
   }
 });
 
-// Relevo de operario (ver agregar_operarioactualmaquina.sql) -- el operario que confirma "Tomar
-// control" queda como el que trg_SEL_Bultos_CierreBulto usara de aqui en adelante para cada bulto
-// nuevo que la maquina cree sola, sin tocar SEL_EjecucionOrden ni SEL_Bultos.
-app.post('/api/selladora/maquina/:codigo/tomar-control', requireLogin, async (req, res) => {
-  const { codigo } = req.params;
-  const idOrden = req.body.idOrden;
+// Tomar control de la EJECUCION (SEL_EjecucionOrden) -- vive en la cola de ordenes de la maquina
+// (renderColaOrdenes), no en Informacion (a pedido del usuario, 31/08/2026: el viejo boton "Tomar
+// control" de Informacion, que solo tocaba SEL_OperarioActualMaquina, se elimino -- esta ruta
+// ahora hace las dos cosas: retoma la ejecucion (SEL_EjecucionOrden.Operario/Estado) Y registra al
+// operario actual de la maquina (SEL_OperarioActualMaquina, ver agregar_operarioactualmaquina.sql
+// -- lo consulta trg_SEL_Bultos_CierreBulto para cada bulto nuevo que la maquina cree sola).
+//
+// FIX 01/09/2026: ya NO exige Estado='PendienteOperador' -- ese flag solo se pone si el operario
+// anterior cerro sesion con el boton Salir; si el servidor se reinicia a mitad de turno, las
+// sesiones se pierden pero esa fila nunca se marca. El chequeo real es simplemente "el Operario de
+// la ejecucion es distinto al que esta pidiendo esto ahora", igual que en renderColaOrdenes. Si la
+// ejecucion esta 'En pausa', el Estado NO se fuerza a 'Activa' -- solo se reasigna el Operario, la
+// pausa sigue su curso normal (Reanudar) desde Informacion.
+app.post('/api/selladora/orden/:idOrden/tomar-control-ejecucion', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
   const miOperario = req.session.usuario.codigoOperarioPRD;
   if (!miOperario || miOperario <= 0) {
-    return res.status(400).send(renderErrorSimple('Su usuario no tiene un operario de planta asignado.', `/selladora/${codigo}`));
+    return res.status(400).send(renderErrorSimple('Su usuario no tiene un operario de planta asignado.', '/'));
   }
   try {
     const p = await getPool();
-    // FIX 24/08/2026: aviso explicito en vez de un no-op en silencio -- si por algun motivo la
-    // pagina quedo desactualizada y el aviso de relevo seguia visible aunque ya es el operario
-    // actual, se le avisa en vez de dejarlo pensar que no paso nada.
-    const dtActual = await p.request().input('maquina', codigo).query(`
-      SELECT Operario FROM SEL_OperarioActualMaquina WHERE Maquina = @maquina
-    `);
-    if (dtActual.recordset.length > 0 && dtActual.recordset[0].Operario === miOperario) {
-      return res.status(400).send(renderErrorSimple('Usted ya es el operario actual de esta máquina.', `/selladora/${codigo}/orden/${idOrden}`));
+    const dtEj = await p.request().input('idOrden', idOrden).query(
+      `SELECT TOP 1 IdEjecucion, Estado, Operario, Maquina FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden`
+    );
+    if (dtEj.recordset.length === 0) {
+      return res.status(404).send(renderErrorSimple('No se encontró la ejecución de esta orden.', '/'));
     }
-    await p.request().input('maquina', codigo).input('operario', miOperario).query(`
+    const { IdEjecucion, Estado, Operario, Maquina } = dtEj.recordset[0];
+    // Mismo OR que renderColaOrdenes -- el flag 'PendienteOperador' cubre el logout explicito
+    // (incluso si el operario coincide, sigue habiendo algo que confirmar: pasarla de vuelta a
+    // Activa) y la comparacion de Operario cubre el reinicio del servidor sin logout.
+    const hayAlgoQueTomar = Estado === 'PendienteOperador' || Operario !== miOperario;
+    if (!hayAlgoQueTomar) {
+      // Alguien mas se adelanto (o ya no aplica) -- no es un error, simplemente ya no hay nada que
+      // tomar. Se vuelve a la cola de la maquina, que ya no deberia mostrar este boton.
+      return res.redirect(`/selladora/${Maquina}`);
+    }
+    await p.request().input('idEjecucion', IdEjecucion).input('operario', miOperario).query(`
+      UPDATE SEL_EjecucionOrden SET Operario = @operario, Estado = CASE WHEN Estado = 'En pausa' THEN Estado ELSE 'Activa' END
+      WHERE IdEjecucion = @idEjecucion
+    `);
+    await p.request().input('maquina', Maquina).input('operario', miOperario).query(`
       MERGE SEL_OperarioActualMaquina AS destino
       USING (SELECT @maquina AS Maquina) AS origen ON destino.Maquina = origen.Maquina
       WHEN MATCHED THEN UPDATE SET Operario = @operario, FechaHora = GETDATE()
       WHEN NOT MATCHED THEN INSERT (Maquina, Operario, FechaHora) VALUES (@maquina, @operario, GETDATE());
     `);
-    res.redirect(`/selladora/${codigo}/orden/${idOrden}`);
+    // FIX 31/08/2026: si la ejecucion NO estaba 'En pausa' (o sea, con este cambio quedo 'Activa' --
+    // ver el CASE de arriba), se pregunta en la cola de la maquina si hay alguna actividad por hacer
+    // antes de producir o si entra directo (a pedido del usuario). Si ya estaba 'En pausa', no se
+    // pregunta -- el cronometro de esa pausa ya la cubre, se veria al entrar a Informacion.
+    const destino = Estado === 'En pausa' ? `/selladora/${Maquina}` : `/selladora/${Maquina}?preguntarActividad=${idOrden}`;
+    res.redirect(destino);
   } catch (err) {
-    res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}/orden/${idOrden}`));
+    res.status(500).send(renderErrorSimple(err.message, '/'));
   }
 });
 
@@ -1925,10 +2262,14 @@ function renderEscanear(maquinaCodigo, maquinaNombre, idOrden, nuevo, bolsasActu
 
   <script src="/html5-qrcode.min.js"></script>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptPreguntaActividadInicial()}</script>
   <script>
     const idOrden = ${JSON.stringify(idOrden)};
     const esNuevoRollo = ${nuevo ? 'true' : 'false'};
     const bolsasActual = ${Number(bolsasActual) || 0};
+    // Al Iniciar (no al +Rollo), termine con actividad o directo a produccion, se entra a
+    // Informacion de la orden -- no a la cola de la maquina (a pedido del usuario, 31/08/2026).
+    const destinoTrasIniciar = ${JSON.stringify(`/selladora/${maquinaCodigo}/orden/${idOrden}`)};
     const divResultado = document.getElementById('resultado');
     let procesando = false;
     let ultimaConsulta = null;
@@ -1995,7 +2336,13 @@ function renderEscanear(maquinaCodigo, maquinaNombre, idOrden, nuevo, bolsasActu
         Swal.fire({
           icon: 'success', title: esNuevoRollo ? 'Rollo añadido' : 'Ejecución iniciada',
           timer: 1000, showConfirmButton: false
-        }).then(() => { window.location.href = datos.redirect; });
+        }).then(() => {
+          // Al Iniciar (primer rollo, no al +Rollo de mitad de produccion) se pregunta si hay
+          // alguna actividad de las que se registran como pausa por hacer antes de producir (a
+          // pedido del usuario, 31/08/2026) -- ver scriptPreguntaActividadInicial().
+          if (esNuevoRollo) { window.location.href = datos.redirect; }
+          else { preguntarActividadInicial(idOrden, function() { window.location.href = destinoTrasIniciar; }); }
+        });
       } catch (err) {
         mostrarError('Error de conexión: ' + err.message);
       }
@@ -2128,9 +2475,14 @@ app.post('/api/selladora/orden/:idOrden/rollo', requireLogin, async (req, res) =
 // vuelven a consultar en BD: esto solo dispara la accion en Node-RED, no toca la BD directamente.
 // `datos` es opcional -- lo usa 'calidad' para mandar las respuestas (Conforme/No conforme) del
 // formulario, ver abrirCalidad() en scriptComandos(). FIX 26/08/2026: los comandos de residuo van
-// sin prefijo ('retal'/'troquelado'/'refilado', no 'residuo:retal').
+// sin prefijo ('retal'/'troquelado'/'refilado', no 'residuo:retal'). 'reimprimir_etiqueta'
+// (01/09/2026) es distinto de 'imprimir_etiqueta' a proposito -- ese ultimo imprime la etiqueta del
+// paquete que la bascula esta pesando en este momento (Node-RED lo resuelve solo, sin `datos`);
+// reimprimir_etiqueta va con `datos` describiendo un paquete YA pesado (idBulto/serialBulto/
+// consecutivoPaquete/pesoGr, ver reimprimirPaquete() en renderBultosOrden) para que Node-RED sepa
+// cual de todos hay que volver a imprimir, no necesariamente el que esta activo ahora.
 const COMANDOS_VALIDOS = new Set([
-  'imprimir_etiqueta', 'cierre_bulto', 'retal', 'troquelado', 'refilado', 'calidad', 'no_conforme'
+  'imprimir_etiqueta', 'reimprimir_etiqueta', 'cierre_bulto', 'retal', 'troquelado', 'refilado', 'calidad', 'no_conforme'
 ]);
 
 // Pausa (SEL_TiempoMuerto) -- a diferencia de los comandos de arriba, esto SI escribe directo en
@@ -2207,8 +2559,11 @@ app.post('/api/selladora/orden/:idOrden/reanudar', requireLogin, async (req, res
       return res.json({ ok: false, error: 'Esta orden no está en pausa.' });
     }
 
+    // DuracionMinutos es una columna CALCULADA (AS DATEDIFF(MINUTE, HoraInicio, HoraFin) PERSISTED)
+    // -- SQL Server la resuelve sola en cuanto se guarda HoraFin, no se puede asignar a mano
+    // (por eso el error "cannot be modified because it is either a computed column...").
     await p.request().input('idEjecucion', IdEjecucion).query(`
-      UPDATE SEL_TiempoMuerto SET HoraFin = GETDATE(), DuracionMinutos = DATEDIFF(MINUTE, HoraInicio, GETDATE())
+      UPDATE SEL_TiempoMuerto SET HoraFin = GETDATE()
       WHERE id_ejecucion = @idEjecucion AND HoraFin IS NULL
     `);
     await p.request().input('idEjecucion', IdEjecucion).query(
