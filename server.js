@@ -448,6 +448,14 @@ function estilosBase() {
     .orden-cola .orden-elemento { font-size: 13px; color: var(--texto-suave); margin-top: 2px; }
     .orden-cola .orden-acciones { display: flex; gap: 8px; flex-wrap: wrap; }
     .orden-cola .orden-acciones form { width: auto; }
+    .islas-fila { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+    .isla {
+      background: white; border-radius: 14px; padding: 14px 16px; flex: 1 1 220px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    }
+    .isla .label { margin-bottom: 8px; }
+    .isla .orden-acciones { display: flex; gap: 8px; flex-wrap: wrap; }
+    .isla .orden-acciones form { width: auto; }
     .btn-accion {
       font-size: 14px; font-weight: 600; padding: 10px 16px; border: none; border-radius: 10px;
       cursor: pointer; text-decoration: none; display: inline-block; color: white;
@@ -521,10 +529,6 @@ function estilosBase() {
     .peso-estado { font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; }
     .peso-estado.conectado { background: var(--verde-fondo); color: var(--verde); }
     .peso-estado.desconectado { background: var(--naranja-fondo); color: var(--naranja); }
-    .botones-fila {
-      display: flex; gap: 8px; flex-wrap: wrap; align-items: stretch;
-    }
-    .separador-v { width: 1px; background: #d0d7de; align-self: stretch; }
     .imprimir-acciones-grid {
       display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: stretch;
     }
@@ -872,9 +876,10 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva) {
         .finally(function() { if (boton) boton.disabled = false; });
     }
 
-    // Confirmacion "¿Esta seguro de...?" antes de Imprimir etiqueta/Cierre bulto/Retal/Troquelado/
-    // Refilado/Salida no conforme (a pedido del usuario, 30/08/2026) -- Calidad NO pasa por aca,
-    // ya tiene su propia confirmacion (el formulario del modal con "Guardar"/"Cancelar").
+    // Confirmacion "¿Esta seguro de...?" antes de Imprimir etiqueta/Cierre bulto (30/08/2026) --
+    // Calidad NO pasa por aca, ya tiene su propia confirmacion (el formulario del modal con
+    // "Guardar"/"Cancelar"). Retal/Troquelado/Refilado/Salida no conforme usan confirmarPesoYEnviar
+    // en vez de esta (piden el peso, ver mas abajo).
     function confirmarYEnviar(mensaje, comando, boton) {
       Swal.fire({
         icon: 'warning',
@@ -886,6 +891,33 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva) {
         cancelButtonColor: '#c0392b'
       }).then(function(resultado) {
         if (resultado.isConfirmed) enviarComando(comando, boton);
+      });
+    }
+
+    // Retal/Troquelado/Refilado/Salida no conforme (a pedido del usuario, 01/09/2026) piden el peso
+    // del residuo/bulto en una ventana emergente (numerico, no un simple "¿Esta seguro?") -- al
+    // confirmar, se manda igual que los demas por /api/comando pero con datos:{peso:...} para que
+    // Node-RED lo use al imprimir la etiqueta del residuo. inputValidator bloquea pesos vacios/no
+    // numericos/<=0 sin llegar a enviar el comando.
+    function confirmarPesoYEnviar(mensaje, comando, boton) {
+      Swal.fire({
+        icon: 'question',
+        title: mensaje,
+        input: 'number',
+        inputLabel: 'Peso (kg)',
+        inputAttributes: { min: '0', step: '0.01', inputmode: 'decimal' },
+        showCancelButton: true,
+        confirmButtonText: 'Confirmar peso',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#71bf44',
+        cancelButtonColor: '#c0392b',
+        inputValidator: function(valor) {
+          var n = Number(valor);
+          if (valor === '' || valor == null || isNaN(n) || n <= 0) return 'Ingrese un peso válido.';
+          return null;
+        }
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) enviarComando(comando, boton, { peso: Number(resultado.value) });
       });
     }
 
@@ -1430,6 +1462,9 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
         </div>`).join('')
     : `<div class="pesaje-vacio">Sin materia prima registrada todavía.</div>`;
 
+  // FIX 01/09/2026: el boton de Pausa se movio aca (junto a Finalizar) desde el bloque de Imprimir
+  // etiqueta/Cierre bulto -- a pedido del usuario. Solo aparece si NO esta ya pausada (mientras esta
+  // pausada, el cronometro sale como ventana emergente aparte, ver abrirModalPausaActiva).
   let acciones = '';
   const activa = orden.Estado === 'Activa';
   if (orden.Estado === 'Pendiente') {
@@ -1439,22 +1474,24 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
       <a class="btn-accion btn-anadir" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/escanear?nuevo=1">+ Rollo</a>
       <form method="post" action="/api/selladora/orden/${orden.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
         <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
-      </form>`;
+      </form>
+      ${!pausaActiva ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>` : ''}`;
   }
 
-  // Botones de residuos (Retal/Troquelado) van en el MISMO bloque de acciones que Imprimir
-  // etiqueta/Cierre bulto, separados por una linea vertical -- a pedido del usuario (24/08/2026),
-  // no en una caja aparte. FIX 26/08/2026: usan el mismo enviarComando()/POST /api/comando que
-  // Imprimir etiqueta/Cierre bulto (publican 'residuo:retal' o 'residuo:troquelado' para que
-  // Node-RED los lea) -- ya no hacen ninguna escritura directa en esta BD. "Refilado" queda sin
-  // boton (no aplica a SELLADORA, BOTONES_RESIDUOS_POR_TIPO no lo habilita para este tipo).
+  // Botones de residuos (Retal/Troquelado, segun BOTONES_RESIDUOS_POR_TIPO) + Salida no conforme --
+  // van agrupados bajo un titulo "Residuos", en su propia isla separada de "Producción"
+  // (+Rollo/Finalizar/Pausa) pero en la MISMA fila (a pedido del usuario, 01/09/2026 -- antes vivian
+  // junto a Imprimir etiqueta/Cierre bulto). Usan confirmarPesoYEnviar (no confirmarYEnviar): piden
+  // el peso del residuo/bulto en la ventana emergente antes de mandarlo, ver esa funcion en
+  // scriptComandos(). FIX 26/08/2026 (sigue vigente): publican el comando en /api/comando para que
+  // Node-RED lo lea -- ya no hacen ninguna escritura directa en esta BD.
   const botonesResiduosHabilitados = BOTONES_RESIDUOS_POR_TIPO[orden.MaquinaTipo] || [];
-  const botonesResiduosHTML = botonesResiduosHabilitados.length ? `
-        <span class="separador-v"></span>
-        ${BOTONES_RESIDUOS
-          .filter(b => botonesResiduosHabilitados.includes(b.clave))
-          .map(b => `<button type="button" class="btn-accion btn-residuo" onclick="confirmarYEnviar('¿Está seguro de marcar este bulto con ${b.label}?', '${b.clave}', this)">${b.label}</button>`)
-          .join('')}` : '';
+  const botonesResiduosHTML = activa ? [
+    ...BOTONES_RESIDUOS
+      .filter(b => botonesResiduosHabilitados.includes(b.clave))
+      .map(b => `<button type="button" class="btn-accion btn-residuo" onclick="confirmarPesoYEnviar('¿Está seguro de marcar este bulto con ${b.label}?', '${b.clave}', this)">${b.label}</button>`),
+    `<button type="button" class="btn-accion btn-no-conforme" onclick="confirmarPesoYEnviar('¿Está seguro de marcar esta salida como no conforme?', 'no_conforme', this)">🚫 Salida no conforme</button>`
+  ].join('') : '';
 
   // Peso en vivo + Imprimir etiqueta/Cierre bulto/Residuos: solo tienen sentido con la orden
   // Activa (bascula/impresora actuando sobre el bulto que se esta armando en este momento).
@@ -1479,24 +1516,15 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
       </div>
     </div>` : '';
 
-  // Imprimir etiqueta + resto de acciones (Cierre bulto/Retal/Troquelado/Refilado/Calidad/Salida
-  // no conforme/Pausa) van en la MISMA fila, en dos columnas (a pedido del usuario, 31/08/2026):
-  // izquierda Imprimir etiqueta, derecha el resto. El boton de Pausa solo aparece si NO esta ya
-  // pausada -- mientras esta pausada, el cronometro sale como ventana emergente aparte (ver
-  // abrirModalPausaActiva en scriptComandos), no hay caja para eso en la pagina.
+  // Imprimir etiqueta + Cierre bulto van en la MISMA fila, en dos columnas (a pedido del usuario,
+  // 31/08/2026). FIX 01/09/2026: Pausa se movio junto a Finalizar (ver `acciones` mas arriba), y
+  // Retal/Troquelado/Salida no conforme al grupo "Residuos" (ver botonesResiduosHTML) -- ya no
+  // quedan aca.
   const imprimirYAccionesBox = activa ? `
     <div class="peso-box">
       <div class="imprimir-acciones-grid">
         <button type="button" class="btn-accion btn-imprimir" onclick="confirmarYEnviar('¿Está seguro de imprimir la etiqueta?', 'imprimir_etiqueta', this)">🖨️ Imprimir etiqueta</button>
-        <div class="botones-fila">
-          <button type="button" class="btn-accion btn-cierre-bulto" onclick="confirmarYEnviar('¿Está seguro de cerrar el bulto?', 'cierre_bulto', this)">📦 Cierre bulto</button>
-          ${botonesResiduosHTML}
-          <span class="separador-v"></span>
-          <button type="button" class="btn-accion btn-no-conforme" onclick="confirmarYEnviar('¿Está seguro de marcar esta salida como no conforme?', 'no_conforme', this)">🚫 Salida no conforme</button>
-          ${!pausaActiva ? `
-          <span class="separador-v"></span>
-          <button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>` : ''}
-        </div>
+        <button type="button" class="btn-accion btn-cierre-bulto" onclick="confirmarYEnviar('¿Está seguro de cerrar el bulto?', 'cierre_bulto', this)">📦 Cierre bulto</button>
       </div>
     </div>` : '';
 
@@ -1555,7 +1583,16 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     </div>
   </header>
   <main>
-    ${acciones ? `<div class="orden-cola" style="margin-bottom:18px;"><div class="orden-acciones">${acciones}</div></div>` : ''}
+    ${acciones ? `<div class="islas-fila">
+      <div class="isla">
+        <div class="label">Producción</div>
+        <div class="orden-acciones">${acciones}</div>
+      </div>
+      ${botonesResiduosHTML ? `<div class="isla">
+        <div class="label">Residuos</div>
+        <div class="orden-acciones">${botonesResiduosHTML}</div>
+      </div>` : ''}
+    </div>` : ''}
     ${pesoBox}
     ${imprimirYAccionesBox}
     <div class="orden-cola" style="margin-bottom:18px;">
@@ -1590,11 +1627,10 @@ function renderTarjetasBultos(bultos, pesajesPorBulto) {
     const filasPesajes = pesajes.length
       ? pesajes.map(pe => `
           <div class="pesaje-fila">
-            <span>Paquete ${pe.ConsecutivoPaquete}</span>
+            <a href="javascript:void(0)" class="link-reimprimir" title="Reimprimir etiqueta de este paquete"
+              onclick="reimprimirPaquete(this, ${JSON.stringify(b.id)}, ${JSON.stringify(pe.ConsecutivoPaquete)}, ${JSON.stringify(Number(pe.PesoPaqueGr))}, ${jsString(b.serialPadre).replace(/"/g, '&quot;')})">🖨️ Paquete ${pe.ConsecutivoPaquete}</a>
             <span>${pe.Hora}</span>
             <span>${Number(pe.PesoPaqueGr).toString()}</span>
-            <a href="javascript:void(0)" class="link-reimprimir" title="Reimprimir etiqueta de este paquete"
-              onclick="reimprimirPaquete(this, ${JSON.stringify(b.id)}, ${JSON.stringify(pe.ConsecutivoPaquete)}, ${JSON.stringify(Number(pe.PesoPaqueGr))}, ${jsString(b.serialPadre).replace(/"/g, '&quot;')})">🖨️ Reimprimir</a>
           </div>`).join('')
       : `<div class="pesaje-vacio">Sin paquetes pesados todavía.</div>`;
 
@@ -2481,6 +2517,9 @@ app.post('/api/selladora/orden/:idOrden/rollo', requireLogin, async (req, res) =
 // reimprimir_etiqueta va con `datos` describiendo un paquete YA pesado (idBulto/serialBulto/
 // consecutivoPaquete/pesoGr, ver reimprimirPaquete() en renderBultosOrden) para que Node-RED sepa
 // cual de todos hay que volver a imprimir, no necesariamente el que esta activo ahora.
+// 'retal'/'troquelado'/'refilado'/'no_conforme' (01/09/2026) van con `datos: {peso}` -- el operario
+// lo escribe en una ventana emergente (confirmarPesoYEnviar en scriptComandos) antes de enviarse,
+// para que Node-RED lo use al imprimir la etiqueta del residuo/salida no conforme.
 const COMANDOS_VALIDOS = new Set([
   'imprimir_etiqueta', 'reimprimir_etiqueta', 'cierre_bulto', 'retal', 'troquelado', 'refilado', 'calidad', 'no_conforme'
 ]);
