@@ -150,6 +150,16 @@ function jsString(texto) {
   return JSON.stringify(texto == null ? '' : String(texto)).replace(/</g, '\\u003c');
 }
 
+// Formatea una fecha/hora de la BD (mssql devuelve DATETIME como objeto Date de JS) para mostrar en
+// el HTML -- ej. "01/09/2026 14:32". Usado en la cola de ordenes para mostrar cuando se finalizo una
+// orden (SEL_EjecucionOrden.HoraFinReal, ver renderColaOrdenes), a pedido del usuario (01/09/2026).
+function formatearFechaHora(fecha) {
+  if (!fecha) return '';
+  return new Date(fecha).toLocaleString('es-CO', {
+    day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false
+  });
+}
+
 function renderLogin(error) {
   return `<!DOCTYPE html>
 <html lang="es">
@@ -460,10 +470,14 @@ function estilosBase() {
     .pesajes-box[open] summary::before { content: '▾ '; }
     .pesajes-box summary + * { margin-top: 6px; }
     .pesaje-fila {
-      display: flex; justify-content: space-between; gap: 8px; font-size: 13px;
+      display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13px;
       padding: 4px 0; color: var(--texto-suave);
     }
     .pesaje-vacio { font-size: 13px; color: var(--texto-suave); }
+    .link-reimprimir {
+      color: #00a2cb; text-decoration: underline; font-size: 13px; flex-shrink: 0; cursor: pointer;
+    }
+    .link-reimprimir.deshabilitado { pointer-events: none; opacity: 0.5; }
     .hist-fila {
       display: grid; grid-template-columns: 1.4fr 1fr 0.7fr; gap: 8px; font-size: 13px;
       padding: 8px 0; border-bottom: 1px solid #eef0f2;
@@ -628,6 +642,7 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
     const operarioDistintoEnVivo = o.Estado === 'Activa' && o.EstadoEjecucion != null && !!miOperario && o.OperarioEjecucionCodigo !== miOperario;
     const necesitaTomarControl = flagPendienteOperador || operarioDistintoEnVivo;
     let infoOperarioAsignado = '';
+    let infoFinalizada = '';
     if (necesitaTomarControl) {
       const esElMismo = miOperario != null && o.OperarioEjecucionCodigo === miOperario;
       const nombreAsignado = o.OperarioEjecucionNombre || 'un operario sin nombre configurado';
@@ -647,6 +662,12 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
         </form>`;
     } else {
       acciones += `<span class="label">Esperando validación del digitador</span>`;
+      // FIX 01/09/2026: se muestra la hora en la que se finalizo (SEL_EjecucionOrden.HoraFinReal,
+      // la pone finalizarOrden() al dar "Finalizar") -- a pedido del usuario, para saber desde
+      // cuando esta orden quedo esperando validacion, no solo que esta esperando. Debajo de la
+      // referencia del pedido (orden-elemento), no pegado al texto de estado -- quedaba mal ahi.
+      const horaFin = formatearFechaHora(o.HoraFinReal);
+      if (horaFin) infoFinalizada = `<div class="orden-elemento">Finalizada: ${horaFin}</div>`;
     }
     const badge = necesitaTomarControl
       ? `<span class="badge badge-temporal">Pendiente de operador</span>`
@@ -657,6 +678,7 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
           <div class="orden-pedido">Pedido ${o.NumeroPedido || '—'} ${badge}</div>
           <div class="orden-elemento">${o.Elemento}</div>
           ${infoOperarioAsignado}
+          ${infoFinalizada}
         </div>
         <div class="orden-acciones">${acciones}</div>
       </div>`;
@@ -726,6 +748,33 @@ function scriptResumenBultoActivo(idOrden, maquinaCodigo) {
         } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
       }
       actualizar();
+      setInterval(actualizar, 4000);
+    })();
+  `;
+}
+
+// Cola de ordenes de la maquina (renderPage/"Programacion máquina") -- se refresca sola cada 4s
+// pidiendo el fragmento ya renderizado (/selladora/:codigo/cola-fragmento, ver obtenerColaOrdenes)
+// y reemplazando el innerHTML del contenedor, en vez de depender de un boton "Actualizar" manual (a
+// pedido del usuario, 01/09/2026). El contenido inicial ya viene renderizado por el servidor en la
+// carga de la pagina, por eso el primer tick es a los 4s (no de una, a diferencia de
+// scriptResumenBultoActivo que arranca con placeholders "—").
+function scriptActualizarCola(maquinaCodigo) {
+  return `
+    (function() {
+      var contenedor = document.getElementById('cola-ordenes');
+      var elActualizado = document.getElementById('cola-actualizado');
+      if (!contenedor) return;
+
+      async function actualizar() {
+        try {
+          const resp = await fetch('/selladora/' + ${jsString(maquinaCodigo)} + '/cola-fragmento');
+          if (!resp.ok) return;
+          const html = await resp.text();
+          contenedor.innerHTML = html;
+          if (elActualizado) elActualizado.textContent = 'Actualizado: ' + new Date().toLocaleTimeString('es-CO');
+        } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
+      }
       setInterval(actualizar, 4000);
     })();
   `;
@@ -1260,14 +1309,14 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
   </header>
   <main>
     <div class="barra">
-      <span class="actualizado">Actualizado: ${new Date().toLocaleTimeString('es-CO')}</span>
-      <form method="get" action="/selladora/${maquinaCodigo}"><button type="submit">↻ Actualizar</button></form>
+      <span class="actualizado" id="cola-actualizado">Actualizado: ${new Date().toLocaleTimeString('es-CO')}</span>
     </div>
-    ${renderColaOrdenes(colaOrdenes || [], maquinaCodigo, miOperario)}
+    <div id="cola-ordenes">${renderColaOrdenes(colaOrdenes || [], maquinaCodigo, miOperario)}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
+  <script>${scriptActualizarCola(maquinaCodigo)}</script>
   ${idOrdenPreguntarActividad ? `<script>
     // Termine con actividad o directo a produccion, se entra a Informacion de la orden retomada --
     // no se queda en la cola de la maquina (a pedido del usuario, 31/08/2026).
@@ -1544,6 +1593,8 @@ function renderTarjetasBultos(bultos, pesajesPorBulto) {
             <span>Paquete ${pe.ConsecutivoPaquete}</span>
             <span>${pe.Hora}</span>
             <span>${Number(pe.PesoPaqueGr).toString()}</span>
+            <a href="javascript:void(0)" class="link-reimprimir" title="Reimprimir etiqueta de este paquete"
+              onclick="reimprimirPaquete(this, ${JSON.stringify(b.id)}, ${JSON.stringify(pe.ConsecutivoPaquete)}, ${JSON.stringify(Number(pe.PesoPaqueGr))}, ${jsString(b.serialPadre).replace(/"/g, '&quot;')})">🖨️ Reimprimir</a>
           </div>`).join('')
       : `<div class="pesaje-vacio">Sin paquetes pesados todavía.</div>`;
 
@@ -1570,6 +1621,55 @@ function renderTarjetasBultos(bultos, pesajesPorBulto) {
   return bultos.length
     ? `<div class="grid">${tarjetas}</div>`
     : `<div class="vacio">Esta orden todavía no tiene bultos.</div>`;
+}
+
+// Boton "🖨️" de cada paquete ya pesado (dentro del desplegable "Paquetes pesados" de cada bulto,
+// ver renderTarjetasBultos) -- a pedido del usuario (01/09/2026), reimprime la etiqueta de un
+// paquete puntual del historial, no solo la del que la bascula tiene activo ahora mismo (eso ya lo
+// cubre el boton "Imprimir etiqueta" de Informacion). Reusa el mismo comando 'reimprimir_etiqueta'
+// (distinto de 'imprimir_etiqueta', ver COMANDOS_VALIDOS) via POST /api/comando -- no toca la BD
+// directamente, solo publica el comando para que Node-RED lo lea. idOrden/maquinaCodigo quedan
+// fijos en el closure (misma orden en toda la pagina de bultos), lo unico que cambia por boton es
+// el paquete puntual (idBulto/consecutivoPaquete/pesoGr/serialBulto).
+function scriptReimprimir(idOrden, maquinaCodigo) {
+  return `
+    function reimprimirPaquete(enlace, idBulto, consecutivoPaquete, pesoGr, serialBulto) {
+      Swal.fire({
+        icon: 'warning',
+        title: '¿Reimprimir la etiqueta del paquete ' + consecutivoPaquete + '?',
+        showCancelButton: true,
+        confirmButtonText: 'Sí, reimprimir',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#71bf44',
+        cancelButtonColor: '#c0392b'
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        enlace.classList.add('deshabilitado');
+        fetch('/api/comando', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            comando: 'reimprimir_etiqueta',
+            idOrden: ${JSON.stringify(idOrden)},
+            maquinaCodigo: ${jsString(maquinaCodigo)},
+            datos: { idBulto: idBulto, consecutivoPaquete: consecutivoPaquete, pesoGr: pesoGr, serialBulto: serialBulto }
+          })
+        })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (data.ok) {
+              Swal.fire({ icon: 'success', title: 'Comando enviado', timer: 1500, showConfirmButton: false });
+            } else {
+              Swal.fire({ icon: 'error', title: 'Error', text: data.error || 'No se pudo enviar el comando.', confirmButtonColor: '#71bf44' });
+            }
+          })
+          .catch(function(err) {
+            Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo enviar el comando: ' + err.message, confirmButtonColor: '#71bf44' });
+          })
+          .finally(function() { enlace.classList.remove('deshabilitado'); });
+      });
+    }
+  `;
 }
 
 // Script del cliente para /bultos: pide el fragmento renderizado con renderTarjetasBultos cada
@@ -1634,6 +1734,7 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, usuario, maquinaCodig
     <div id="contenedor-bultos">${renderTarjetasBultos(bultos, pesajesPorBulto)}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptReimprimir(orden.IdOrden, maquinaCodigo)}</script>
   <script>${scriptActualizarBultos()}</script>
 </body>
 </html>`;
@@ -1742,6 +1843,32 @@ app.get('/', requireLogin, async (req, res) => {
   }
 });
 
+// Cola de ordenes de una maquina, mismo criterio y orden que EjecucionSelladora.vb:CargarGrid.
+// El detalle de bultos/pesajes/historial de cada orden vive en /selladora/:codigo/orden/:idOrden
+// (boton "Informacion" de cada fila) -- esta pagina es solo la lista. FIX 31/08/2026: se agrega
+// ej.Estado (EstadoEjecucion) -- una orden con ord.Estado='Activa' puede tener su ejecucion en
+// 'PendienteOperador' (ver /logout), y esta lista es donde se ofrece "Retomar la ejecucion" para
+// esas -- filtrar solo por ord.Estado no alcanza para distinguir ese caso. Se trae tambien el
+// operario/nombre que la dejo pendiente, para mostrarlo y para distinguir si quien esta mirando
+// ahora es el mismo (en ese caso el boton dice "Reanudar", no "Retomar"). Factorizada (01/09/2026)
+// para reusarla desde /selladora/:codigo (carga completa) y /selladora/:codigo/cola-fragmento (el
+// polling de scriptActualizarCola, que reemplazo al boton "Actualizar").
+async function obtenerColaOrdenes(p, codigo) {
+  const colaResult = await p.request().input('codigo', codigo).query(`
+    SELECT ord.IdOrden, ord.Estado, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento,
+           ej.Estado AS EstadoEjecucion, ej.Operario AS OperarioEjecucionCodigo, op.Nombre AS OperarioEjecucionNombre,
+           ej.HoraFinReal
+    FROM SEL_OrdenProduccion ord
+    INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
+    LEFT JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
+    LEFT JOIN PRDOperarios op ON op.Codigo = ej.Operario
+    WHERE ord.Maquina = @codigo AND ord.Estado IN ('Activa','Pendiente','PendienteValidacion')
+    ORDER BY CASE ord.Estado WHEN 'Activa' THEN 0 WHEN 'Pendiente' THEN 1 ELSE 2 END ASC,
+             ISNULL(ord.Prioridad, 99999) ASC, ord.IdOrden ASC
+  `);
+  return colaResult.recordset;
+}
+
 app.get('/selladora/:codigo', requireLogin, async (req, res) => {
   const codigo = req.params.codigo;
   try {
@@ -1750,25 +1877,7 @@ app.get('/selladora/:codigo', requireLogin, async (req, res) => {
     const maquina = await p.request().input('codigo', codigo).query(`SELECT Nombre FROM PRDMaquinas WHERE Codigo = @codigo`);
     const nombre = maquina.recordset[0] ? maquina.recordset[0].Nombre : 'Selladora';
 
-    // Cola de ordenes de esta maquina, mismo criterio y orden que EjecucionSelladora.vb:CargarGrid.
-    // El detalle de bultos/pesajes/historial de cada orden vive en /selladora/:codigo/orden/:idOrden
-    // (boton "Informacion" de cada fila) -- esta pagina es solo la lista. FIX 31/08/2026: se agrega
-    // ej.Estado (EstadoEjecucion) -- una orden con ord.Estado='Activa' puede tener su ejecucion en
-    // 'PendienteOperador' (ver /logout), y esta lista es donde se ofrece "Tomar control de la
-    // ejecucion" para esas -- filtrar solo por ord.Estado no alcanza para distinguir ese caso. Se
-    // trae tambien el operario/nombre que la dejo pendiente, para mostrarlo y para distinguir si
-    // quien esta mirando ahora es el mismo (en ese caso el boton dice "Reanudar", no "Tomar control").
-    const colaResult = await p.request().input('codigo', codigo).query(`
-      SELECT ord.IdOrden, ord.Estado, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento,
-             ej.Estado AS EstadoEjecucion, ej.Operario AS OperarioEjecucionCodigo, op.Nombre AS OperarioEjecucionNombre
-      FROM SEL_OrdenProduccion ord
-      INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
-      LEFT JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
-      LEFT JOIN PRDOperarios op ON op.Codigo = ej.Operario
-      WHERE ord.Maquina = @codigo AND ord.Estado IN ('Activa','Pendiente','PendienteValidacion')
-      ORDER BY CASE ord.Estado WHEN 'Activa' THEN 0 WHEN 'Pendiente' THEN 1 ELSE 2 END ASC,
-               ISNULL(ord.Prioridad, 99999) ASC, ord.IdOrden ASC
-    `);
+    const ordenes = await obtenerColaOrdenes(p, codigo);
 
     // FIX 31/08/2026: ?preguntarActividad=<idOrden> lo agrega el redirect de tomar-control-ejecucion
     // cuando la ejecucion retomada quedo Activa -- dispara la pregunta "¿va a hacer alguna actividad
@@ -1776,9 +1885,26 @@ app.get('/selladora/:codigo', requireLogin, async (req, res) => {
     // carga la pagina. Se valida que sea un entero positivo antes de pasarlo al HTML.
     const idOrdenPreguntarActividad = /^\d+$/.test(req.query.preguntarActividad || '') ? Number(req.query.preguntarActividad) : null;
 
-    res.send(renderPage(null, req.session.usuario.nombre, nombre, codigo, colaResult.recordset, req.session.usuario.codigoOperarioPRD, idOrdenPreguntarActividad));
+    res.send(renderPage(null, req.session.usuario.nombre, nombre, codigo, ordenes, req.session.usuario.codigoOperarioPRD, idOrdenPreguntarActividad));
   } catch (err) {
     res.status(500).send(renderPage(err.message, req.session.usuario.nombre, 'Selladora', codigo, [], req.session.usuario.codigoOperarioPRD, null));
+  }
+});
+
+// Fragmento HTML de la cola de ordenes -- lo pide solo scriptActualizarCola (polling cada 4s, mismo
+// criterio que scriptResumenBultoActivo) para refrescar la pagina sola, sin el boton "Actualizar"
+// (a pedido del usuario, 01/09/2026). Devuelve el HTML ya renderizado por renderColaOrdenes (no
+// JSON) para no duplicar ese marcado del lado del cliente -- se reemplaza tal cual el innerHTML del
+// contenedor, los onsubmit inline de cada fila (confirmarTomarControlEjecucion, etc.) quedan
+// funcionando porque son parte del HTML nuevo, no listeners agregados aparte.
+app.get('/selladora/:codigo/cola-fragmento', requireLogin, async (req, res) => {
+  const codigo = req.params.codigo;
+  try {
+    const p = await getPool();
+    const ordenes = await obtenerColaOrdenes(p, codigo);
+    res.type('html').send(renderColaOrdenes(ordenes, codigo, req.session.usuario.codigoOperarioPRD));
+  } catch (err) {
+    res.status(500).type('html').send('');
   }
 });
 
@@ -2349,9 +2475,14 @@ app.post('/api/selladora/orden/:idOrden/rollo', requireLogin, async (req, res) =
 // vuelven a consultar en BD: esto solo dispara la accion en Node-RED, no toca la BD directamente.
 // `datos` es opcional -- lo usa 'calidad' para mandar las respuestas (Conforme/No conforme) del
 // formulario, ver abrirCalidad() en scriptComandos(). FIX 26/08/2026: los comandos de residuo van
-// sin prefijo ('retal'/'troquelado'/'refilado', no 'residuo:retal').
+// sin prefijo ('retal'/'troquelado'/'refilado', no 'residuo:retal'). 'reimprimir_etiqueta'
+// (01/09/2026) es distinto de 'imprimir_etiqueta' a proposito -- ese ultimo imprime la etiqueta del
+// paquete que la bascula esta pesando en este momento (Node-RED lo resuelve solo, sin `datos`);
+// reimprimir_etiqueta va con `datos` describiendo un paquete YA pesado (idBulto/serialBulto/
+// consecutivoPaquete/pesoGr, ver reimprimirPaquete() en renderBultosOrden) para que Node-RED sepa
+// cual de todos hay que volver a imprimir, no necesariamente el que esta activo ahora.
 const COMANDOS_VALIDOS = new Set([
-  'imprimir_etiqueta', 'cierre_bulto', 'retal', 'troquelado', 'refilado', 'calidad', 'no_conforme'
+  'imprimir_etiqueta', 'reimprimir_etiqueta', 'cierre_bulto', 'retal', 'troquelado', 'refilado', 'calidad', 'no_conforme'
 ]);
 
 // Pausa (SEL_TiempoMuerto) -- a diferencia de los comandos de arriba, esto SI escribe directo en
