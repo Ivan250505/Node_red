@@ -173,16 +173,15 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
     lote: tLote, pesoRolloBruto: cantidad, generadoPor
   });
 
-  // SEL_Bultos.NumeroPedido es INT (a diferencia de PRDProduccion/SEL_OrdenProduccion, que son
-  // varchar) -- para un pedido alfanumerico como "A0003" esta columna puntual no lo puede guardar
-  // tal cual, queda en null (mismo criterio que ya usaba antes de este fix, solo que ahora es
-  // explicito). Si hace falta guardarlo completo aca tambien, hay que ALTER la columna a varchar.
-  const nNumeroPedidoBultoSQL = /^\d+$/.test(tNumeroPedido) ? parseInt(tNumeroPedido, 10) : null;
+  // FIX 31/08/2026: SEL_Bultos.NumeroPedido paso de INT a VARCHAR(20) (a pedido del usuario --
+  // antes un pedido alfanumerico como "A0003" quedaba en null aqui). Ahora se guarda el texto
+  // completo, igual que PRDProduccion/SEL_OrdenProduccion.
+  const tNumeroPedidoBultoSQL = tNumeroPedido || null;
 
   await tx.request()
     .input('agno', nAgno).input('mes', nMes).input('dia', nDia).input('numBulto', nNumBulto)
     .input('elemento', nElemento).input('serialPadre', tSerialPadre).input('maquina', nMaquina)
-    .input('idEjecucion', idEjecucion).input('numeroPedido', nNumeroPedidoBultoSQL).input('horaInicio', fHoy)
+    .input('idEjecucion', idEjecucion).input('numeroPedido', tNumeroPedidoBultoSQL).input('horaInicio', fHoy)
     .query(`
       INSERT INTO SEL_Bultos (agno, mes, dia, number_paqu, num_bulto, refsalida, estado, serialArmado, serialPadre, id_maquina, id_ejecucion, NumeroPedido, HoraInicio)
       VALUES (@agno, @mes, @dia, 0, @numBulto, @elemento, 'Activo', @serialPadre, @serialPadre, @maquina, @idEjecucion, @numeroPedido, @horaInicio)

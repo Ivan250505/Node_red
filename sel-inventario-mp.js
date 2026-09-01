@@ -458,7 +458,9 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
     const nLinea = dr.num_bulto;
     const tSerial = dr.serialPadre;
     const nCantidad = dr.CantidadTotal != null ? Number(dr.CantidadTotal) : 0;
-    const nNumeroPedido = dr.NumeroPedido != null ? Number(dr.NumeroPedido) : 0;
+    // FIX 31/08/2026: SEL_Bultos.NumeroPedido paso de INT a VARCHAR(20) -- ya se lee como texto
+    // directo, sin Number() (que antes descartaba en silencio pedidos alfanumericos como "A0003").
+    const tNumeroPedidoBulto = dr.NumeroPedido != null ? String(dr.NumeroPedido) : '';
     const nMaquina = dr.id_maquina;
     const nOperario = dr.Operario != null ? Number(dr.Operario) : 0;
     const nBolsasxGolpe = dr.BolsasxGolpe;
@@ -497,7 +499,7 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
         .input('cliente', nCodCliente > 0 ? nCodCliente : null).input('destino', nCodDestino > 0 ? nCodDestino : null)
         .input('generadoPor', generadoPor).input('horaIni', fHoraIni || null).input('horaFin', fHoraFin || null)
         .input('bolsas', nBolsasxGolpe).input('tipoPedido', TIPO_PEDIDO_AR)
-        .input('numeroPedido', nNumeroPedido > 0 ? String(nNumeroPedido) : null)
+        .input('numeroPedido', tNumeroPedidoBulto || null)
         .query(`
           INSERT INTO PRDProduccion (Fecha, Maquina, Turno, Duracion, Lote, Elemento, Linea, Cantidad, PesoCono, Unidades, Detalle,
             ClienteProduccion, Destino, Grafilado, Abierto, Servicio, Retal, GeneradoPor, FechaModificado, HoraInicio, HoraFinal,
