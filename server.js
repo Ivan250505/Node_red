@@ -948,16 +948,19 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva) {
     ];
 
     function abrirPausa() {
+      // Texto y radio mas grandes que .calidad-opcion (a pedido del usuario, 01/09/2026) -- estilo
+      // en linea, no una clase compartida, para no afectar tambien las opciones de Calidad
+      // (Conforme/No conforme), que si siguen usando calidad-opcion tal cual.
       var htmlSubmotivos = SUBMOTIVOS_ALISTAMIENTO.map(function(s) {
-        return '<label class="calidad-opcion" style="display:flex;margin-bottom:6px;"><input type="radio" name="subtipoPausa" value="' + s.clave + '"> ' + s.titulo + '</label>';
+        return '<label style="display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:17px;"><input type="radio" name="subtipoPausa" value="' + s.clave + '" style="width:22px;height:22px;margin:0;flex-shrink:0;"> ' + s.titulo + '</label>';
       }).join('');
 
       // Las subopciones de Alistamiento van justo debajo de esa opcion (a pedido del usuario,
       // 31/08/2026), no en un bloque aparte al final de la lista.
       var htmlMotivos = MOTIVOS_PAUSA.map(function(m) {
-        var item = '<label class="calidad-opcion" style="display:flex;margin-bottom:8px;"><input type="radio" name="motivoPausa" value="' + m.clave + '"> ' + m.titulo + '</label>';
+        var item = '<label style="display:flex;align-items:center;gap:10px;margin-bottom:10px;font-size:18px;"><input type="radio" name="motivoPausa" value="' + m.clave + '" style="width:22px;height:22px;margin:0;flex-shrink:0;"> ' + m.titulo + '</label>';
         if (m.clave === 'alistamiento') {
-          item += '<div id="pausa-submotivos" style="display:none;margin:0 0 8px 24px;">' + htmlSubmotivos + '</div>';
+          item += '<div id="pausa-submotivos" style="display:none;margin:0 0 8px 32px;">' + htmlSubmotivos + '</div>';
         }
         return item;
       }).join('');
@@ -1257,13 +1260,14 @@ function scriptPreguntaActividadInicial() {
     }
 
     function elegirMotivoInicial(idOrden, alTerminar) {
+      // Mismo tamaño mas grande que abrirPausa() en scriptComandos (a pedido del usuario, 01/09/2026).
       var htmlSubmotivos = SUBMOTIVOS_ALISTAMIENTO_INICIAL.map(function(s) {
-        return '<label style="display:flex;margin-bottom:6px;"><input type="radio" name="subtipoPausaInicial" value="' + s.clave + '"> ' + s.titulo + '</label>';
+        return '<label style="display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:17px;"><input type="radio" name="subtipoPausaInicial" value="' + s.clave + '" style="width:22px;height:22px;margin:0;flex-shrink:0;"> ' + s.titulo + '</label>';
       }).join('');
       var htmlMotivos = MOTIVOS_PAUSA_INICIAL.map(function(m) {
-        var item = '<label style="display:flex;margin-bottom:8px;"><input type="radio" name="motivoPausaInicial" value="' + m.clave + '"> ' + m.titulo + '</label>';
+        var item = '<label style="display:flex;align-items:center;gap:10px;margin-bottom:10px;font-size:18px;"><input type="radio" name="motivoPausaInicial" value="' + m.clave + '" style="width:22px;height:22px;margin:0;flex-shrink:0;"> ' + m.titulo + '</label>';
         if (m.clave === 'alistamiento') {
-          item += '<div id="pausa-inicial-submotivos" style="display:none;margin:0 0 8px 24px;">' + htmlSubmotivos + '</div>';
+          item += '<div id="pausa-inicial-submotivos" style="display:none;margin:0 0 8px 32px;">' + htmlSubmotivos + '</div>';
         }
         return item;
       }).join('');
@@ -2294,7 +2298,11 @@ function renderEscanear(maquinaCodigo, maquinaNombre, idOrden, nuevo, bolsasActu
     #resultado label { display: block; font-size: 13px; font-weight: 600; margin: 10px 0 6px; }
     #resultado input { width: 100%; padding: 10px 12px; border: 1px solid #d0d7de; border-radius: 10px; font-size: 16px; box-sizing: border-box; }
     #resultado button { margin-top: 12px; width: 100%; padding: 12px; border: none; border-radius: 10px; font-size: 15px; font-weight: 600; background: #0078d7; color: white; cursor: pointer; }
-    .volver { display: block; max-width: 380px; margin: 16px auto 0; color: #64748b; font-size: 13px; text-decoration: none; text-align: center; }
+    .volver {
+      display: block; max-width: 380px; margin: 16px auto 0; padding: 12px; color: #64748b;
+      font-size: 18px; font-weight: 600; text-decoration: none; text-align: center;
+      border: 1px solid #d0d7de; border-radius: 10px; box-sizing: border-box;
+    }
   </style>
 </head>
 <body>
@@ -2302,7 +2310,7 @@ function renderEscanear(maquinaCodigo, maquinaNombre, idOrden, nuevo, bolsasActu
   <div class="sub">${maquinaNombre} — escanee la etiqueta del rollo (código de 19 dígitos)</div>
   <div id="lector"></div>
   <div id="manual">
-    <input type="text" id="txtManual" placeholder="O escriba el código manualmente" inputmode="numeric">
+    <input type="text" id="txtManual" placeholder="O escriba el código manualmente" inputmode="numeric" autofocus>
     <button type="button" onclick="consultar(document.getElementById('txtManual').value)">Buscar</button>
   </div>
   <div id="resultado"></div>
@@ -2312,6 +2320,12 @@ function renderEscanear(maquinaCodigo, maquinaNombre, idOrden, nuevo, bolsasActu
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>
+    // Cursor listo para escribir el codigo apenas se entra a esta pantalla, en cualquier
+    // dispositivo (a pedido del usuario, 01/09/2026) -- el atributo autofocus del input no siempre
+    // alcanza (algunos navegadores/WebView de tablet lo ignoran), asi que se refuerza con .focus()
+    // al cargar.
+    document.getElementById('txtManual').focus();
+
     const idOrden = ${JSON.stringify(idOrden)};
     const esNuevoRollo = ${nuevo ? 'true' : 'false'};
     const bolsasActual = ${Number(bolsasActual) || 0};
