@@ -363,6 +363,29 @@ function estilosBase() {
     }
     .logo { height: 40px; display: block; }
     .logo-login { height: 40px; display: block; margin: 0 auto 12px; }
+    /* Encabezado de Informacion (solo renderOrdenDetalle) -- fila de 3 partes: header-info
+    (usuario/selladora/pedido/referencia, apiladas) a la izquierda, la tarjeta de Avance de
+    produccion en medio, Cerrar sesion a la derecha, las 3 centradas verticalmente entre si (a
+    pedido del usuario, 02/09/2026). Es un grid de 3 columnas simetricas (1fr / auto / 1fr) y no
+    flex, para que la tarjeta del medio quede centrada de verdad respecto a todo el ancho de la
+    fila, sin importar que tan ancho sea lo que tiene a cada lado. Cerrar sesion se fija en la
+    columna 3 a proposito: cuando la orden no tiene meta configurada la tarjeta del medio no se
+    renderiza, y sin eso el boton se correria al centro. Ver diseno acordado:
+    https://claude.ai/code/artifact/17eae4be-abd7-4742-a5bf-c6d87970f2d7 */
+    .header-fila { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 16px; }
+    .header-info { justify-self: start; min-width: 0; }
+    .header-info .header-usuario { font-size: 12px; opacity: 0.9; margin-bottom: 8px; }
+    .header-fila a.salir { justify-self: end; grid-column: 3; }
+    .avance-header-card {
+      background: white; border-radius: 12px; padding: 10px 14px; justify-self: center; width: 260px; max-width: 100%;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.15); color: var(--texto);
+    }
+    .avance-header-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+    .avance-header-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--texto-suave); font-weight: 600; }
+    .avance-header-porcentaje { font-size: 20px; font-weight: 700; }
+    .avance-header-barra { height: 8px; border-radius: 999px; background: #eef0f2; overflow: hidden; margin-bottom: 6px; }
+    .avance-header-relleno { height: 100%; border-radius: 999px; }
+    .avance-header-stats { display: flex; justify-content: space-between; font-size: 12px; color: var(--texto-suave); font-weight: 600; }
     main { max-width: 960px; margin: 0 auto; padding: 16px 14px 30px; }
     .barra {
       display: flex;
@@ -378,15 +401,16 @@ function estilosBase() {
       gap: 12px;
       font-size: 12px; opacity: 0.9; margin-bottom: 8px;
     }
-    .usuario-bar a.salir {
+    a.salir {
       color: white;
       background: #c0392b;
       padding: 5px 12px;
       border-radius: 8px;
       font-weight: 600;
       text-decoration: none;
+      flex-shrink: 0;
     }
-    .usuario-bar a.salir:active { background: #a53125; }
+    a.salir:active { background: #a53125; }
     form { margin: 0; width: 100%; }
     label { display: block; font-size: 13px; font-weight: 600; color: var(--texto); margin-bottom: 6px; }
     select {
@@ -567,6 +591,9 @@ function estilosBase() {
       header h1 { font-size: 18px; }
       .barra { flex-direction: column; align-items: stretch; }
       .actualizado { text-align: center; }
+      .header-fila { grid-template-columns: 1fr; justify-items: stretch; }
+      .header-info, .avance-header-card, .header-fila a.salir { justify-self: stretch; width: auto; }
+      .header-fila a.salir { text-align: center; grid-column: 1; }
     }
   `;
 }
@@ -608,7 +635,7 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
     <div class="header-inner">
       <div class="usuario-bar">
         <span>👤 ${usuario}</span>
-        <a class="salir" href="/logout">Salir</a>
+        <a class="salir" href="/logout">Cerrar sesión</a>
       </div>
       <div class="sub">Máquinas con producción activa en este momento</div>
       ${esAdmin ? `<a class="volver" href="/admin/tablet-fija" style="display:block;margin-top:8px;">📌 Tablet fija a máquina</a>` : ''}
@@ -694,7 +721,8 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
 // conecta al /ws/peso de ESTE servidor (que a su vez hace de proxy hacia Node-RED, ver
 // conectarNodeRed() arriba), no directo a Node-RED. Reconecta sola si se cae. El flujo de
 // Node-RED manda JSON tipo {"peso": 0.2088..., "timestamp": "..."} con el peso ya en KG -- se
-// muestra tal cual, sin convertir (a diferencia de SEL_PesajeElemento.PesoPaqueGr que es en gramos).
+// muestra tal cual, sin convertir. Es el mismo valor en kg que Node-RED guarda despues en
+// SEL_PesajeElemento.PesoPaqueGr (columna mal nombrada, ver FIX 02/09/2026 mas abajo).
 function scriptPesoEnVivo() {
   return `
     (function() {
@@ -728,12 +756,54 @@ function scriptPesoEnVivo() {
   `;
 }
 
+// Tarjeta de Avance de produccion del encabezado (ver obtenerAvanceProduccion) -- el servidor ya
+// renderiza el valor inicial, esto solo lo refresca cada 4s pidiendo /avance-produccion, porque
+// sube a medida que se van registrando paquetes nuevos (a pedido del usuario, 02/09/2026). Por eso
+// el primer tick es a los 4s y no de una.
+function scriptAvanceProduccion(idOrden, maquinaCodigo) {
+  return `
+    (function() {
+      var elPorcentaje = document.getElementById('avance-porcentaje');
+      var elRelleno = document.getElementById('avance-relleno');
+      var elProducido = document.getElementById('avance-producido');
+      var elProgramado = document.getElementById('avance-programado');
+      if (!elPorcentaje || !elRelleno) return;
+
+      function formatearCantidad(valor, tipo) {
+        if (tipo === 'kg') return valor.toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' kg';
+        return Math.round(valor).toLocaleString('es-CO') + ' uds';
+      }
+
+      async function actualizar() {
+        try {
+          const resp = await fetch('/selladora/' + ${jsString(maquinaCodigo)} + '/orden/' + ${JSON.stringify(idOrden)} + '/avance-produccion');
+          if (!resp.ok) return;
+          const datos = await resp.json();
+          if (!datos.ok || !datos.tipo) return;
+          var color = datos.porcentaje >= 100 ? '#4a9c2e' : '#006984';
+          elPorcentaje.textContent = datos.porcentaje.toLocaleString('es-CO', { maximumFractionDigits: 1 }) + '%';
+          elPorcentaje.style.color = color;
+          elRelleno.style.width = Math.min(datos.porcentaje, 100) + '%';
+          elRelleno.style.background = color;
+          if (elProducido) elProducido.textContent = 'Producido: ' + formatearCantidad(datos.producido, datos.tipo);
+          if (elProgramado) elProgramado.textContent = 'Programado: ' + formatearCantidad(datos.programado, datos.tipo);
+        } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
+      }
+      setInterval(actualizar, 4000);
+    })();
+  `;
+}
+
 // Resumen del bulto Activo (paquetes pesados + peso acumulado) -- a pedido del usuario
 // (27/08/2026), se actualiza solo cada 4s pidiendo /resumen-bulto-activo (no viene por el
 // websocket de peso: ese es la lectura instantanea de la bascula, esto es la suma acumulada de
-// los paquetes ya registrados en SEL_PesajeElemento para el bulto Activo). El endpoint devuelve
-// pesoTotalGr en gramos (asi esta la columna en BD); se muestra en kg con 2 decimales (a pedido
-// del usuario, 31/08/2026).
+// los paquetes ya registrados en SEL_PesajeElemento para el bulto Activo).
+// FIX 02/09/2026: SEL_PesajeElemento.PesoPaqueGr se llama "Gr" pero guarda KILOGRAMOS -- Node-RED
+// inserta ahi el peso tal como sale de la bascula, que emite en kg (ej. 0.497 = 497 g). Antes esto
+// se dividia entre 1000 asumiendo gramos, y el acumulado siempre terminaba mostrando "0,00". El
+// nombre de la columna no se puede cambiar (la usan tambien Node-RED y el escritorio), pero aca
+// dentro se maneja como kg y el campo del endpoint se llama pesoTotalKg para que no vuelva a
+// confundirse.
 function scriptResumenBultoActivo(idOrden, maquinaCodigo) {
   return `
     (function() {
@@ -748,7 +818,7 @@ function scriptResumenBultoActivo(idOrden, maquinaCodigo) {
           const datos = await resp.json();
           if (!datos.ok) return;
           elPaquetes.textContent = datos.paquetes;
-          elPeso.textContent = (datos.pesoTotalGr / 1000).toFixed(2);
+          elPeso.textContent = datos.pesoTotalKg.toFixed(2);
           // Se guarda en window (no en una var local del IIFE) para que confirmarPesoYEnviar, que
           // vive en otro <script> (scriptComandos), pueda leer cual es el bulto Activo ahora mismo
           // al marcar un residuo/salida no conforme (01/09/2026, a pedido del usuario).
@@ -1346,7 +1416,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
     <div class="header-inner">
       <div class="usuario-bar">
         <span>👤 ${usuario}</span>
-        <a class="salir" href="/logout">Salir</a>
+        <a class="salir" href="/logout">Cerrar sesión</a>
       </div>
       <a class="volver" href="/">‹ Selladoras</a>
       <h1>🏭 ${maquinaNombre}</h1>
@@ -1413,7 +1483,7 @@ function renderTabletFija(usuario, maquinas, maquinaActual, error) {
     <div class="header-inner">
       <div class="usuario-bar">
         <span>👤 ${usuario}</span>
-        <a class="salir" href="/logout">Salir</a>
+        <a class="salir" href="/logout">Cerrar sesión</a>
       </div>
       <a class="volver" href="/">‹ Selladoras</a>
       <h1>📌 Tablet fija a máquina</h1>
@@ -1466,7 +1536,7 @@ const BOTONES_RESIDUOS = [
 // vivia aca se elimino -- a pedido del usuario, esa accion (MERGE SEL_OperarioActualMaquina) ahora
 // la hacen los botones condicionales de la cola de ordenes de la maquina (renderColaOrdenes,
 // "Tomar control de la ejecución"/"Reanudar ejecución"), asi que ya no hacia falta duplicarla aca.
-function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva) {
+function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance) {
   const filasHistorial = historial.length
     ? historial.map(h => `
         <div class="hist-fila">
@@ -1573,6 +1643,29 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     ['Nombre impresión', tieneImpresion ? (orden.TipoImpresionDescripcion || 'Sí') : 'No']
   ].map(([label, valor]) => `<div><span class="label">${label}</span><span class="valor">${valor ?? '—'}</span></div>`).join('');
 
+  // Tarjeta de Avance de produccion (encabezado) -- solo si la orden tiene meta configurada
+  // (KilosSolicitados o UnidadesSolicitadas, ver obtenerAvanceProduccion). Se renderiza con el
+  // valor real de una vez, y scriptAvanceProduccion lo va refrescando cada 4s -- por eso los ids.
+  // Verde al llegar/pasar la meta, azul mientras va por debajo; la barra se corta en 100% aunque
+  // el porcentaje siga subiendo.
+  const avanceCard = (avance && avance.tipo) ? (() => {
+    const color = avance.porcentaje >= 100 ? '#4a9c2e' : '#006984';
+    return `
+        <div class="avance-header-card">
+          <div class="avance-header-top">
+            <span class="avance-header-label">Avance de producción</span>
+            <span class="avance-header-porcentaje" id="avance-porcentaje" style="color:${color};">${avance.porcentaje.toLocaleString('es-CO', { maximumFractionDigits: 1 })}%</span>
+          </div>
+          <div class="avance-header-barra">
+            <div class="avance-header-relleno" id="avance-relleno" style="width:${Math.min(avance.porcentaje, 100)}%;background:${color};"></div>
+          </div>
+          <div class="avance-header-stats">
+            <span id="avance-producido">Producido: ${formatearCantidadAvance(avance.producido, avance.tipo)}</span>
+            <span id="avance-programado">Programado: ${formatearCantidadAvance(avance.programado, avance.tipo)}</span>
+          </div>
+        </div>`;
+  })() : '';
+
   return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -1587,13 +1680,16 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
       <div class="logo-wrap"><img class="logo" src="/logo-carlixplast.png" alt="Carlixplast"></div>
     </div>
     <div class="header-inner">
-      <div class="usuario-bar">
-        <span>👤 ${usuario}</span>
-        <a class="salir" href="/logout">Salir</a>
+      <div class="header-fila">
+        <div class="header-info">
+          <div class="header-usuario">👤 ${usuario}</div>
+          <a class="volver" href="/selladora/${maquinaCodigo}">‹ ${orden.MaquinaNombre}</a>
+          <h1>Pedido ${orden.NumeroPedido || '—'} ${badgeEstadoOrden(orden.Estado)}</h1>
+          <div class="sub">${orden.Elemento}</div>
+        </div>
+        ${avanceCard}
+        <a class="salir" href="/logout">Cerrar sesión</a>
       </div>
-      <a class="volver" href="/selladora/${maquinaCodigo}">‹ ${orden.MaquinaNombre}</a>
-      <h1>Pedido ${orden.NumeroPedido || '—'} ${badgeEstadoOrden(orden.Estado)}</h1>
-      <div class="sub">${orden.Elemento}</div>
     </div>
   </header>
   <main>
@@ -1626,6 +1722,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptConfirmarFinalizar()}</script>
   ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo, calidadFlags, pausaActiva)}</script><script>${scriptPesoEnVivo()}</script><script>${scriptResumenBultoActivo(orden.IdOrden, maquinaCodigo)}</script>` : ''}
+  ${avanceCard ? `<script>${scriptAvanceProduccion(orden.IdOrden, maquinaCodigo)}</script>` : ''}
 </body>
 </html>`;
 }
@@ -1773,7 +1870,7 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, usuario, maquinaCodig
     <div class="header-inner">
       <div class="usuario-bar">
         <span>👤 ${usuario}</span>
-        <a class="salir" href="/logout">Salir</a>
+        <a class="salir" href="/logout">Cerrar sesión</a>
       </div>
       <a class="volver" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}">‹ Pedido ${orden.NumeroPedido || '—'}</a>
       <h1>📦 Bultos</h1>
@@ -2099,9 +2196,25 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
       historial = historialResult.recordset;
     }
 
-    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva));
+    const avance = await obtenerAvanceProduccion(p, idOrden);
+
+    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
+  }
+});
+
+// Avance de produccion en vivo -- lo pide scriptAvanceProduccion cada 4s para refrescar la tarjeta
+// del encabezado sin recargar la pagina, porque el acumulado sube con cada paquete que se registra
+// (a pedido del usuario, 02/09/2026). Ver obtenerAvanceProduccion para las reglas del calculo.
+app.get('/selladora/:codigo/orden/:idOrden/avance-produccion', requireLogin, async (req, res) => {
+  const { idOrden } = req.params;
+  try {
+    const p = await getPool();
+    const avance = await obtenerAvanceProduccion(p, idOrden);
+    res.json({ ok: true, ...avance });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -2136,6 +2249,57 @@ async function obtenerBultosYPesajes(p, idOrden) {
   }
 
   return { bultos, pesajesPorBulto };
+}
+
+// Cada paquete producido cuenta como 100 unidades cuando la orden se mide en unidades (regla de
+// negocio dada por el usuario, 02/09/2026 -- no sale de ninguna columna, es fija).
+const UNIDADES_POR_PAQUETE = 100;
+
+// Avance de produccion de una orden: lo producido contra lo pedido (tarjeta del encabezado de
+// Informacion, ver renderOrdenDetalle). Reglas acordadas con el usuario (02/09/2026):
+//  - La meta sale de SEL_OrdenProduccion: KilosSolicitados manda si tiene valor (> 0) y el avance
+//    se mide en kg; si no, UnidadesSolicitadas y se mide en unidades. Si ninguna tiene valor no hay
+//    meta configurada (tipo null) y la tarjeta no se muestra.
+//  - Lo producido es el acumulado de TODOS los bultos Activo + Cerrado de la orden (no solo el
+//    bulto activo, a diferencia de /resumen-bulto-activo): en kg, la suma de PesoPaqueGr, que pese
+//    a llamarse "Gr" guarda KILOGRAMOS (ver FIX 02/09/2026 en scriptResumenBultoActivo); en
+//    unidades, la cantidad de paquetes x UNIDADES_POR_PAQUETE.
+//    'Temporal' queda fuera a proposito -- son bultos sin ningun paquete pesado (ver finalizarOrden).
+//  - El valor cambia solo a medida que se registran paquetes nuevos, por eso la pagina lo refresca
+//    con polling (scriptAvanceProduccion), igual que el resumen del bulto activo.
+async function obtenerAvanceProduccion(p, idOrden) {
+  const dtOrden = await p.request().input('idOrden', idOrden).query(
+    `SELECT KilosSolicitados, UnidadesSolicitadas FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`
+  );
+  if (dtOrden.recordset.length === 0) return { tipo: null };
+
+  const kilosSolicitados = Number(dtOrden.recordset[0].KilosSolicitados) || 0;
+  const unidadesSolicitadas = Number(dtOrden.recordset[0].UnidadesSolicitadas) || 0;
+  const tipo = kilosSolicitados > 0 ? 'kg' : (unidadesSolicitadas > 0 ? 'unidades' : null);
+  if (!tipo) return { tipo: null };
+
+  const dtProducido = await p.request().input('idOrden', idOrden).query(`
+    SELECT ISNULL(SUM(pe.PesoPaqueGr), 0) AS PesoTotalKg, COUNT(*) AS Paquetes
+    FROM SEL_PesajeElemento pe
+    INNER JOIN SEL_Bultos b ON b.id = pe.id_bulto
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+    WHERE ej.IdOrden = @idOrden AND b.estado IN ('Activo', 'Cerrado')
+  `);
+  const paquetes = Number(dtProducido.recordset[0].Paquetes);
+  const producido = tipo === 'kg'
+    ? Number(dtProducido.recordset[0].PesoTotalKg)
+    : paquetes * UNIDADES_POR_PAQUETE;
+  const programado = tipo === 'kg' ? kilosSolicitados : unidadesSolicitadas;
+
+  return { tipo, producido, programado, porcentaje: (producido / programado) * 100, paquetes };
+}
+
+// Formato de las cantidades de la tarjeta de avance -- kg con 2 decimales, unidades enteras, ambos
+// con separador de miles en formato es-CO ("1.234,56 kg"). El cliente formatea igual en
+// scriptAvanceProduccion para que el valor no cambie de forma al refrescarse solo.
+function formatearCantidadAvance(valor, tipo) {
+  if (tipo === 'kg') return valor.toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' kg';
+  return Math.round(valor).toLocaleString('es-CO') + ' uds';
 }
 
 // Bultos producidos de una orden puntual -- separado de /selladora/:codigo/orden/:idOrden (que ya
@@ -2199,14 +2363,16 @@ app.get('/selladora/:codigo/orden/:idOrden/resumen-bulto-activo', requireLogin, 
       ORDER BY b.id DESC
     `);
     if (dtBultoActivo.recordset.length === 0) {
-      return res.json({ ok: true, paquetes: 0, pesoTotalGr: 0, idBulto: null });
+      return res.json({ ok: true, paquetes: 0, pesoTotalKg: 0, idBulto: null });
     }
     const idBulto = dtBultoActivo.recordset[0].id;
+    // PesoPaqueGr guarda kilogramos pese al nombre (ver FIX 02/09/2026 en scriptResumenBultoActivo),
+    // por eso la suma sale ya en kg y no se convierte.
     const resumen = await p.request().input('idBulto', idBulto).query(`
-      SELECT COUNT(*) AS Paquetes, ISNULL(SUM(PesoPaqueGr), 0) AS PesoTotalGr
+      SELECT COUNT(*) AS Paquetes, ISNULL(SUM(PesoPaqueGr), 0) AS PesoTotalKg
       FROM SEL_PesajeElemento WHERE id_bulto = @idBulto
     `);
-    res.json({ ok: true, paquetes: resumen.recordset[0].Paquetes, pesoTotalGr: Number(resumen.recordset[0].PesoTotalGr), idBulto });
+    res.json({ ok: true, paquetes: resumen.recordset[0].Paquetes, pesoTotalKg: Number(resumen.recordset[0].PesoTotalKg), idBulto });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
