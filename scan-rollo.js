@@ -202,12 +202,17 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
     .input('numeroPedido', tNumeroPedido || null)
     .input('ordenProduccion', tOrdenProduccion || null)
     .query(`
+      -- FIX 03/09/2026 (a pedido del usuario -- mismo cambio que frmScanRollo.vb:CrearBultoInicial):
+      -- HoraFinal ya no se inserta en NULL -- se deja igual a HoraInicio (placeholder, duracion "0"
+      -- mientras el bulto sigue abierto). Motivo: pantallas que todavia no tienen el build mas
+      -- reciente leen HoraFinal sin blindaje contra NULL y truenan la ventana completa. Al cerrar
+      -- el bulto, trg_SEL_Bultos_CierreBulto sobreescribe este placeholder con el HoraFinal real.
       INSERT INTO PRDProduccion (Fecha, Maquina, Turno, Duracion, Lote, Elemento, Linea, Cantidad, PesoCono, Unidades, Detalle,
         ClienteProduccion, Destino, Grafilado, Abierto, Servicio, Retal, GeneradoPor,
         FechaModificado, HoraInicio, HoraFinal, Torta, BolsasxGolpe, TipoPedido, NumeroPedido, OrdenProduccion)
       VALUES (@fecha, @maquina, @turno, 0, @lote, @elemento, @linea, 0, 0, 0, @serialPadre,
         @cliente, @destino, 0, 0, 0, 0, @generadoPor,
-        GETDATE(), @horaInicio, NULL, 0, @bolsas, 4, @numeroPedido, @ordenProduccion)
+        GETDATE(), @horaInicio, @horaInicio, 0, @bolsas, 4, @numeroPedido, @ordenProduccion)
     `);
 
   if (codOperario > 0) {
