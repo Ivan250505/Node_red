@@ -366,15 +366,18 @@ function estilosBase() {
     }
     .logo { height: 40px; display: block; }
     .logo-login { height: 40px; display: block; margin: 0 auto 12px; }
-    /* Encabezado de Informacion (solo renderOrdenDetalle) -- fila de 3 partes: header-info
-    (titulo/referencia/selladora, apiladas -- "Volver" debajo del titulo y la referencia, a pedido
-    del usuario 03/09/2026) a la izquierda, la tarjeta de Avance de produccion en medio,
-    header-salir-grupo (usuario, con Cerrar sesion debajo -- mismo pedido) a la derecha, las 3
-    centradas verticalmente entre si. Es un grid de 3 columnas simetricas (1fr / auto / 1fr) y no
-    flex, para que la tarjeta del medio quede centrada de verdad respecto a todo el ancho de la
-    fila, sin importar que tan ancho sea lo que tiene a cada lado. header-salir-grupo se fija en la
-    columna 3 a proposito: cuando la orden no tiene meta configurada la tarjeta del medio no se
-    renderiza, y sin eso el grupo se correria al centro. Ver diseno acordado:
+    /* Encabezado -- fila de 3 partes, usada en TODAS las paginas con header (Dashboard,
+    Programacion maquina, Informacion, Bultos -- a pedido del usuario, 04/09/2026, extendido desde
+    Informacion donde se probo primero el 03/09/2026): header-info (titulo/referencia/volver,
+    apiladas -- "Volver" debajo del titulo y la referencia) a la izquierda, la tarjeta de Avance de
+    produccion en medio (solo existe en Informacion; en las demas paginas esa columna queda vacia),
+    header-salir-grupo (usuario, con Cerrar sesion debajo) a la derecha, las 3 centradas
+    verticalmente entre si. Es un grid de 3 columnas simetricas (1fr / auto / 1fr) y no flex, para
+    que la tarjeta del medio quede centrada de verdad respecto a todo el ancho de la fila, sin
+    importar que tan ancho sea lo que tiene a cada lado. header-salir-grupo se fija en la columna 3
+    a proposito: en Informacion, cuando la orden no tiene meta configurada la tarjeta del medio no
+    se renderiza, y sin eso el grupo se correria al centro (mismo motivo por el que las paginas sin
+    ninguna tarjeta del medio tambien necesitan fijarlo en columna 3). Ver diseno acordado:
     https://claude.ai/code/artifact/17eae4be-abd7-4742-a5bf-c6d87970f2d7 */
     .header-fila { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 16px; }
     .header-info { justify-self: start; min-width: 0; }
@@ -657,12 +660,16 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
       <div class="logo-wrap"><img class="logo" src="/logo-carlixplast.png" alt="Carlixplast"></div>
     </div>
     <div class="header-inner">
-      <div class="usuario-bar">
-        <span>👤 ${usuario}</span>
-        <a class="salir" href="/logout">Cerrar sesión</a>
+      <div class="header-fila">
+        <div class="header-info">
+          <div class="sub">Máquinas con producción activa en este momento</div>
+          ${esAdmin ? `<a class="volver" href="/admin/tablet-fija">📌 Tablet fija a máquina</a>` : ''}
+        </div>
+        <div class="header-salir-grupo">
+          <div class="header-usuario">👤 ${usuario}</div>
+          <a class="salir" href="/logout">Cerrar sesión</a>
+        </div>
       </div>
-      <div class="sub">Máquinas con producción activa en este momento</div>
-      ${esAdmin ? `<a class="volver" href="/admin/tablet-fija" style="display:block;margin-top:8px;">📌 Tablet fija a máquina</a>` : ''}
     </div>
   </header>
   <main>
@@ -1563,13 +1570,17 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
       <div class="logo-wrap"><img class="logo" src="/logo-carlixplast.png" alt="Carlixplast"></div>
     </div>
     <div class="header-inner">
-      <div class="usuario-bar">
-        <span>👤 ${usuario}</span>
-        <a class="salir" href="/logout">Cerrar sesión</a>
+      <div class="header-fila">
+        <div class="header-info">
+          <h1>🏭 ${maquinaNombre}</h1>
+          <div class="sub">Programación máquina</div>
+          <a class="volver" href="/">‹ Selladoras</a>
+        </div>
+        <div class="header-salir-grupo">
+          <div class="header-usuario">👤 ${usuario}</div>
+          <a class="salir" href="/logout">Cerrar sesión</a>
+        </div>
       </div>
-      <a class="volver" href="/">‹ Selladoras</a>
-      <h1>🏭 ${maquinaNombre}</h1>
-      <div class="sub">Programación máquina</div>
     </div>
   </header>
   <main>
@@ -1957,7 +1968,8 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto) {
         <div><span class="label">Cant. Total (KG)</span><span class="valor">${b.CantidadTotal ?? '—'}</span></div>
         <div><span class="label">Golpes</span><span class="valor">${b.Golpes ?? '—'}</span></div>
         <div><span class="label">Potencia (W)</span><span class="valor">${b.Potencia ?? '—'}</span></div>
-        <div><span class="label">Hora</span><span class="valor">${b.Hora ?? '—'}</span></div>
+        <div><span class="label">Hora inicio</span><span class="valor">${b.HoraInicio ?? '—'}</span></div>
+        <div><span class="label">Hora final</span><span class="valor">${b.HoraFin ?? '—'}</span></div>
         <div class="full"><span class="label">Serial</span><span class="valor serial">${b.serialPadre ?? '—'}</span></div>
       </div>
       <details class="pesajes-box" data-bulto="${b.id}">
@@ -2118,13 +2130,17 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, usu
       <div class="logo-wrap"><img class="logo" src="/logo-carlixplast.png" alt="Carlixplast"></div>
     </div>
     <div class="header-inner">
-      <div class="usuario-bar">
-        <span>👤 ${usuario}</span>
-        <a class="salir" href="/logout">Cerrar sesión</a>
+      <div class="header-fila">
+        <div class="header-info">
+          <h1>📦 Bultos</h1>
+          <div class="sub">${orden.Elemento}</div>
+          <a class="volver" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}">‹ Pedido ${orden.NumeroPedido || '—'}</a>
+        </div>
+        <div class="header-salir-grupo">
+          <div class="header-usuario">👤 ${usuario}</div>
+          <a class="salir" href="/logout">Cerrar sesión</a>
+        </div>
       </div>
-      <a class="volver" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}">‹ Pedido ${orden.NumeroPedido || '—'}</a>
-      <h1>📦 Bultos</h1>
-      <div class="sub">${orden.Elemento}</div>
     </div>
   </header>
   <main>
@@ -2506,7 +2522,8 @@ const OFFSET_RESIDUO_POR_TIPO = { 1000: 'Retal', 2000: 'Refilado', 3000: 'Troque
 async function obtenerBultosYPesajes(p, idOrden) {
   const bultosResult = await p.request().input('idOrden', idOrden).query(`
     SELECT b.id, b.num_bulto, b.serialPadre, b.CantidadTotal, b.estado, ISNULL(b.Golpes,0) AS Golpes, b.Potencia,
-           FORMAT(ISNULL(b.HoraFin, b.HoraInicio), 'dd/MM/yyyy HH:mm') AS Hora
+           FORMAT(b.HoraInicio, 'dd/MM/yyyy HH:mm') AS HoraInicio,
+           FORMAT(b.HoraFin, 'dd/MM/yyyy HH:mm') AS HoraFin
     FROM SEL_Bultos b
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
     WHERE ej.IdOrden = @idOrden
