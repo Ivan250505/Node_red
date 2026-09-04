@@ -1722,6 +1722,12 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
       ${!pausaActiva ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>` : ''}`;
   }
 
+  // Troquelado (SEL_OrdenProduccion.Troquelado != 'SinTroquelado') -- decide DOS cosas: si sale el
+  // boton de residuo "Troquelado" (FIX 04/09/2026, a pedido del usuario: antes salia para toda
+  // SELLADORA sin mirar si la orden de verdad lleva troquelado) y si aplica el apartado
+  // Troquelado/Perforaciones de Calidad (ver calidadFlags mas abajo).
+  const tieneTroquelado = !!orden.Troquelado && orden.Troquelado !== 'SinTroquelado';
+
   // Botones de residuos (Retal/Troquelado, segun BOTONES_RESIDUOS_POR_TIPO) + Salida no conforme --
   // van agrupados bajo un titulo "Residuos", en su propia isla separada de "Producción"
   // (+Rollo/Finalizar/Pausa) pero en la MISMA fila (a pedido del usuario, 01/09/2026 -- antes vivian
@@ -1733,6 +1739,9 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   const botonesResiduosHTML = activa ? [
     ...BOTONES_RESIDUOS
       .filter(b => botonesResiduosHabilitados.includes(b.clave))
+      // "Troquelado" ademas exige que ESTA orden lleve troquelado -- los otros residuos no dependen
+      // de ninguna columna de la orden, solo del tipo de maquina.
+      .filter(b => b.clave !== 'troquelado' || tieneTroquelado)
       .map(b => `<button type="button" class="btn-accion btn-residuo" onclick="confirmarPesoYEnviar('¿Está seguro de marcar este bulto con ${b.label}?', '${b.clave}', this)">${b.label}</button>`),
     `<button type="button" class="btn-accion btn-no-conforme" onclick="confirmarPesoYEnviar('¿Está seguro de marcar esta salida como no conforme?', 'no_conforme', this)">🚫 Salida no conforme</button>`
   ].join('') : '';
@@ -1782,10 +1791,10 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
 
   // Condiciones que deciden que apartados/preguntas de Calidad aplican -- ver
   // construirApartadosCalidad(). "Sí" exacto para accesorios (no alcanza con no-NULL, ver
-  // conversacion 26/08/2026); Troquelado != 'SinTroquelado'; Perforaciones != 0/NULL.
+  // conversacion 26/08/2026); Perforaciones != 0/NULL. tieneTroquelado se calcula mas arriba
+  // (tambien decide si sale el boton de residuo "Troquelado").
   const tieneAccesorios = ['Manija', 'Tula', 'Parche', 'CierreDeslizador', 'CierreHermetico', 'CintaAdhesiva']
     .some(campo => orden[campo] === 'Sí');
-  const tieneTroquelado = !!orden.Troquelado && orden.Troquelado !== 'SinTroquelado';
   const tienePerforaciones = orden.Perforaciones != null && Number(orden.Perforaciones) !== 0;
   const calidadFlags = { tieneImpresion, tieneAccesorios, tieneTroquelado, tienePerforaciones };
 
@@ -1966,10 +1975,10 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto) {
       </div>
       <div class="card-grid">
         <div><span class="label">Cant. Total (KG)</span><span class="valor">${b.CantidadTotal ?? '—'}</span></div>
-        <div><span class="label">Golpes</span><span class="valor">${b.Golpes ?? '—'}</span></div>
-        <div><span class="label">Potencia (W)</span><span class="valor">${b.Potencia ?? '—'}</span></div>
         <div><span class="label">Hora inicio</span><span class="valor">${b.HoraInicio ?? '—'}</span></div>
+        <div><span class="label">Potencia (W)</span><span class="valor">${b.Potencia ?? '—'}</span></div>
         <div><span class="label">Hora final</span><span class="valor">${b.HoraFin ?? '—'}</span></div>
+        <div><span class="label">Golpes x minuto</span><span class="valor">${b.Golpes ?? '—'}</span></div>
         <div class="full"><span class="label">Serial</span><span class="valor serial">${b.serialPadre ?? '—'}</span></div>
       </div>
       <details class="pesajes-box" data-bulto="${b.id}">
@@ -2839,7 +2848,18 @@ function renderEscanear(maquinaCodigo, maquinaNombre, idOrden, nuevo, bolsasActu
     // dispositivo (a pedido del usuario, 01/09/2026) -- el atributo autofocus del input no siempre
     // alcanza (algunos navegadores/WebView de tablet lo ignoran), asi que se refuerza con .focus()
     // al cargar.
-    document.getElementById('txtManual').focus();
+    const inputManual = document.getElementById('txtManual');
+    inputManual.focus();
+    // Las pistolas lectoras de codigo de barras escriben el serial como si fuera un teclado y
+    // mandan un Enter al terminar -- se busca solo apenas se detecta ese Enter, sin que el
+    // operario tenga que tocar "Buscar" (a pedido del usuario, 04/09/2026). Funciona igual si
+    // alguien lo escribe a mano y presiona Enter.
+    inputManual.addEventListener('keydown', function(evento) {
+      if (evento.key === 'Enter') {
+        evento.preventDefault();
+        consultar(inputManual.value);
+      }
+    });
 
     const idOrden = ${JSON.stringify(idOrden)};
     const esNuevoRollo = ${nuevo ? 'true' : 'false'};
