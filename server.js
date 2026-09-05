@@ -7,7 +7,7 @@ const session = require('express-session');
 const sql = require('mssql');
 const { desencriptar } = require('./crypto-mirane');
 const { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO } = require('./auth');
-const { buscarUsuarioPorQR, registrarEvento } = require('./accesos');
+const { registrarEvento } = require('./accesos');
 const { consultarSerial, confirmarRollo } = require('./scan-rollo');
 const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
 const { obtenerLineaOriginalControlSellado } = require('./sel-inventario-mp');
@@ -172,10 +172,33 @@ function renderLogin(error) {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
       background: linear-gradient(135deg, #00a2cb, #006984);
+      position: relative; overflow: hidden;
+    }
+    /* Misma trama de puntos del encabezado (ver estilosBase): el fondo del login es el mismo
+    degradado azul, asi que lleva la misma textura en el mismo sentido (135deg). */
+    body::before, body::after {
+      content: ""; position: fixed; inset: 0; pointer-events: none;
+      background-size: 11px 11px;
+      background-position: 0 0, 5.5px 5.5px;
+    }
+    body::before {
+      background-image:
+        radial-gradient(circle at center, rgba(255,255,255,0.16) 0.7px, transparent 1.2px),
+        radial-gradient(circle at center, rgba(255,255,255,0.16) 0.7px, transparent 1.2px);
+      -webkit-mask-image: linear-gradient(135deg, #000 0%, transparent 65%);
+              mask-image: linear-gradient(135deg, #000 0%, transparent 65%);
+    }
+    body::after {
+      background-image:
+        radial-gradient(circle at center, rgba(255,255,255,0.24) 1.7px, transparent 2.2px),
+        radial-gradient(circle at center, rgba(255,255,255,0.24) 1.7px, transparent 2.2px);
+      -webkit-mask-image: linear-gradient(135deg, transparent 35%, #000 100%);
+              mask-image: linear-gradient(135deg, transparent 35%, #000 100%);
     }
     .caja {
       background: white; border-radius: 16px; padding: 32px 28px; width: 100%; max-width: 340px;
       box-shadow: 0 8px 30px rgba(0,0,0,0.25);
+      position: relative; z-index: 1;
     }
     .logo-login { height: 40px; display: block; margin: 0 auto 14px; }
     .caja .sub { text-align: center; color: #64748b; font-size: 13px; margin-bottom: 24px; }
@@ -193,8 +216,6 @@ function renderLogin(error) {
       background: #fdeceb; color: #b00; border: 1px solid #f3b8b3;
       padding: 10px 12px; border-radius: 8px; margin-bottom: 16px; font-size: 13px;
     }
-    .ingresar-qr { text-align: center; margin-top: 16px; }
-    .ingresar-qr a { color: #64748b; font-size: 13px; text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -208,112 +229,9 @@ function renderLogin(error) {
       <input type="password" name="password" autocomplete="current-password" required>
       <button type="submit">Ingresar</button>
     </form>
-    <div class="ingresar-qr"><a href="/marcar">Ingresar escaneando tu código QR</a></div>
   </div>
   <script src="/sweetalert2.min.js"></script>
   ${error ? `<script>Swal.fire({ icon: 'error', title: 'No se pudo ingresar', text: ${jsString(error)}, confirmButtonColor: '#71bf44' });</script>` : ''}
-</body>
-</html>`;
-}
-
-// Pantalla publica de marcacion por QR: no pasa por requireLogin porque es justamente
-// para que el operario no tenga que escribir usuario/contrasena en la tablet de planta.
-function renderMarcar() {
-  return `<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Marcar — Carlixplast</title>
-  <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center;
-      background: linear-gradient(135deg, #00a2cb, #006984); color: white; padding: 20px 16px;
-      box-sizing: border-box;
-    }
-    .logo-wrap {
-      background: white; padding: 10px 22px; border-radius: 12px; margin-bottom: 18px;
-    }
-    .logo { height: 40px; display: block; }
-    h1 { font-size: 18px; margin: 0 0 16px; text-align: center; }
-    #lector {
-      width: 100%; max-width: 380px; border-radius: 16px; overflow: hidden;
-      box-shadow: 0 8px 30px rgba(0,0,0,0.25); background: black;
-    }
-    .ingresar-manual {
-      margin-top: 22px; text-align: center;
-    }
-    .ingresar-manual a {
-      color: white; opacity: 0.9; font-size: 13px; text-decoration: underline;
-    }
-  </style>
-</head>
-<body>
-  <div class="logo-wrap"><img class="logo" src="/logo-carlixplast.png" alt="Carlixplast"></div>
-  <h1>Escanea tu código para ingresar</h1>
-  <div id="lector"></div>
-  <div class="ingresar-manual"><a href="/login">Ingresar por usuario y contraseña</a></div>
-
-  <script src="/html5-qrcode.min.js"></script>
-  <script src="/sweetalert2.min.js"></script>
-  <script>
-    let procesando = false;
-
-    function continuar() { procesando = false; }
-
-    function mostrarError(mensaje) {
-      Swal.fire({
-        icon: 'error', title: 'No se pudo ingresar', text: mensaje,
-        confirmButtonText: 'Reintentar', confirmButtonColor: '#71bf44'
-      }).then(() => continuar());
-    }
-
-    function mostrarExitoYRedirigir(nombre, redirect) {
-      Swal.fire({
-        icon: 'success', title: 'Bienvenido, ' + nombre,
-        timer: 900, showConfirmButton: false
-      }).then(() => { window.location.href = redirect || '/'; });
-    }
-
-    async function onScan(textoLeido) {
-      if (procesando) return;
-      procesando = true;
-      try {
-        const resp = await fetch('/marcar/registrar', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ codigoQR: textoLeido })
-        });
-        const datos = await resp.json();
-        if (datos.ok) {
-          mostrarExitoYRedirigir(datos.nombre, datos.redirect);
-        } else {
-          mostrarError(datos.error);
-        }
-      } catch (err) {
-        mostrarError('Error de conexión: ' + err.message);
-      }
-    }
-
-    const lector = new Html5Qrcode('lector');
-    Html5Qrcode.getCameras().then(camaras => {
-      if (!camaras || camaras.length === 0) {
-        mostrarError('No se encontró ninguna cámara en este dispositivo.');
-        return;
-      }
-      // Prefiere la camara trasera (environment) si el navegador la distingue.
-      const trasera = camaras.find(c => /back|trasera|rear|environment/i.test(c.label));
-      const camaraId = trasera ? trasera.id : camaras[0].id;
-      lector.start(
-        camaraId,
-        { fps: 10, qrbox: 250 },
-        onScan
-      );
-    }).catch(err => {
-      mostrarError('No se pudo acceder a la cámara: ' + err);
-    });
-  </script>
 </body>
 </html>`;
 }
@@ -331,7 +249,7 @@ function estilosBase() {
       --azul-osc: #006984;
       --verde: #4a9c2e;
       --verde-fondo: #e9f6e3;
-      --verde-logo: #71be47;
+      --verde-logo: #76c04e; /* muestreado directo de "plast" en public/logo-carlixplast.png, 02/09/2026 */
       --verde-marca: #71bf44;
       --verde-fondo-suave: #c9e8bb;
       --naranja: #b46200;
@@ -344,17 +262,81 @@ function estilosBase() {
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       margin: 0;
-      background: var(--verde-fondo-suave);
+      /* El verde plano se cambio por un degradado en 135deg -- el mismo sentido del encabezado --
+      para que el cuerpo no se vea de un solo color (a pedido del usuario, 04/09/2026). */
+      background: linear-gradient(135deg, #d9efcc 0%, var(--verde-fondo-suave) 55%, #b6dfa3 100%);
+      background-attachment: fixed;
       color: var(--texto);
+      position: relative;
+    }
+    /* La misma trama de puntos del encabezado, ahora en verde sobre el fondo del cuerpo: dos
+    rejillas al tresbolillo de 11px recortadas con mask-image en 135deg (::before puntos finos que
+    se apagan, ::after puntos mayores que aparecen). Van en position: fixed para que la textura no
+    se corte ni se mueva al hacer scroll, y con z-index 0 -- header y main se elevan a z-index 1
+    para quedar por encima. Misma construccion que header::before/::after, ver el comentario de
+    header. */
+    body::before, body::after {
+      content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+      background-size: 11px 11px;
+      background-position: 0 0, 5.5px 5.5px;
+    }
+    body::before {
+      background-image:
+        radial-gradient(circle at center, rgba(74,156,46,0.10) 0.7px, transparent 1.2px),
+        radial-gradient(circle at center, rgba(74,156,46,0.10) 0.7px, transparent 1.2px);
+      -webkit-mask-image: linear-gradient(135deg, #000 0%, transparent 65%);
+              mask-image: linear-gradient(135deg, #000 0%, transparent 65%);
+    }
+    body::after {
+      background-image:
+        radial-gradient(circle at center, rgba(74,156,46,0.16) 1.7px, transparent 2.2px),
+        radial-gradient(circle at center, rgba(74,156,46,0.16) 1.7px, transparent 2.2px);
+      -webkit-mask-image: linear-gradient(135deg, transparent 35%, #000 100%);
+              mask-image: linear-gradient(135deg, transparent 35%, #000 100%);
     }
     header {
       background: linear-gradient(135deg, var(--azul), var(--azul-osc));
       color: white;
       padding: 18px 20px 22px;
+      position: relative;
+      z-index: 1;
+      overflow: hidden;
     }
+    /* Trama de puntos (halftone) DENTRO del encabezado, para que no se vea tan plano: dos rejillas
+    al tresbolillo -- ::before son puntos finos que se apagan, ::after son puntos algo mayores que
+    aparecen -- recortadas cada una con mask-image en 135deg, el MISMO sentido del degradado azul
+    del header. Va aca en estilosBase() y no en una pagina suelta para que salga igual en todas las
+    pestanas (a pedido del usuario, 04/09/2026). Se hace con mask y no con una capa por fila de
+    puntos porque asi la diagonal es real y se adapta sola al ancho de cualquier tableta (las
+    paradas del mask van en %). header > * queda position: relative para que el contenido pinte por
+    encima de las dos capas. Diseno acordado (opcion B):
+    https://claude.ai/code/artifact/9bf9ae83-f817-4830-bc10-9afca04e83d2 */
+    header::before, header::after {
+      content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 0;
+      background-size: 11px 11px;
+      background-position: 0 0, 5.5px 5.5px;
+    }
+    header::before {
+      background-image:
+        radial-gradient(circle at center, rgba(255,255,255,0.16) 0.7px, transparent 1.2px),
+        radial-gradient(circle at center, rgba(255,255,255,0.16) 0.7px, transparent 1.2px);
+      -webkit-mask-image: linear-gradient(135deg, #000 0%, transparent 65%);
+              mask-image: linear-gradient(135deg, #000 0%, transparent 65%);
+    }
+    header::after {
+      background-image:
+        radial-gradient(circle at center, rgba(255,255,255,0.24) 1.7px, transparent 2.2px),
+        radial-gradient(circle at center, rgba(255,255,255,0.24) 1.7px, transparent 2.2px);
+      -webkit-mask-image: linear-gradient(135deg, transparent 35%, #000 100%);
+              mask-image: linear-gradient(135deg, transparent 35%, #000 100%);
+    }
+    header > * { position: relative; z-index: 1; }
     header h1 { margin: 0 0 4px; font-size: 20px; }
     header .sub { font-size: 13px; opacity: 0.85; }
-    header a.volver { color: white; opacity: 0.85; font-size: 13px; text-decoration: none; }
+    header a.volver {
+      color: white; background: var(--verde-logo); font-size: 16px; font-weight: 600;
+      text-decoration: none; display: inline-block; padding: 8px 14px; border-radius: 8px; margin-bottom: 8px;
+    }
     .header-top { text-align: center; }
     .header-inner { max-width: 960px; margin: 0 auto; }
     .logo-wrap {
@@ -363,19 +345,24 @@ function estilosBase() {
     }
     .logo { height: 40px; display: block; }
     .logo-login { height: 40px; display: block; margin: 0 auto 12px; }
-    /* Encabezado de Informacion (solo renderOrdenDetalle) -- fila de 3 partes: header-info
-    (usuario/selladora/pedido/referencia, apiladas) a la izquierda, la tarjeta de Avance de
-    produccion en medio, Cerrar sesion a la derecha, las 3 centradas verticalmente entre si (a
-    pedido del usuario, 02/09/2026). Es un grid de 3 columnas simetricas (1fr / auto / 1fr) y no
-    flex, para que la tarjeta del medio quede centrada de verdad respecto a todo el ancho de la
-    fila, sin importar que tan ancho sea lo que tiene a cada lado. Cerrar sesion se fija en la
-    columna 3 a proposito: cuando la orden no tiene meta configurada la tarjeta del medio no se
-    renderiza, y sin eso el boton se correria al centro. Ver diseno acordado:
+    /* Encabezado -- fila de 3 partes, usada en TODAS las paginas con header (Dashboard,
+    Programacion maquina, Informacion, Bultos -- a pedido del usuario, 04/09/2026, extendido desde
+    Informacion donde se probo primero el 03/09/2026): header-info (titulo/referencia/volver,
+    apiladas -- "Volver" debajo del titulo y la referencia) a la izquierda, la tarjeta de Avance de
+    produccion en medio (solo existe en Informacion; en las demas paginas esa columna queda vacia),
+    header-salir-grupo (usuario, con Cerrar sesion debajo) a la derecha, las 3 centradas
+    verticalmente entre si. Es un grid de 3 columnas simetricas (1fr / auto / 1fr) y no flex, para
+    que la tarjeta del medio quede centrada de verdad respecto a todo el ancho de la fila, sin
+    importar que tan ancho sea lo que tiene a cada lado. header-salir-grupo se fija en la columna 3
+    a proposito: en Informacion, cuando la orden no tiene meta configurada la tarjeta del medio no
+    se renderiza, y sin eso el grupo se correria al centro (mismo motivo por el que las paginas sin
+    ninguna tarjeta del medio tambien necesitan fijarlo en columna 3). Ver diseno acordado:
     https://claude.ai/code/artifact/17eae4be-abd7-4742-a5bf-c6d87970f2d7 */
     .header-fila { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 16px; }
     .header-info { justify-self: start; min-width: 0; }
-    .header-info .header-usuario { font-size: 12px; opacity: 0.9; margin-bottom: 8px; }
-    .header-fila a.salir { justify-self: end; grid-column: 3; }
+    .header-fila .volver { margin-top: 8px; margin-bottom: 0; }
+    .header-salir-grupo { justify-self: end; grid-column: 3; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+    .header-salir-grupo .header-usuario { font-size: 12px; opacity: 0.9; }
     .avance-header-card {
       background: white; border-radius: 12px; padding: 10px 14px; justify-self: center; width: 260px; max-width: 100%;
       box-shadow: 0 1px 4px rgba(0,0,0,0.15); color: var(--texto);
@@ -386,7 +373,7 @@ function estilosBase() {
     .avance-header-barra { height: 8px; border-radius: 999px; background: #eef0f2; overflow: hidden; margin-bottom: 6px; }
     .avance-header-relleno { height: 100%; border-radius: 999px; }
     .avance-header-stats { display: flex; justify-content: space-between; font-size: 12px; color: var(--texto-suave); font-weight: 600; }
-    main { max-width: 960px; margin: 0 auto; padding: 16px 14px 30px; }
+    main { max-width: 960px; margin: 0 auto; padding: 16px 14px 30px; position: relative; z-index: 1; }
     .barra {
       display: flex;
       flex-wrap: wrap;
@@ -510,6 +497,23 @@ function estilosBase() {
       color: #00a2cb; text-decoration: underline; font-size: 13px; flex-shrink: 0; cursor: pointer;
     }
     .link-reimprimir.deshabilitado { pointer-events: none; opacity: 0.5; }
+    .pesajes-nav {
+      display: flex; align-items: center; justify-content: center; gap: 14px;
+      margin-top: 8px; padding-top: 8px; border-top: 1px solid #eef0f2;
+    }
+    .btn-pesajes-nav {
+      width: 48px; height: 48px; border-radius: 999px; border: 1px solid #d0d7de; background: white;
+      font-size: 22px; font-weight: 700; color: var(--azul-osc); cursor: pointer; line-height: 1;
+      padding: 0; flex-shrink: 0;
+    }
+    .btn-pesajes-nav:disabled { opacity: 0.35; cursor: not-allowed; }
+    .pesajes-nav-indicador { font-size: 12px; color: var(--texto-suave); font-weight: 600; min-width: 46px; text-align: center; }
+    .residuos-bulto { margin-top: 12px; padding-top: 10px; border-top: 1px solid #eef0f2; }
+    .residuo-bulto-fila { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13px; padding: 3px 0; }
+    .residuo-bulto-badge {
+      font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; color: white; background: var(--texto-suave);
+    }
+    .residuo-bulto-badge-alerta { background: #c00000; }
     .hist-fila {
       display: grid; grid-template-columns: 1.4fr 1fr 0.7fr; gap: 8px; font-size: 13px;
       padding: 8px 0; border-bottom: 1px solid #eef0f2;
@@ -592,8 +596,10 @@ function estilosBase() {
       .barra { flex-direction: column; align-items: stretch; }
       .actualizado { text-align: center; }
       .header-fila { grid-template-columns: 1fr; justify-items: stretch; }
-      .header-info, .avance-header-card, .header-fila a.salir { justify-self: stretch; width: auto; }
-      .header-fila a.salir { text-align: center; grid-column: 1; }
+      .header-info, .avance-header-card, .header-salir-grupo { justify-self: stretch; width: auto; grid-column: 1; }
+      .header-salir-grupo { align-items: stretch; }
+      .header-salir-grupo .header-usuario { text-align: center; }
+      .header-salir-grupo a.salir { text-align: center; }
     }
   `;
 }
@@ -633,12 +639,16 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
       <div class="logo-wrap"><img class="logo" src="/logo-carlixplast.png" alt="Carlixplast"></div>
     </div>
     <div class="header-inner">
-      <div class="usuario-bar">
-        <span>👤 ${usuario}</span>
-        <a class="salir" href="/logout">Cerrar sesión</a>
+      <div class="header-fila">
+        <div class="header-info">
+          <div class="sub">Máquinas con producción activa en este momento</div>
+          ${esAdmin ? `<a class="volver" href="/admin/tablet-fija">📌 Tablet fija a máquina</a>` : ''}
+        </div>
+        <div class="header-salir-grupo">
+          <div class="header-usuario">👤 ${usuario}</div>
+          <a class="salir" href="/logout">Cerrar sesión</a>
+        </div>
       </div>
-      <div class="sub">Máquinas con producción activa en este momento</div>
-      ${esAdmin ? `<a class="volver" href="/admin/tablet-fija" style="display:block;margin-top:8px;">📌 Tablet fija a máquina</a>` : ''}
     </div>
   </header>
   <main>
@@ -684,10 +694,10 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
           <button type="submit" class="btn-accion" style="background:#b46200;">${textoBoton}</button>
         </form>`;
     } else if (o.Estado === 'Pendiente') {
-      acciones += `<a class="btn-accion btn-iniciar" href="/selladora/${maquinaCodigo}/orden/${o.IdOrden}/escanear?nuevo=0">▶ Iniciar</a>`;
+      acciones += `<button type="button" class="btn-accion btn-iniciar" onclick="abrirEscaneoRollo(${o.IdOrden}, false)">▶ Iniciar</button>`;
     } else if (o.Estado === 'Activa') {
       acciones += `
-        <a class="btn-accion btn-anadir" href="/selladora/${maquinaCodigo}/orden/${o.IdOrden}/escanear?nuevo=1">+ Rollo</a>
+        <button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${o.IdOrden}, true)">+ Rollo</button>
         <form method="post" action="/api/selladora/orden/${o.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
           <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
         </form>`;
@@ -823,6 +833,11 @@ function scriptResumenBultoActivo(idOrden, maquinaCodigo) {
           // vive en otro <script> (scriptComandos), pueda leer cual es el bulto Activo ahora mismo
           // al marcar un residuo/salida no conforme (01/09/2026, a pedido del usuario).
           window.idBultoActivo = datos.idBulto;
+          // Mismo mecanismo para el ultimo paquete pesado -- lo usa confirmarCerrarBultoYReimprimir
+          // (scriptComandos) para reimprimir su etiqueta al confirmar "Cierre bulto" (02/09/2026).
+          window.ultimoPaqueteBultoActivo = (datos.ultimoConsecutivo != null)
+            ? { consecutivo: datos.ultimoConsecutivo, pesoKg: datos.ultimoPesoKg }
+            : null;
         } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
       }
       actualizar();
@@ -920,18 +935,86 @@ function construirApartadosCalidad({ tieneImpresion, tieneAccesorios, tieneTroqu
   return apartados;
 }
 
+// Guarda el chequeo de Calidad ya respondido en SEL_ChequeoCalidad (cabecera) +
+// SEL_ChequeoCalidadDetalle (una fila por pregunta) -- a pedido del usuario (03/09/2026), las
+// tablas ya existian de una conversacion anterior sobre el diseno. Llamada desde POST /api/comando
+// cuando comando==='calidad'. Reconstruye el mismo Apartado por clave que uso el modal
+// (construirApartadosCalidad) en vez de depender de que el cliente lo mande -- asi no hay riesgo de
+// que un cliente desactualizado guarde un Apartado distinto al que el CHECK de Pregunta espera.
+// 'conforme'/'no_conforme' (los value= de los checkboxes, ver abrirCalidad en scriptComandos) se
+// traducen a 'Conforme'/'NoConforme' -- CK_SEL_ChequeoCalidadDetalle_Respuesta exige exactamente
+// esos dos valores. Errores no revientan el comando ya enviado a Node-RED -- se registran en
+// consola nada mas (ver el catch en el llamador).
+async function registrarChequeoCalidad(p, { idOrden, operarioCodigo, respuestas }) {
+  const dtOrden = await p.request().input('idOrden', idOrden).query(`
+    SELECT ord.Troquelado, ord.Perforaciones, ord.Manija, ord.Tula, ord.Parche, ord.CierreDeslizador,
+           ord.CierreHermetico, ord.CintaAdhesiva,
+           CASE WHEN er12.Valor IS NOT NULL THEN 1 ELSE 0 END AS TieneImpresion
+    FROM SEL_OrdenProduccion ord
+    LEFT JOIN INVElementosReferencia er12 ON er12.Elemento = ord.Elemento AND er12.Categoria = 12
+    WHERE ord.IdOrden = @idOrden
+  `);
+  if (dtOrden.recordset.length === 0) return;
+  const o = dtOrden.recordset[0];
+  const calidadFlags = {
+    tieneImpresion: o.TieneImpresion === 1,
+    tieneAccesorios: ['Manija', 'Tula', 'Parche', 'CierreDeslizador', 'CierreHermetico', 'CintaAdhesiva']
+      .some(campo => o[campo] === 'Sí'),
+    tieneTroquelado: !!o.Troquelado && o.Troquelado !== 'SinTroquelado',
+    tienePerforaciones: o.Perforaciones != null && Number(o.Perforaciones) !== 0
+  };
+  const claveApartado = new Map();
+  construirApartadosCalidad(calidadFlags).forEach(ap => ap.preguntas.forEach(preg => claveApartado.set(preg.clave, ap.titulo)));
+
+  const dtEjecucion = await p.request().input('idOrden', idOrden).query(
+    `SELECT TOP 1 IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden`
+  );
+  if (dtEjecucion.recordset.length === 0) return;
+  const idEjecucion = dtEjecucion.recordset[0].IdEjecucion;
+
+  // Bulto Activo en este momento -- mismo criterio que /resumen-bulto-activo. Puede no haber
+  // ninguno (entre que se cierra un bulto y se abre el siguiente); id_bulto es nullable.
+  const dtBulto = await p.request().input('idEjecucion', idEjecucion).query(
+    `SELECT TOP 1 id FROM SEL_Bultos WHERE id_ejecucion = @idEjecucion AND estado = 'Activo' ORDER BY id DESC`
+  );
+  const idBulto = dtBulto.recordset.length > 0 ? dtBulto.recordset[0].id : null;
+
+  const dtChequeo = await p.request()
+    .input('idEjecucion', idEjecucion).input('idBulto', idBulto).input('operario', operarioCodigo)
+    .query(`
+      DECLARE @Insertados TABLE (Id INT);
+      INSERT INTO SEL_ChequeoCalidad (id_ejecucion, id_bulto, Operario)
+      OUTPUT INSERTED.IdChequeo INTO @Insertados
+      VALUES (@idEjecucion, @idBulto, @operario);
+      SELECT Id FROM @Insertados;
+    `);
+  const idChequeo = dtChequeo.recordset[0].Id;
+
+  for (const [clave, respuesta] of Object.entries(respuestas || {})) {
+    const apartado = claveApartado.get(clave);
+    if (!apartado) continue; // clave desconocida para esta orden -- se ignora en vez de romper el guardado
+    const respuestaTexto = respuesta === 'no_conforme' ? 'NoConforme' : 'Conforme';
+    await p.request()
+      .input('idChequeo', idChequeo).input('apartado', apartado).input('pregunta', clave).input('respuesta', respuestaTexto)
+      .query(`INSERT INTO SEL_ChequeoCalidadDetalle (IdChequeo, Apartado, Pregunta, Respuesta) VALUES (@idChequeo, @apartado, @pregunta, @respuesta)`);
+  }
+}
+
 // Botones "Imprimir etiqueta" / "Cierre bulto" / "Retal" / "Troquelado" -- publican en
 // /api/comando (este servidor), que reenvia a Node-RED. idOrden/maquinaCodigo se cierran sobre el
 // scope de la funcion (valores fijos de esta pagina), asi los botones no necesitan mas que el
 // nombre del comando. `datos` es opcional -- lo usa el modal de Calidad para mandar las
 // respuestas junto con el comando (ver abrirCalidad() mas abajo). `calidadFlags` decide que
 // apartados/preguntas de Calidad aplican para esta orden, ver construirApartadosCalidad().
-function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva) {
+function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, proximaCalidad) {
   const apartadosCalidad = construirApartadosCalidad(calidadFlags);
   return `
+    // Devuelve la promesa (antes no la devolvia) para que confirmarCerrarBultoYReimprimir pueda
+    // encadenar un segundo comando (reimprimir_etiqueta) solo si el primero (cierre_bulto)
+    // funciono -- no cambia nada para el resto de llamadas, que siguen sin usar el valor devuelto.
     function enviarComando(comando, boton, datos) {
       if (boton) boton.disabled = true;
-      fetch('/api/comando', {
+      return fetch('/api/comando', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ comando: comando, idOrden: ${JSON.stringify(idOrden)}, maquinaCodigo: ${jsString(maquinaCodigo)}, datos: datos })
@@ -943,17 +1026,20 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva) {
           } else {
             Swal.fire({ icon: 'error', title: 'Error', text: data.error || 'No se pudo enviar el comando.', confirmButtonColor: '#71bf44' });
           }
+          return data;
         })
         .catch(function(err) {
           Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo enviar el comando: ' + err.message, confirmButtonColor: '#71bf44' });
+          return { ok: false, error: err.message };
         })
         .finally(function() { if (boton) boton.disabled = false; });
     }
 
-    // Confirmacion "¿Esta seguro de...?" antes de Imprimir etiqueta/Cierre bulto (30/08/2026) --
-    // Calidad NO pasa por aca, ya tiene su propia confirmacion (el formulario del modal con
-    // "Guardar"/"Cancelar"). Retal/Troquelado/Refilado/Salida no conforme usan confirmarPesoYEnviar
-    // en vez de esta (piden el peso, ver mas abajo).
+    // Confirmacion "¿Esta seguro de...?" antes de Imprimir etiqueta (30/08/2026) -- Calidad NO pasa
+    // por aca, ya tiene su propia confirmacion (el formulario del modal con "Guardar"/"Cancelar").
+    // Retal/Troquelado/Refilado/Salida no conforme usan confirmarPesoYEnviar (piden el peso), y
+    // Cierre bulto usa confirmarCerrarBultoYReimprimir (reimprime la ultima etiqueta), ver ambas
+    // mas abajo.
     function confirmarYEnviar(mensaje, comando, boton) {
       Swal.fire({
         icon: 'warning',
@@ -965,6 +1051,35 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva) {
         cancelButtonColor: '#c0392b'
       }).then(function(resultado) {
         if (resultado.isConfirmed) enviarComando(comando, boton);
+      });
+    }
+
+    // Al cerrar el bulto, ademas de mandar 'cierre_bulto' como siempre, reimprime de una la
+    // etiqueta del ULTIMO paquete de ese bulto (a pedido del usuario, 02/09/2026) -- mismo
+    // mecanismo que reimprimirPaquete() en la pagina de Bultos (comando 'reimprimir_etiqueta'),
+    // solo que aca se dispara sola en vez de que el operario tenga que ir a buscarla. idBulto/el
+    // ultimo paquete salen de window.idBultoActivo/window.ultimoPaqueteBultoActivo (los mantiene
+    // scriptResumenBultoActivo cada 4s). Solo se reimprime si el cierre funciono Y el bulto de
+    // verdad tenia algun paquete pesado (si se cierra vacio, no hay nada que reimprimir).
+    function confirmarCerrarBultoYReimprimir(mensaje, boton) {
+      Swal.fire({
+        icon: 'warning',
+        title: mensaje,
+        showCancelButton: true,
+        confirmButtonText: 'Sí',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#71bf44',
+        cancelButtonColor: '#c0392b'
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        var idBulto = window.idBultoActivo || null;
+        var ultimo = window.ultimoPaqueteBultoActivo;
+        enviarComando('cierre_bulto', boton).then(function(data) {
+          if (!data.ok || !idBulto || !ultimo) return;
+          enviarComando('reimprimir_etiqueta', null, {
+            idBulto: idBulto, consecutivoPaquete: ultimo.consecutivo, pesoGr: ultimo.pesoKg, serialBulto: null
+          });
+        });
       });
     }
 
@@ -1156,7 +1271,12 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva) {
       });
     }
 
-    ${pausaActiva ? `abrirModalPausaActiva(${JSON.stringify(pausaActiva)});` : 'programarCalidadAleatoria();'}
+    // Pausa y Calidad ya no son mutuamente excluyentes (03/09/2026): el chequeo de Calidad ahora se
+    // programa SIEMPRE que haya una ProximaCalidad (siga o no en pausa la ejecucion en este
+    // momento) -- programarCalidadAleatoria() se encarga de no abrirlo mientras haya otra ventana
+    // (la de pausa) abierta, ver esa funcion mas abajo.
+    ${pausaActiva ? `abrirModalPausaActiva(${JSON.stringify(pausaActiva)});` : ''}
+    ${proximaCalidad ? `programarCalidadAleatoria(${JSON.stringify(proximaCalidad)});` : ''}
 
     // Apartado de Calidad: pantalla emergente con las preguntas agrupadas por apartado (Pelicula,
     // Sellado, Accesorios, Troquelado/Perforaciones -- ver construirApartadosCalidad() en
@@ -1227,26 +1347,41 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva) {
           return respuestas;
         }
       }).then(function(resultado) {
-        if (!resultado.isConfirmed) return;
-        enviarComando('calidad', null, resultado.value);
+        if (resultado.isConfirmed) {
+          enviarComando('calidad', null, resultado.value);
+          // El servidor ya guardo una ProximaCalidad nueva al recibir este comando (POST
+          // /api/comando), pero no hace falta esperar a releerla para seguir contando en esta
+          // misma carga de pagina -- se calcula el mismo rango aca mismo.
+          programarCalidadAleatoria(new Date(Date.now() + 20 * 60 * 1000 + Math.random() * (10 * 60 * 1000)).toISOString());
+        } else {
+          // Se cancelo -- se reintenta pronto (5 min) en vez de esperar un ciclo completo nuevo: el
+          // chequeo debe insistir, no desaparecer porque se cancelo una vez (a pedido del usuario,
+          // 03/09/2026). El servidor no toco ProximaCalidad en este caso, sigue "vencida".
+          programarCalidadAleatoria(new Date(Date.now() + 5 * 60 * 1000).toISOString());
+        }
       });
     }
 
     // Calidad ya no tiene boton (a pedido del usuario, 31/08/2026) -- sale sola, en un momento
-    // aleatorio entre 20 y 30 minutos desde que la orden esta Activa, y se repite mientras siga
-    // asi (cada vez que se cierra el modal se programa el siguiente, con un nuevo intervalo
-    // aleatorio). Solo corre en esta carga de pagina -- un refresh reinicia la cuenta, no hay
-    // forma de "recordar" el tiempo transcurrido de una carga a otra sin guardar algo en el
-    // servidor, que no se pidio. No se programa mientras hay una pausa activa (ver el llamado al
-    // final del archivo) para no competir con esa ventana bloqueante.
-    function programarCalidadAleatoria() {
-      var minMs = 20 * 60 * 1000;
-      var maxMs = 30 * 60 * 1000;
-      var espera = minMs + Math.random() * (maxMs - minMs);
-      setTimeout(function() {
-        abrirCalidad();
-        programarCalidadAleatoria();
-      }, espera);
+    // aleatorio entre 20 y 30 minutos desde que la orden esta Activa. FIX 03/09/2026: ese momento
+    // (ProximaCalidad) ahora lo guarda el servidor en SEL_EjecucionOrden -- ya NO se calcula un
+    // intervalo nuevo desde que carga la pagina (eso hacia que un refresh, cambiar de pestaña o
+    // cualquier recarga del WebView reiniciara la cuenta a cero, y casi nunca llegaba a
+    // completarse). El parametro es una fecha/hora absoluta (ISO), no una espera relativa.
+    // Tampoco es mutuamente excluyente con Pausa: si al llegar la hora la ejecucion esta pausada
+    // (o el operario esta justo eligiendo el motivo), NO compite por la pantalla con esa ventana
+    // bloqueante -- reintenta cada minuto hasta que quede libre, en vez de forzarse encima.
+    function programarCalidadAleatoria(proximaCalidadIso) {
+      var espera = Math.max(0, new Date(proximaCalidadIso).getTime() - Date.now());
+      setTimeout(intentarAbrirCalidad, espera);
+    }
+
+    function intentarAbrirCalidad() {
+      if (Swal.isVisible()) {
+        setTimeout(intentarAbrirCalidad, 60 * 1000);
+        return;
+      }
+      abrirCalidad();
     }
   `;
 }
@@ -1287,16 +1422,159 @@ function scriptConfirmarFinalizar() {
   `;
 }
 
-// Antes de entrar a producir -- al Iniciar una orden con su primer rollo (renderEscanear, nuevo=0
-// unicamente, NO aplica a +Rollo) o al Retomar/Reanudar una ejecucion tras un cambio de operario
+// Escaneo del rollo como ventana emergente (SweetAlert) sobre la misma pagina, en vez de la
+// pantalla /escanear aparte que existio hasta el 04/09/2026: al quitarle la camara esa pantalla
+// quedaba con un solo campo de texto, y a pedido del usuario se paso a modal para no navegar ni
+// perder de vista la orden. Son dos pasos encadenados -- pedirSerialRollo() (la pistola escribe
+// el serial y manda Enter, que confirma solo) y confirmarRolloModal() (vista previa del rollo y,
+// al Iniciar, el campo Bolsas x golpe). Reusa TAL CUAL los endpoints que usaba la pantalla:
+// /rollo/preparar (valida y trae las bolsas x golpe actuales), /rollo/consultar y /rollo. La
+// pagina que lo cargue debe traer tambien scriptPreguntaActividadInicial(): al Iniciar se
+// pregunta por la actividad antes de entrar a Informacion, igual que antes.
+function scriptEscanearRollo(maquinaCodigo) {
+  return `
+    var MAQUINA_ESCANEO = ${JSON.stringify(maquinaCodigo)};
+
+    function errorRollo(mensaje) {
+      Swal.fire({ icon: 'error', title: 'No se pudo continuar', text: mensaje, confirmButtonColor: '#71bf44' });
+    }
+
+    function filaRollo(etiqueta, valor) {
+      return '<div style="display:flex;justify-content:space-between;gap:12px;font-size:14px;margin-bottom:6px;">' +
+             '<span style="color:#64748b;">' + etiqueta + '</span><strong>' + valor + '</strong></div>';
+    }
+
+    function abrirEscaneoRollo(idOrden, esNuevoRollo) {
+      var titulo = esNuevoRollo ? 'Añadir rollo' : 'Iniciar ejecución';
+      fetch('/api/selladora/orden/' + idOrden + '/rollo/preparar?nuevo=' + (esNuevoRollo ? '1' : '0'))
+        .then(function(r) { return r.json(); })
+        .then(function(datos) {
+          if (!datos.ok) { errorRollo(datos.error); return; }
+          pedirSerialRollo(idOrden, esNuevoRollo, titulo, datos.bolsasActual || 0);
+        })
+        .catch(function(err) { errorRollo('Error de conexión: ' + err.message); });
+    }
+
+    function pedirSerialRollo(idOrden, esNuevoRollo, titulo, bolsasActual) {
+      Swal.fire({
+        title: titulo,
+        html: '<div style="text-align:left;font-size:13px;color:#64748b;margin-bottom:10px;">' +
+              'Escanee la etiqueta del rollo con la pistola (código de 19 dígitos) o escríbalo.</div>' +
+              '<input id="rollo-serial" class="swal2-input" style="margin:0;width:100%;" inputmode="numeric" placeholder="Serial del rollo">',
+        showCancelButton: true,
+        cancelButtonText: 'Cancelar',
+        confirmButtonText: 'Buscar',
+        confirmButtonColor: '#71bf44',
+        showLoaderOnConfirm: true,
+        allowOutsideClick: function() { return !Swal.isLoading(); },
+        didOpen: function() {
+          var campo = document.getElementById('rollo-serial');
+          campo.focus();
+          // La pistola escribe el serial como si fuera un teclado y manda Enter al terminar: con
+          // eso se busca solo, sin que el operario tenga que tocar "Buscar" (mismo comportamiento
+          // que tenia el input de la pantalla /escanear).
+          campo.addEventListener('keydown', function(evento) {
+            if (evento.key === 'Enter') { evento.preventDefault(); Swal.clickConfirm(); }
+          });
+        },
+        preConfirm: function() {
+          var serial = (document.getElementById('rollo-serial').value || '').trim();
+          if (!serial) { Swal.showValidationMessage('Escanee o escriba el serial del rollo.'); return false; }
+          return fetch('/api/selladora/orden/' + idOrden + '/rollo/consultar', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ serial: serial, esNuevoRollo: esNuevoRollo })
+          }).then(function(r) { return r.json(); }).then(function(datos) {
+            if (!datos.ok) { Swal.showValidationMessage(datos.error); return false; }
+            return datos;
+          }).catch(function(err) {
+            Swal.showValidationMessage('Error de conexión: ' + err.message);
+            return false;
+          });
+        }
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) {
+          confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, resultado.value);
+        }
+      });
+    }
+
+    function confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, rollo) {
+      var detalle =
+        filaRollo('Serial', rollo.serial) +
+        filaRollo('Peso (Kg)', rollo.cantidad) +
+        filaRollo('Lote', rollo.lote || '—') +
+        filaRollo('Bodega', rollo.bodegaNombre) +
+        filaRollo('Referencia', rollo.referencia);
+      // Al +Rollo las bolsas x golpe ya vienen de la ejecucion en curso (solo se muestran); al
+      // Iniciar las escribe el operario -- el servidor vuelve a decidir cual usar, esto es la UI.
+      var campoBolsas = esNuevoRollo
+        ? filaRollo('Bolsas x golpe', bolsasActual || '—')
+        : '<label for="rollo-bolsas" style="display:block;text-align:left;font-size:13px;font-weight:600;margin:12px 0 6px;">Bolsas x golpe</label>' +
+          '<input id="rollo-bolsas" class="swal2-input" style="margin:0;width:100%;" type="number" min="1" inputmode="numeric">';
+      Swal.fire({
+        title: titulo,
+        html: '<div style="text-align:left;">' + detalle + campoBolsas + '</div>',
+        showCancelButton: true,
+        cancelButtonText: 'Cancelar',
+        confirmButtonText: esNuevoRollo ? 'Añadir rollo' : 'Iniciar',
+        confirmButtonColor: '#71bf44',
+        showLoaderOnConfirm: true,
+        allowOutsideClick: function() { return !Swal.isLoading(); },
+        didOpen: function() {
+          var campo = document.getElementById('rollo-bolsas');
+          if (campo) campo.focus();
+        },
+        preConfirm: function() {
+          var bolsas = bolsasActual;
+          if (!esNuevoRollo) {
+            bolsas = parseInt(document.getElementById('rollo-bolsas').value, 10);
+            if (!bolsas || bolsas <= 0) { Swal.showValidationMessage('Ingrese un número de bolsas x golpe válido.'); return false; }
+          }
+          return fetch('/api/selladora/orden/' + idOrden + '/rollo', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ serial: rollo.serial, esNuevoRollo: esNuevoRollo, bolsasXGolpe: bolsas })
+          }).then(function(r) { return r.json(); }).then(function(datos) {
+            if (!datos.ok) { Swal.showValidationMessage(datos.error); return false; }
+            return datos;
+          }).catch(function(err) {
+            Swal.showValidationMessage('Error de conexión: ' + err.message);
+            return false;
+          });
+        }
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        Swal.fire({
+          icon: 'success',
+          title: esNuevoRollo ? 'Rollo añadido' : 'Ejecución iniciada',
+          timer: 1000, showConfirmButton: false
+        }).then(function() {
+          if (esNuevoRollo) {
+            // Se recarga la misma pagina en la que estaba (cola de la maquina o Informacion) --
+            // antes la pantalla /escanear devolvia siempre a la cola de la maquina.
+            window.location.reload();
+          } else {
+            // Al Iniciar, termine con actividad o directo a produccion, se entra a Informacion de
+            // la orden (a pedido del usuario, 31/08/2026) -- ver scriptPreguntaActividadInicial().
+            preguntarActividadInicial(idOrden, function() {
+              window.location.href = '/selladora/' + encodeURIComponent(MAQUINA_ESCANEO) + '/orden/' + idOrden;
+            });
+          }
+        });
+      });
+    }
+  `;
+}
+
+// Antes de entrar a producir -- al Iniciar una orden con su primer rollo (scriptEscanearRollo,
+// esNuevoRollo=false unicamente, NO aplica a +Rollo) o al Retomar/Reanudar una ejecucion tras un cambio de operario
 // (confirmarTomarControlEjecucion arriba) -- se pregunta si hay alguna actividad de las que se
 // registran como pausa (Alistamiento, Mantenimiento, etc.) por hacer primero, o si se entra directo
 // a producir (a pedido del usuario, 31/08/2026). Si elige una actividad, queda registrada igual que
 // si hubiera usado el boton "Pausa" normal (mismo POST /pausar) -- la ejecucion arranca/vuelve en
 // 'En pausa' desde ese momento, en vez de tener que pausarla a mano despues de haber entrado.
 // Comparte los mismos motivos/submotivos que abrirPausa() en scriptComandos(), pero se duplican aca
-// (MOTIVOS_PAUSA_INICIAL) porque esta funcion se usa en paginas (renderEscanear, renderPage) que no
-// cargan scriptComandos.
+// (MOTIVOS_PAUSA_INICIAL) porque esta funcion se usa en paginas (renderPage) que no cargan
+// scriptComandos.
 function scriptPreguntaActividadInicial() {
   return `
     var MOTIVOS_PAUSA_INICIAL = [
@@ -1414,13 +1692,17 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
       <div class="logo-wrap"><img class="logo" src="/logo-carlixplast.png" alt="Carlixplast"></div>
     </div>
     <div class="header-inner">
-      <div class="usuario-bar">
-        <span>👤 ${usuario}</span>
-        <a class="salir" href="/logout">Cerrar sesión</a>
+      <div class="header-fila">
+        <div class="header-info">
+          <h1>🏭 ${maquinaNombre}</h1>
+          <div class="sub">Programación máquina</div>
+          <a class="volver" href="/">‹ Selladoras</a>
+        </div>
+        <div class="header-salir-grupo">
+          <div class="header-usuario">👤 ${usuario}</div>
+          <a class="salir" href="/logout">Cerrar sesión</a>
+        </div>
       </div>
-      <a class="volver" href="/">‹ Selladoras</a>
-      <h1>🏭 ${maquinaNombre}</h1>
-      <div class="sub">Programación máquina</div>
     </div>
   </header>
   <main>
@@ -1432,6 +1714,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
+  <script>${scriptEscanearRollo(maquinaCodigo)}</script>
   <script>${scriptActualizarCola(maquinaCodigo)}</script>
   ${idOrdenPreguntarActividad ? `<script>
     // Termine con actividad o directo a produccion, se entra a Informacion de la orden retomada --
@@ -1536,7 +1819,7 @@ const BOTONES_RESIDUOS = [
 // vivia aca se elimino -- a pedido del usuario, esa accion (MERGE SEL_OperarioActualMaquina) ahora
 // la hacen los botones condicionales de la cola de ordenes de la maquina (renderColaOrdenes,
 // "Tomar control de la ejecución"/"Reanudar ejecución"), asi que ya no hacia falta duplicarla aca.
-function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance) {
+function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, proximaCalidad) {
   const filasHistorial = historial.length
     ? historial.map(h => `
         <div class="hist-fila">
@@ -1552,15 +1835,21 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   let acciones = '';
   const activa = orden.Estado === 'Activa';
   if (orden.Estado === 'Pendiente') {
-    acciones = `<a class="btn-accion btn-iniciar" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/escanear?nuevo=0">▶ Iniciar</a>`;
+    acciones = `<button type="button" class="btn-accion btn-iniciar" onclick="abrirEscaneoRollo(${orden.IdOrden}, false)">▶ Iniciar</button>`;
   } else if (activa) {
     acciones = `
-      <a class="btn-accion btn-anadir" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/escanear?nuevo=1">+ Rollo</a>
+      <button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${orden.IdOrden}, true)">+ Rollo</button>
       <form method="post" action="/api/selladora/orden/${orden.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
         <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
       </form>
       ${!pausaActiva ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>` : ''}`;
   }
+
+  // Troquelado (SEL_OrdenProduccion.Troquelado != 'SinTroquelado') -- decide DOS cosas: si sale el
+  // boton de residuo "Troquelado" (FIX 04/09/2026, a pedido del usuario: antes salia para toda
+  // SELLADORA sin mirar si la orden de verdad lleva troquelado) y si aplica el apartado
+  // Troquelado/Perforaciones de Calidad (ver calidadFlags mas abajo).
+  const tieneTroquelado = !!orden.Troquelado && orden.Troquelado !== 'SinTroquelado';
 
   // Botones de residuos (Retal/Troquelado, segun BOTONES_RESIDUOS_POR_TIPO) + Salida no conforme --
   // van agrupados bajo un titulo "Residuos", en su propia isla separada de "Producción"
@@ -1573,6 +1862,9 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   const botonesResiduosHTML = activa ? [
     ...BOTONES_RESIDUOS
       .filter(b => botonesResiduosHabilitados.includes(b.clave))
+      // "Troquelado" ademas exige que ESTA orden lleve troquelado -- los otros residuos no dependen
+      // de ninguna columna de la orden, solo del tipo de maquina.
+      .filter(b => b.clave !== 'troquelado' || tieneTroquelado)
       .map(b => `<button type="button" class="btn-accion btn-residuo" onclick="confirmarPesoYEnviar('¿Está seguro de marcar este bulto con ${b.label}?', '${b.clave}', this)">${b.label}</button>`),
     `<button type="button" class="btn-accion btn-no-conforme" onclick="confirmarPesoYEnviar('¿Está seguro de marcar esta salida como no conforme?', 'no_conforme', this)">🚫 Salida no conforme</button>`
   ].join('') : '';
@@ -1608,7 +1900,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     <div class="peso-box">
       <div class="imprimir-acciones-grid">
         <button type="button" class="btn-accion btn-imprimir" onclick="confirmarYEnviar('¿Está seguro de imprimir la etiqueta?', 'imprimir_etiqueta', this)">🖨️ Imprimir etiqueta</button>
-        <button type="button" class="btn-accion btn-cierre-bulto" onclick="confirmarYEnviar('¿Está seguro de cerrar el bulto?', 'cierre_bulto', this)">📦 Cierre bulto</button>
+        <button type="button" class="btn-accion btn-cierre-bulto" onclick="confirmarCerrarBultoYReimprimir('¿Está seguro de cerrar el bulto?', this)">📦 Cierre bulto</button>
       </div>
     </div>` : '';
 
@@ -1622,10 +1914,10 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
 
   // Condiciones que deciden que apartados/preguntas de Calidad aplican -- ver
   // construirApartadosCalidad(). "Sí" exacto para accesorios (no alcanza con no-NULL, ver
-  // conversacion 26/08/2026); Troquelado != 'SinTroquelado'; Perforaciones != 0/NULL.
+  // conversacion 26/08/2026); Perforaciones != 0/NULL. tieneTroquelado se calcula mas arriba
+  // (tambien decide si sale el boton de residuo "Troquelado").
   const tieneAccesorios = ['Manija', 'Tula', 'Parche', 'CierreDeslizador', 'CierreHermetico', 'CintaAdhesiva']
     .some(campo => orden[campo] === 'Sí');
-  const tieneTroquelado = !!orden.Troquelado && orden.Troquelado !== 'SinTroquelado';
   const tienePerforaciones = orden.Perforaciones != null && Number(orden.Perforaciones) !== 0;
   const calidadFlags = { tieneImpresion, tieneAccesorios, tieneTroquelado, tienePerforaciones };
 
@@ -1682,13 +1974,15 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     <div class="header-inner">
       <div class="header-fila">
         <div class="header-info">
-          <div class="header-usuario">👤 ${usuario}</div>
-          <a class="volver" href="/selladora/${maquinaCodigo}">‹ ${orden.MaquinaNombre}</a>
           <h1>Pedido ${orden.NumeroPedido || '—'} ${badgeEstadoOrden(orden.Estado)}</h1>
           <div class="sub">${orden.Elemento}</div>
+          <a class="volver" href="/selladora/${maquinaCodigo}">‹ ${orden.MaquinaNombre}</a>
         </div>
         ${avanceCard}
-        <a class="salir" href="/logout">Cerrar sesión</a>
+        <div class="header-salir-grupo">
+          <div class="header-usuario">👤 ${usuario}</div>
+          <a class="salir" href="/logout">Cerrar sesión</a>
+        </div>
       </div>
     </div>
   </header>
@@ -1720,30 +2014,83 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     <div class="ejecucion-box">${filasHistorial}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptPreguntaActividadInicial()}</script>
+  <script>${scriptEscanearRollo(maquinaCodigo)}</script>
   <script>${scriptConfirmarFinalizar()}</script>
-  ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo, calidadFlags, pausaActiva)}</script><script>${scriptPesoEnVivo()}</script><script>${scriptResumenBultoActivo(orden.IdOrden, maquinaCodigo)}</script>` : ''}
+  ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo, calidadFlags, pausaActiva, proximaCalidad)}</script><script>${scriptPesoEnVivo()}</script><script>${scriptResumenBultoActivo(orden.IdOrden, maquinaCodigo)}</script>` : ''}
   ${avanceCard ? `<script>${scriptAvanceProduccion(orden.IdOrden, maquinaCodigo)}</script>` : ''}
 </body>
 </html>`;
 }
+
+// Maximo de paquetes que se muestran a la vez en el desplegable de cada bulto -- con mas de esto
+// se parte en "paginas" tipo carrusel (ver PAQUETES_POR_PAGINA mas abajo), en vez de una lista
+// larga sin fin (a pedido del usuario, 02/09/2026).
+const PAQUETES_POR_PAGINA = 10;
 
 // Tarjetas de bultos con su historial de paquetes (SEL_PesajeElemento) -- separada de
 // renderBultosOrden para poder reusarla tal cual desde /bultos/fragmento (ver mas abajo), que le
 // da al polling del cliente el mismo HTML sin reconstruir la pagina entera. El historial de
 // paquetes va dentro de un <details> (desplegable al hacer click en el bulto, colapsado por
 // defecto) porque con muchos paquetes la tarjeta se volvia demasiado larga.
-function renderTarjetasBultos(bultos, pesajesPorBulto) {
+function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto) {
   const tarjetas = bultos.map(b => {
     const pesajes = pesajesPorBulto.get(b.id) || [];
-    const filasPesajes = pesajes.length
-      ? pesajes.map(pe => `
+
+    // Residuos generados por ESTE bulto (Retal/Refilado/Troquelado/No conforme, ver
+    // OFFSET_RESIDUO_POR_TIPO/obtenerBultosYPesajes) -- a pedido del usuario (02/09/2026), solo se
+    // muestra la seccion si de verdad hay algo (la mayoria de bultos no generan ningun residuo). Si
+    // el mismo tipo aparece mas de una vez se suma en una sola fila.
+    const residuos = (residuosPorBulto && residuosPorBulto.get(b.id)) || [];
+    let contenidoResiduos = '';
+    if (residuos.length > 0) {
+      const cantidadPorTipo = new Map();
+      residuos.forEach(r => cantidadPorTipo.set(r.tipo, (cantidadPorTipo.get(r.tipo) || 0) + r.cantidad));
+      const filasResiduos = Array.from(cantidadPorTipo.entries()).map(([tipo, cantidad]) => `
+        <div class="residuo-bulto-fila">
+          <span class="residuo-bulto-badge${tipo === 'No conforme' ? ' residuo-bulto-badge-alerta' : ''}">${tipo}</span>
+          <span>${cantidad.toFixed(2)} kg</span>
+        </div>`).join('');
+      contenidoResiduos = `
+      <div class="residuos-bulto">
+        <div class="label">Residuos generados</div>
+        ${filasResiduos}
+      </div>`;
+    }
+
+    let contenidoPesajes;
+    if (pesajes.length === 0) {
+      contenidoPesajes = `<div class="pesaje-vacio">Sin paquetes pesados todavía.</div>`;
+    } else {
+      // "Slideboard": se parte en paginas de PAQUETES_POR_PAGINA, todas ya vienen en el HTML
+      // (ocultas con display:none salvo la ultima, que es la que se ve por defecto -- los paquetes
+      // mas recientes, lo que mas le importa al operario). Las flechas ‹ › solo cambian cual pagina
+      // esta visible (cambiarPaginaPesajes, ver scriptPaginadorPesajes) -- no vuelven a pedir nada
+      // al servidor, todas las paginas ya estan en el DOM.
+      const totalPaginas = Math.ceil(pesajes.length / PAQUETES_POR_PAGINA);
+      const paginaInicial = totalPaginas - 1;
+      const paginasHtml = [];
+      for (let i = 0; i < totalPaginas; i++) {
+        const grupo = pesajes.slice(i * PAQUETES_POR_PAGINA, (i + 1) * PAQUETES_POR_PAGINA);
+        const filasGrupo = grupo.map(pe => `
           <div class="pesaje-fila">
             <a href="javascript:void(0)" class="link-reimprimir" title="Reimprimir etiqueta de este paquete"
               onclick="reimprimirPaquete(this, ${JSON.stringify(b.id)}, ${JSON.stringify(pe.ConsecutivoPaquete)}, ${JSON.stringify(Number(pe.PesoPaqueGr))}, ${jsString(b.serialPadre).replace(/"/g, '&quot;')})">🖨️ Paquete ${pe.ConsecutivoPaquete}</a>
             <span>${pe.Hora}</span>
             <span>${Number(pe.PesoPaqueGr).toString()}</span>
-          </div>`).join('')
-      : `<div class="pesaje-vacio">Sin paquetes pesados todavía.</div>`;
+          </div>`).join('');
+        paginasHtml.push(
+          `<div class="pesajes-pagina" data-pagina-idx="${i}"${i === paginaInicial ? '' : ' style="display:none;"'}>${filasGrupo}</div>`
+        );
+      }
+      const nav = totalPaginas > 1 ? `
+        <div class="pesajes-nav">
+          <button type="button" class="btn-pesajes-nav" data-dir="-1" onclick="cambiarPaginaPesajes(this,-1)"${paginaInicial === 0 ? ' disabled' : ''}>‹</button>
+          <span class="pesajes-nav-indicador">${paginaInicial + 1} / ${totalPaginas}</span>
+          <button type="button" class="btn-pesajes-nav" data-dir="1" onclick="cambiarPaginaPesajes(this,1)"${paginaInicial === totalPaginas - 1 ? ' disabled' : ''}>›</button>
+        </div>` : '';
+      contenidoPesajes = `<div class="pesajes-paginador" data-bulto="${b.id}" data-pagina="${paginaInicial}" data-total-paginas="${totalPaginas}">${paginasHtml.join('')}${nav}</div>`;
+    }
 
     return `
     <div class="card">
@@ -1753,15 +2100,17 @@ function renderTarjetasBultos(bultos, pesajesPorBulto) {
       </div>
       <div class="card-grid">
         <div><span class="label">Cant. Total (KG)</span><span class="valor">${b.CantidadTotal ?? '—'}</span></div>
-        <div><span class="label">Golpes</span><span class="valor">${b.Golpes ?? '—'}</span></div>
+        <div><span class="label">Hora inicio</span><span class="valor">${b.HoraInicio ?? '—'}</span></div>
         <div><span class="label">Potencia (W)</span><span class="valor">${b.Potencia ?? '—'}</span></div>
-        <div><span class="label">Hora</span><span class="valor">${b.Hora ?? '—'}</span></div>
+        <div><span class="label">Hora final</span><span class="valor">${b.HoraFin ?? '—'}</span></div>
+        <div><span class="label">Golpes x minuto</span><span class="valor">${b.Golpes ?? '—'}</span></div>
         <div class="full"><span class="label">Serial</span><span class="valor serial">${b.serialPadre ?? '—'}</span></div>
       </div>
       <details class="pesajes-box" data-bulto="${b.id}">
         <summary>Paquetes pesados (${pesajes.length})</summary>
-        ${filasPesajes}
+        ${contenidoPesajes}
       </details>
+      ${contenidoResiduos}
     </div>`;
   }).join('');
 
@@ -1819,11 +2168,45 @@ function scriptReimprimir(idOrden, maquinaCodigo) {
   `;
 }
 
+// "Slideboard" de paquetes de cada bulto (ver PAQUETES_POR_PAGINA/renderTarjetasBultos) -- todas
+// las paginas ya vienen en el HTML (ocultas salvo la mas reciente), las flechas ‹ › solo cambian
+// cual esta visible, sin pedir nada al servidor (a pedido del usuario, 02/09/2026).
+function scriptPaginadorPesajes() {
+  return `
+    function mostrarPaginaPesajes(contenedor, idx) {
+      var total = Number(contenedor.dataset.totalPaginas);
+      contenedor.querySelectorAll('.pesajes-pagina').forEach(function(p) {
+        p.style.display = (Number(p.dataset.paginaIdx) === idx) ? '' : 'none';
+      });
+      contenedor.dataset.pagina = idx;
+      var indicador = contenedor.querySelector('.pesajes-nav-indicador');
+      if (indicador) indicador.textContent = (idx + 1) + ' / ' + total;
+      var btnPrev = contenedor.querySelector('.btn-pesajes-nav[data-dir="-1"]');
+      var btnNext = contenedor.querySelector('.btn-pesajes-nav[data-dir="1"]');
+      if (btnPrev) btnPrev.disabled = idx === 0;
+      if (btnNext) btnNext.disabled = idx === total - 1;
+    }
+
+    function cambiarPaginaPesajes(boton, delta) {
+      var contenedor = boton.closest('.pesajes-paginador');
+      if (!contenedor) return;
+      var total = Number(contenedor.dataset.totalPaginas);
+      var actual = Number(contenedor.dataset.pagina);
+      var nueva = Math.max(0, Math.min(total - 1, actual + delta));
+      if (nueva !== actual) mostrarPaginaPesajes(contenedor, nueva);
+    }
+  `;
+}
+
 // Script del cliente para /bultos: pide el fragmento renderizado con renderTarjetasBultos cada
 // pocos segundos y reemplaza el contenedor -- asi el numero de paquetes pesados se ve actualizado
 // sin que el operario tenga que recargar la pagina a mano (a pedido del usuario, 24/08/2026: en
 // pruebas el conteo no se actualizaba solo). Guarda que bultos tenian el desplegable abierto antes
 // de reemplazar el HTML y se lo vuelve a abrir despues, para no cerrarlo en cada actualizacion.
+// FIX 02/09/2026: hace lo mismo con la pagina del "slideboard" de cada bulto -- pero solo si el
+// operario se habia movido a una pagina vieja (no la ultima); si estaba viendo la mas reciente, se
+// deja que el nuevo render siga mostrando la mas reciente de verdad (puede haber una pagina nueva
+// si llego un paquete), no la que antes era la ultima.
 function scriptActualizarBultos() {
   return `
     (function() {
@@ -1838,9 +2221,22 @@ function scriptActualizarBultos() {
           const abiertos = new Set(
             Array.from(contenedor.querySelectorAll('details[open]')).map(function(d) { return d.dataset.bulto; })
           );
+          const paginas = new Map(
+            Array.from(contenedor.querySelectorAll('.pesajes-paginador')).map(function(el) {
+              var pagina = Number(el.dataset.pagina);
+              var total = Number(el.dataset.totalPaginas);
+              return [el.dataset.bulto, { pagina: pagina, eraLaMasReciente: pagina === total - 1 }];
+            })
+          );
           contenedor.innerHTML = html;
           contenedor.querySelectorAll('details').forEach(function(d) {
             if (abiertos.has(d.dataset.bulto)) d.open = true;
+          });
+          contenedor.querySelectorAll('.pesajes-paginador').forEach(function(el) {
+            var guardado = paginas.get(el.dataset.bulto);
+            if (!guardado || guardado.eraLaMasReciente) return;
+            var total = Number(el.dataset.totalPaginas);
+            mostrarPaginaPesajes(el, Math.min(guardado.pagina, total - 1));
           });
         } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
       }
@@ -1853,7 +2249,7 @@ function scriptActualizarBultos() {
 // criterio que EjecucionSelladora.vb:CargarBultos) y los pesajes/paquetes de cada uno
 // (SEL_PesajeElemento, igual que CargarPesajes). Separada de renderOrdenDetalle -- ver comentario
 // ahi arriba.
-function renderBultosOrden(orden, bultos, pesajesPorBulto, usuario, maquinaCodigo) {
+function renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, usuario, maquinaCodigo) {
   return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -1868,20 +2264,25 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, usuario, maquinaCodig
       <div class="logo-wrap"><img class="logo" src="/logo-carlixplast.png" alt="Carlixplast"></div>
     </div>
     <div class="header-inner">
-      <div class="usuario-bar">
-        <span>👤 ${usuario}</span>
-        <a class="salir" href="/logout">Cerrar sesión</a>
+      <div class="header-fila">
+        <div class="header-info">
+          <h1>📦 Bultos</h1>
+          <div class="sub">${orden.Elemento}</div>
+          <a class="volver" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}">‹ Pedido ${orden.NumeroPedido || '—'}</a>
+        </div>
+        <div class="header-salir-grupo">
+          <div class="header-usuario">👤 ${usuario}</div>
+          <a class="salir" href="/logout">Cerrar sesión</a>
+        </div>
       </div>
-      <a class="volver" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}">‹ Pedido ${orden.NumeroPedido || '—'}</a>
-      <h1>📦 Bultos</h1>
-      <div class="sub">${orden.Elemento}</div>
     </div>
   </header>
   <main>
-    <div id="contenedor-bultos">${renderTarjetasBultos(bultos, pesajesPorBulto)}</div>
+    <div id="contenedor-bultos">${renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto)}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptReimprimir(orden.IdOrden, maquinaCodigo)}</script>
+  <script>${scriptPaginadorPesajes()}</script>
   <script>${scriptActualizarBultos()}</script>
 </body>
 </html>`;
@@ -1926,31 +2327,7 @@ app.get('/logout', async (req, res) => {
   } catch (err) {
     console.error('Error registrando Salida:', err.message);
   }
-  req.session.destroy(() => res.redirect('/marcar'));
-});
-
-// /marcar es ahora la pantalla de login principal (QR), con enlace de respaldo al login
-// clasico de usuario/contrasena (/login). Cualquiera de los dos caminos crea sesion,
-// registra 'Entrada' en SISAccesos y entra al dashboard (/); /logout registra 'Salida'.
-app.get('/marcar', (req, res) => {
-  if (req.session && req.session.usuario) return res.redirect('/');
-  res.send(renderMarcar());
-});
-
-app.post('/marcar/registrar', async (req, res) => {
-  const { codigoQR } = req.body;
-  if (!codigoQR) return res.json({ ok: false, error: 'Código vacío.' });
-  try {
-    const p = await getPool();
-    const usuario = await buscarUsuarioPorQR(p, codigoQR);
-    if (!usuario) return res.json({ ok: false, error: 'Código no reconocido o usuario inactivo.' });
-
-    req.session.usuario = usuario;
-    await registrarEvento(p, usuario.codigo, 'Entrada', 'QR');
-    res.json({ ok: true, nombre: usuario.nombre, redirect: '/' });
-  } catch (err) {
-    res.json({ ok: false, error: err.message });
-  }
+  req.session.destroy(() => res.redirect('/login'));
 });
 
 // Selladoras con una orden accionable en este momento (Activa, Pendiente de iniciar, o
@@ -2148,16 +2525,39 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
     // la pausa sigue mostrando el tiempo correcto en vez de reiniciar en 00:00:00).
     let idEjecucion = null;
     let pausaActiva = null;
+    // ProximaCalidad (03/09/2026): cuando debe salir el proximo chequeo de Calidad, guardado en BD
+    // -- no en un setTimeout del navegador, que se reiniciaba cada vez que se recargaba la pagina o
+    // se navegaba a otra pestaña y casi nunca llegaba a completar el conteo de 20-30 min. Si la
+    // orden esta Activa y todavia no tiene una fecha programada (primera vez que se abre
+    // Informacion desde que se inicio), se inicializa aca mismo.
+    // FIX 03/09/2026: ahora tambien exige que la EJECUCION (no solo la orden) este realmente en
+    // curso -- Activa o En pausa, nunca 'PendienteOperador' (nadie ha retomado el control todavia,
+    // no tiene sentido pedir un chequeo de calidad sin un operario real detras). Si esta en
+    // PendienteOperador no se inicializa una fecha nueva NI se manda la que ya hubiera guardada --
+    // se retoma sola, sin perderse, la proxima vez que alguien la retome y vuelva Activa/En pausa.
+    let proximaCalidad = null;
     const dtEjecucion = await p.request().input('idOrden', idOrden).query(
-      `SELECT TOP 1 IdEjecucion, Estado FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden`
+      `SELECT TOP 1 IdEjecucion, Estado, ProximaCalidad FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden`
     );
     if (dtEjecucion.recordset.length > 0) {
       idEjecucion = dtEjecucion.recordset[0].IdEjecucion;
-      if (dtEjecucion.recordset[0].Estado === 'En pausa') {
+      const estadoEjecucion = dtEjecucion.recordset[0].Estado;
+      proximaCalidad = dtEjecucion.recordset[0].ProximaCalidad;
+      if (estadoEjecucion === 'En pausa') {
         const dtPausa = await p.request().input('idEjecucion', idEjecucion).query(
           `SELECT TOP 1 Tipo, Subtipo, Observaciones, HoraInicio FROM SEL_TiempoMuerto WHERE id_ejecucion = @idEjecucion AND HoraFin IS NULL ORDER BY id DESC`
         );
         if (dtPausa.recordset.length > 0) pausaActiva = dtPausa.recordset[0];
+      }
+      if (orden.Estado === 'Activa' && estadoEjecucion !== 'PendienteOperador') {
+        if (proximaCalidad == null) {
+          proximaCalidad = calcularProximaCalidad();
+          await p.request().input('idEjecucion', idEjecucion).input('proximaCalidad', proximaCalidad).query(
+            `UPDATE SEL_EjecucionOrden SET ProximaCalidad = @proximaCalidad WHERE IdEjecucion = @idEjecucion`
+          );
+        }
+      } else {
+        proximaCalidad = null;
       }
     }
 
@@ -2198,7 +2598,7 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
 
     const avance = await obtenerAvanceProduccion(p, idOrden);
 
-    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance));
+    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, proximaCalidad));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
@@ -2218,13 +2618,22 @@ app.get('/selladora/:codigo/orden/:idOrden/avance-produccion', requireLogin, asy
   }
 });
 
-// Bultos (indice relativo) y sus pesajes/paquetes (SEL_PesajeElemento) de una orden -- compartida
-// entre la pagina completa de /bultos y su /bultos/fragmento (el polling de scriptActualizarBultos
-// pide solo el fragmento, para no reconstruir cabecera/estilos en cada actualizacion).
+// Offset de Linea que usa el flujo de Node-RED para marcar un residuo "hijo" de un bulto en
+// PRDProduccion (ver el script nativo que arma ese INSERT/UPDATE, no vive en este repo) --
+// LineaHijo = LineaPadre (= SEL_Bultos.num_bulto) + este offset segun el tipo. Confirmado con el
+// usuario 02/09/2026 (Refilado no estaba en el script que compartio, pero sigue el mismo patron).
+const OFFSET_RESIDUO_POR_TIPO = { 1000: 'Retal', 2000: 'Refilado', 3000: 'Troquelado', 4000: 'No conforme' };
+
+// Bultos (indice relativo), sus pesajes/paquetes (SEL_PesajeElemento) y los residuos que hayan
+// generado (Retal/Refilado/Troquelado/No conforme, ver OFFSET_RESIDUO_POR_TIPO) de una orden --
+// compartida entre la pagina completa de /bultos y su /bultos/fragmento (el polling de
+// scriptActualizarBultos pide solo el fragmento, para no reconstruir cabecera/estilos en cada
+// actualizacion).
 async function obtenerBultosYPesajes(p, idOrden) {
   const bultosResult = await p.request().input('idOrden', idOrden).query(`
     SELECT b.id, b.num_bulto, b.serialPadre, b.CantidadTotal, b.estado, ISNULL(b.Golpes,0) AS Golpes, b.Potencia,
-           FORMAT(ISNULL(b.HoraFin, b.HoraInicio), 'dd/MM/yyyy HH:mm') AS Hora
+           FORMAT(b.HoraInicio, 'dd/MM/yyyy HH:mm') AS HoraInicio,
+           FORMAT(b.HoraFin, 'dd/MM/yyyy HH:mm') AS HoraFin
     FROM SEL_Bultos b
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
     WHERE ej.IdOrden = @idOrden
@@ -2233,6 +2642,7 @@ async function obtenerBultosYPesajes(p, idOrden) {
   const bultos = bultosResult.recordset.map((b, idx) => ({ ...b, numRelativo: idx + 1 }));
 
   let pesajesPorBulto = new Map();
+  let residuosPorBulto = new Map();
   if (bultos.length > 0) {
     const pesajesResult = await p.request().input('idOrden', idOrden).query(`
       SELECT pe.id_bulto, pe.ConsecutivoPaquete, FORMAT(pe.FechaHora,'dd/MM/yyyy HH:mm:ss') AS Hora, pe.PesoPaqueGr
@@ -2246,14 +2656,46 @@ async function obtenerBultosYPesajes(p, idOrden) {
       if (!pesajesPorBulto.has(row.id_bulto)) pesajesPorBulto.set(row.id_bulto, []);
       pesajesPorBulto.get(row.id_bulto).push(row);
     }
+
+    // Mismo criterio de "fila padre" que el script de Node-RED (ResolverContextoBultoParaHijo):
+    // Fecha/Lote/Elemento del bulto, buscando el/los hijo(s) en esos 4 Linea posibles. Un bulto
+    // puede no tener ninguno (lo normal) o tener varios tipos a la vez.
+    const residuosResult = await p.request().input('idOrden', idOrden).query(`
+      SELECT b.id AS IdBulto, pp.Linea - b.num_bulto AS OffsetTipo, pp.Cantidad
+      FROM SEL_Bultos b
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+      INNER JOIN PRDProduccion pp
+        ON pp.Fecha = DATEFROMPARTS(b.agno, b.mes, b.dia)
+        AND pp.Lote = RIGHT('0' + CAST(b.mes AS VARCHAR(2)), 2) + RIGHT('0' + CAST(b.dia AS VARCHAR(2)), 2)
+        AND pp.Elemento = b.refsalida
+        AND pp.Linea IN (b.num_bulto + 1000, b.num_bulto + 2000, b.num_bulto + 3000, b.num_bulto + 4000)
+      WHERE ej.IdOrden = @idOrden
+    `);
+    for (const row of residuosResult.recordset) {
+      const tipo = OFFSET_RESIDUO_POR_TIPO[row.OffsetTipo];
+      if (!tipo) continue; // offset desconocido -- no deberia pasar, se ignora en vez de romper la pagina
+      if (!residuosPorBulto.has(row.IdBulto)) residuosPorBulto.set(row.IdBulto, []);
+      residuosPorBulto.get(row.IdBulto).push({ tipo, cantidad: Number(row.Cantidad) });
+    }
   }
 
-  return { bultos, pesajesPorBulto };
+  return { bultos, pesajesPorBulto, residuosPorBulto };
 }
 
 // Cada paquete producido cuenta como 100 unidades cuando la orden se mide en unidades (regla de
 // negocio dada por el usuario, 02/09/2026 -- no sale de ninguna columna, es fija).
 const UNIDADES_POR_PAQUETE = 100;
+
+// Proximo momento en que debe salir el chequeo de Calidad -- entre 20 y 30 minutos desde ahora
+// (mismo rango que antes, cuando era un setTimeout del navegador). Se llama al inicializar
+// SEL_EjecucionOrden.ProximaCalidad por primera vez (ver GET /selladora/:codigo/orden/:idOrden) y
+// para reprogramar el siguiente chequeo despues de que se responde uno (ver POST /api/comando,
+// comando 'calidad').
+function calcularProximaCalidad() {
+  const minMs = 20 * 60 * 1000;
+  const maxMs = 30 * 60 * 1000;
+  return new Date(Date.now() + minMs + Math.random() * (maxMs - minMs));
+}
 
 // Avance de produccion de una orden: lo producido contra lo pedido (tarjeta del encabezado de
 // Informacion, ver renderOrdenDetalle). Reglas acordadas con el usuario (02/09/2026):
@@ -2324,9 +2766,9 @@ app.get('/selladora/:codigo/orden/:idOrden/bultos', requireLogin, async (req, re
     }
     const orden = ordenResult.recordset[0];
 
-    const { bultos, pesajesPorBulto } = await obtenerBultosYPesajes(p, idOrden);
+    const { bultos, pesajesPorBulto, residuosPorBulto } = await obtenerBultosYPesajes(p, idOrden);
 
-    res.send(renderBultosOrden(orden, bultos, pesajesPorBulto, req.session.usuario.nombre, codigo));
+    res.send(renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, req.session.usuario.nombre, codigo));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}/orden/${idOrden}`));
   }
@@ -2339,8 +2781,8 @@ app.get('/selladora/:codigo/orden/:idOrden/bultos/fragmento', requireLogin, asyn
   const { idOrden } = req.params;
   try {
     const p = await getPool();
-    const { bultos, pesajesPorBulto } = await obtenerBultosYPesajes(p, idOrden);
-    res.send(renderTarjetasBultos(bultos, pesajesPorBulto));
+    const { bultos, pesajesPorBulto, residuosPorBulto } = await obtenerBultosYPesajes(p, idOrden);
+    res.send(renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto));
   } catch (err) {
     res.status(500).send('Error: ' + err.message);
   }
@@ -2351,7 +2793,11 @@ app.get('/selladora/:codigo/orden/:idOrden/bultos/fragmento', requireLogin, asyn
 // orden no tiene bulto Activo en este momento devuelve ceros, no un error (puede pasar entre que
 // se cierra un bulto y se abre el siguiente). Tambien devuelve idBulto (01/09/2026) -- lo guarda
 // scriptResumenBultoActivo en window.idBultoActivo para que confirmarPesoYEnviar (scriptComandos)
-// lo mande junto con el peso al marcar un residuo/salida no conforme.
+// lo mande junto con el peso al marcar un residuo/salida no conforme. FIX 02/09/2026: ademas
+// devuelve el ULTIMO paquete pesado (consecutivo/peso) -- scriptResumenBultoActivo lo guarda en
+// window.ultimoPaqueteBultoActivo para que, al confirmar "Cierre bulto", se reimprima de una la
+// etiqueta de ese ultimo paquete (mismo mecanismo de reimprimirPaquete en Bultos, ver
+// confirmarCerrarBultoYReimprimir en scriptComandos).
 app.get('/selladora/:codigo/orden/:idOrden/resumen-bulto-activo', requireLogin, async (req, res) => {
   const { idOrden } = req.params;
   try {
@@ -2363,7 +2809,7 @@ app.get('/selladora/:codigo/orden/:idOrden/resumen-bulto-activo', requireLogin, 
       ORDER BY b.id DESC
     `);
     if (dtBultoActivo.recordset.length === 0) {
-      return res.json({ ok: true, paquetes: 0, pesoTotalKg: 0, idBulto: null });
+      return res.json({ ok: true, paquetes: 0, pesoTotalKg: 0, idBulto: null, ultimoConsecutivo: null, ultimoPesoKg: null });
     }
     const idBulto = dtBultoActivo.recordset[0].id;
     // PesoPaqueGr guarda kilogramos pese al nombre (ver FIX 02/09/2026 en scriptResumenBultoActivo),
@@ -2372,7 +2818,20 @@ app.get('/selladora/:codigo/orden/:idOrden/resumen-bulto-activo', requireLogin, 
       SELECT COUNT(*) AS Paquetes, ISNULL(SUM(PesoPaqueGr), 0) AS PesoTotalKg
       FROM SEL_PesajeElemento WHERE id_bulto = @idBulto
     `);
-    res.json({ ok: true, paquetes: resumen.recordset[0].Paquetes, pesoTotalKg: Number(resumen.recordset[0].PesoTotalKg), idBulto });
+    const dtUltimo = await p.request().input('idBulto', idBulto).query(`
+      SELECT TOP 1 ConsecutivoPaquete, PesoPaqueGr
+      FROM SEL_PesajeElemento WHERE id_bulto = @idBulto
+      ORDER BY ConsecutivoPaquete DESC
+    `);
+    const ultimo = dtUltimo.recordset[0] || null;
+    res.json({
+      ok: true,
+      paquetes: resumen.recordset[0].Paquetes,
+      pesoTotalKg: Number(resumen.recordset[0].PesoTotalKg),
+      idBulto,
+      ultimoConsecutivo: ultimo ? ultimo.ConsecutivoPaquete : null,
+      ultimoPesoKg: ultimo ? Number(ultimo.PesoPaqueGr) : null
+    });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -2436,158 +2895,6 @@ app.post('/api/selladora/orden/:idOrden/tomar-control-ejecucion', requireLogin, 
   }
 });
 
-// Pantalla de escaneo (Iniciar cuando nuevo=0, Añadir Rollo cuando nuevo=1) -- mismo lector
-// Html5Qrcode que ya usa renderMarcar() para el QR de acceso, aca configurado para el codigo de
-// barras de 19 digitos (Code128C) que trae la etiqueta impresa del rollo.
-function renderEscanear(maquinaCodigo, maquinaNombre, idOrden, nuevo, bolsasActual) {
-  const tituloAccion = nuevo ? 'Añadir Rollo' : 'Iniciar Ejecución';
-  return `<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${tituloAccion} — ${maquinaNombre}</title>
-  <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      margin: 0; min-height: 100vh; background: #f4f6f8; color: #1c2733; padding: 16px;
-      box-sizing: border-box;
-    }
-    h1 { font-size: 18px; margin: 0 0 4px; }
-    .sub { font-size: 13px; color: #64748b; margin-bottom: 16px; }
-    #lector { width: 100%; max-width: 380px; border-radius: 16px; overflow: hidden; background: black; margin: 0 auto; }
-    #manual { max-width: 380px; margin: 14px auto 0; display: flex; gap: 8px; }
-    #manual input { flex: 1; padding: 10px 12px; border: 1px solid #d0d7de; border-radius: 10px; font-size: 16px; box-sizing: border-box; }
-    #manual button { padding: 10px 14px; border: none; border-radius: 10px; background: #0078d7; color: white; font-weight: 600; }
-    #resultado { max-width: 380px; margin: 16px auto 0; padding: 16px; border-radius: 14px; background: white; box-shadow: 0 1px 4px rgba(0,0,0,0.08); display: none; }
-    #resultado .fila { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 6px; }
-    #resultado label { display: block; font-size: 13px; font-weight: 600; margin: 10px 0 6px; }
-    #resultado input { width: 100%; padding: 10px 12px; border: 1px solid #d0d7de; border-radius: 10px; font-size: 16px; box-sizing: border-box; }
-    #resultado button { margin-top: 12px; width: 100%; padding: 12px; border: none; border-radius: 10px; font-size: 15px; font-weight: 600; background: #0078d7; color: white; cursor: pointer; }
-    .volver {
-      display: block; max-width: 380px; margin: 16px auto 0; padding: 12px; color: #64748b;
-      font-size: 18px; font-weight: 600; text-decoration: none; text-align: center;
-      border: 1px solid #d0d7de; border-radius: 10px; box-sizing: border-box;
-    }
-  </style>
-</head>
-<body>
-  <h1>${tituloAccion}</h1>
-  <div class="sub">${maquinaNombre} — escanee la etiqueta del rollo (código de 19 dígitos)</div>
-  <div id="lector"></div>
-  <div id="manual">
-    <input type="text" id="txtManual" placeholder="O escriba el código manualmente" inputmode="numeric" autofocus>
-    <button type="button" onclick="consultar(document.getElementById('txtManual').value)">Buscar</button>
-  </div>
-  <div id="resultado"></div>
-  <a class="volver" href="${nuevo ? `/selladora/${maquinaCodigo}/orden/${idOrden}` : `/selladora/${maquinaCodigo}`}">‹ Volver</a>
-
-  <script src="/html5-qrcode.min.js"></script>
-  <script src="/sweetalert2.min.js"></script>
-  <script>${scriptPreguntaActividadInicial()}</script>
-  <script>
-    // Cursor listo para escribir el codigo apenas se entra a esta pantalla, en cualquier
-    // dispositivo (a pedido del usuario, 01/09/2026) -- el atributo autofocus del input no siempre
-    // alcanza (algunos navegadores/WebView de tablet lo ignoran), asi que se refuerza con .focus()
-    // al cargar.
-    document.getElementById('txtManual').focus();
-
-    const idOrden = ${JSON.stringify(idOrden)};
-    const esNuevoRollo = ${nuevo ? 'true' : 'false'};
-    const bolsasActual = ${Number(bolsasActual) || 0};
-    // Al Iniciar (no al +Rollo), termine con actividad o directo a produccion, se entra a
-    // Informacion de la orden -- no a la cola de la maquina (a pedido del usuario, 31/08/2026).
-    const destinoTrasIniciar = ${JSON.stringify(`/selladora/${maquinaCodigo}/orden/${idOrden}`)};
-    const divResultado = document.getElementById('resultado');
-    let procesando = false;
-    let ultimaConsulta = null;
-
-    async function consultar(serial) {
-      serial = (serial || '').trim();
-      if (!serial || procesando) return;
-      procesando = true;
-      try {
-        const resp = await fetch('/api/selladora/orden/' + idOrden + '/rollo/consultar', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ serial, esNuevoRollo })
-        });
-        const datos = await resp.json();
-        if (!datos.ok) { mostrarError(datos.error); return; }
-        ultimaConsulta = datos;
-        mostrarPreview(datos);
-      } catch (err) {
-        mostrarError('Error de conexión: ' + err.message);
-      } finally {
-        procesando = false;
-      }
-    }
-
-    function mostrarError(mensaje) {
-      divResultado.style.display = 'none';
-      Swal.fire({ icon: 'error', title: 'No se pudo continuar', text: mensaje, confirmButtonColor: '#71bf44' });
-    }
-
-    function mostrarPreview(datos) {
-      divResultado.className = '';
-      const bolsasCampo = esNuevoRollo
-        ? '<div class="fila"><span>Bolsas x golpe</span><strong>' + (bolsasActual || '—') + '</strong></div>'
-        : '<label for="txtBolsas">Bolsas x golpe</label><input type="number" id="txtBolsas" min="1" inputmode="numeric">';
-      divResultado.innerHTML =
-        '<div class="fila"><span>Serial</span><strong>' + datos.serial + '</strong></div>' +
-        '<div class="fila"><span>Peso (Kg)</span><strong>' + datos.cantidad + '</strong></div>' +
-        '<div class="fila"><span>Lote</span><strong>' + (datos.lote || '—') + '</strong></div>' +
-        '<div class="fila"><span>Bodega</span><strong>' + datos.bodegaNombre + '</strong></div>' +
-        '<div class="fila"><span>Referencia</span><strong>' + datos.referencia + '</strong></div>' +
-        bolsasCampo +
-        '<button type="button" onclick="confirmar()">' + (esNuevoRollo ? 'Añadir Rollo' : 'Iniciar') + '</button>';
-      divResultado.style.display = 'block';
-    }
-
-    async function confirmar() {
-      if (!ultimaConsulta) return;
-      let bolsasXGolpe = bolsasActual;
-      if (!esNuevoRollo) {
-        const campo = document.getElementById('txtBolsas');
-        bolsasXGolpe = parseInt(campo.value, 10);
-        if (!bolsasXGolpe || bolsasXGolpe <= 0) {
-          Swal.fire({ icon: 'warning', title: 'Dato inválido', text: 'Ingrese un número de bolsas x golpe válido.', confirmButtonColor: '#71bf44' });
-          return;
-        }
-      }
-      try {
-        const resp = await fetch('/api/selladora/orden/' + idOrden + '/rollo', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ serial: ultimaConsulta.serial, esNuevoRollo, bolsasXGolpe })
-        });
-        const datos = await resp.json();
-        if (!datos.ok) { mostrarError(datos.error); return; }
-        Swal.fire({
-          icon: 'success', title: esNuevoRollo ? 'Rollo añadido' : 'Ejecución iniciada',
-          timer: 1000, showConfirmButton: false
-        }).then(() => {
-          // Al Iniciar (primer rollo, no al +Rollo de mitad de produccion) se pregunta si hay
-          // alguna actividad de las que se registran como pausa por hacer antes de producir (a
-          // pedido del usuario, 31/08/2026) -- ver scriptPreguntaActividadInicial().
-          if (esNuevoRollo) { window.location.href = datos.redirect; }
-          else { preguntarActividadInicial(idOrden, function() { window.location.href = destinoTrasIniciar; }); }
-        });
-      } catch (err) {
-        mostrarError('Error de conexión: ' + err.message);
-      }
-    }
-
-    const lector = new Html5Qrcode('lector', { formatsToSupport: [Html5QrcodeSupportedFormats.CODE_128] });
-    Html5Qrcode.getCameras().then(camaras => {
-      if (!camaras || camaras.length === 0) return;
-      const trasera = camaras.find(c => /back|trasera|rear|environment/i.test(c.label));
-      const camaraId = trasera ? trasera.id : camaras[0].id;
-      lector.start(camaraId, { fps: 10, qrbox: 250 }, function (texto) { consultar(texto); });
-    }).catch(() => {});
-  </script>
-</body>
-</html>`;
-}
-
 function renderErrorSimple(mensaje, volverA) {
   const destino = volverA || '/';
   return `<!DOCTYPE html>
@@ -2619,36 +2926,27 @@ async function obtenerCodigoMaquinaDeOrden(p, idOrden) {
   return r.recordset[0].Maquina;
 }
 
-app.get('/selladora/:codigo/orden/:idOrden/escanear', requireLogin, async (req, res) => {
-  const { codigo, idOrden } = req.params;
-  const nuevo = req.query.nuevo === '1';
+// Valida que la orden pueda Iniciar / recibir +Rollo ANTES de abrir la ventana emergente de
+// escaneo, y devuelve las bolsas x golpe en curso para mostrarlas en la vista previa. Reemplaza
+// a GET /selladora/:codigo/orden/:idOrden/escanear (la pantalla aparte, eliminada el 04/09/2026):
+// hace exactamente las mismas validaciones, solo que responde JSON en vez de una pagina. La
+// escritura la sigue haciendo POST .../rollo, que vuelve a validar por su cuenta.
+app.get('/api/selladora/orden/:idOrden/rollo/preparar', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  const esNuevoRollo = req.query.nuevo === '1';
   const usuario = req.session.usuario;
 
   if (!usuario.codigoOperarioPRD) {
-    return res.status(403).send(renderErrorSimple(
-      'Su usuario no tiene un operario de planta configurado (CodigoOperarioPRD). Pida a sistemas que lo configure antes de usar Iniciar/Añadir Rollo.',
-      `/selladora/${codigo}`
-    ));
+    return res.json({ ok: false, error: 'Su usuario no tiene un operario de planta configurado (CodigoOperarioPRD). Pida a sistemas que lo configure antes de usar Iniciar/Añadir Rollo.' });
   }
 
   try {
     const p = await getPool();
-    const maquina = await p.request().input('codigo', codigo).query(`SELECT Nombre FROM PRDMaquinas WHERE Codigo = @codigo`);
-    const nombreMaquina = maquina.recordset[0] ? maquina.recordset[0].Nombre : 'Selladora';
-
-    let bolsasActual = 0;
-    if (nuevo) {
-      const v = await validarPuedeAnadirRollo(p, idOrden);
-      if (!v.ok) return res.status(400).send(renderErrorSimple(v.error, `/selladora/${codigo}`));
-      bolsasActual = v.bolsasActual;
-    } else {
-      const v = await validarPuedeIniciar(p, idOrden);
-      if (!v.ok) return res.status(400).send(renderErrorSimple(v.error, `/selladora/${codigo}`));
-    }
-
-    res.send(renderEscanear(codigo, nombreMaquina, idOrden, nuevo, bolsasActual));
+    const v = esNuevoRollo ? await validarPuedeAnadirRollo(p, idOrden) : await validarPuedeIniciar(p, idOrden);
+    if (!v.ok) return res.json({ ok: false, error: v.error });
+    res.json({ ok: true, bolsasActual: v.bolsasActual || 0 });
   } catch (err) {
-    res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
+    res.json({ ok: false, error: err.message });
   }
 });
 
@@ -2822,6 +3120,26 @@ app.post('/api/comando', requireLogin, async (req, res) => {
       usuario: req.session.usuario.codigo,
       datos: datos || null
     });
+    // Al responder Calidad, se reprograma el proximo chequeo (otros 20-30 min desde ahora, ver
+    // calcularProximaCalidad) y se guarda lo respondido en SEL_ChequeoCalidad/Detalle (ver
+    // registrarChequeoCalidad, 03/09/2026) -- si cualquiera de las dos cosas fallara no se revienta
+    // el comando ya enviado a Node-RED, solo se registra en consola.
+    if (comando === 'calidad') {
+      try {
+        const p = await getPool();
+        await p.request().input('idOrden', Number(idOrden)).input('proximaCalidad', calcularProximaCalidad()).query(
+          `UPDATE SEL_EjecucionOrden SET ProximaCalidad = @proximaCalidad WHERE IdOrden = @idOrden`
+        );
+        const operarioCodigo = req.session.usuario.codigoOperarioPRD;
+        if (operarioCodigo) {
+          await registrarChequeoCalidad(p, { idOrden: Number(idOrden), operarioCodigo, respuestas: datos });
+        } else {
+          console.error('No se guardo el chequeo de Calidad: el usuario no tiene codigoOperarioPRD.');
+        }
+      } catch (errReprogramar) {
+        console.error('Error reprogramando ProximaCalidad / guardando chequeo de Calidad:', errReprogramar.message);
+      }
+    }
     res.json({ ok: true });
   } catch (err) {
     res.status(502).json({ ok: false, error: 'No se pudo contactar a Node-RED: ' + err.message });

@@ -16,13 +16,12 @@ App mínima en Node.js/Express para ver el estado de `SEL_Bultos` (bultos activo
 | `auth.js` | Valida el login contra la tabla `SISUsuarios` (código + contraseña). |
 | `crypto-mirane.js` | Cifrado/descifrado TripleDES compatible con Mirane (clave `MERLIN`/IV `LINMER`), igual al de `General.vb`. |
 | `encriptar-password.js` | Script de consola para generar el valor cifrado que va en `DB_PASSWORD_ENC`. |
-| `accesos.js` | Marcación de entrada/salida por QR: busca el operario por `SISUsuarios.CodigoQR` y registra el evento en `SISAccesos`. |
-| `generar-qr-usuario.js` | Script de consola: genera (o regenera) el `CodigoQR` de un operario y guarda el PNG del QR para imprimir. |
-| `agregar_qr_accesos.sql` | Script SQL: agrega la columna `SISUsuarios.CodigoQR` y crea la tabla `SISAccesos`. Ejecutar una sola vez. |
+| `accesos.js` | Bitácora de entrada/salida: registra el evento en `SISAccesos` al iniciar y cerrar sesión. |
+| `agregar_qr_accesos.sql` | Script SQL: crea la tabla `SISAccesos` (y agrega `SISUsuarios.CodigoQR`, hoy sin uso). Ejecutar una sola vez. |
 | `.env` | Configuración real (servidor de BD, puerto web, secreto de sesión). **No se sube a git.** |
 | `.env.example` | Plantilla de `.env` sin datos sensibles. |
 | `GIT.md` | Guía de Git: clonar, pull, commit, push, conflictos. |
-| `public/` | Archivos estáticos servidos tal cual (logo, librería `html5-qrcode.min.js`). |
+| `public/` | Archivos estáticos servidos tal cual (logo, librería `sweetalert2.min.js`). |
 | `package.json` | Dependencias y script `start`. |
 
 ## 3. Librerías que hay que tener instaladas
@@ -118,32 +117,20 @@ New-NetFirewallRule -DisplayName "Bultos Web" -Direction Inbound -LocalPort 3000
 - **Error al validar login / error de conexión a la base**: revisar `DB_SERVER`, `DB_PORT`, `DB_USER` y que `DB_PASSWORD_ENC` se haya generado bien con `encriptar-password.js`. El error concreto se muestra en la pantalla de login.
 - **La sesión se cierra sola**: la cookie dura 8 horas (`maxAge` en `server.js`), pensado para un turno de trabajo.
 
-## 9. Login por QR (`/marcar`) y bitácora de entrada/salida (`SISAccesos`)
+## 9. Bitácora de entrada/salida (`SISAccesos`)
 
-`/marcar` es ahora **otra puerta de entrada al mismo login**, alternativa a `/login`: en vez de escribir
-usuario/contraseña, el operario escanea su código QR con la cámara. Cualquiera de los dos caminos
-(`/login` o `/marcar`) crea la misma sesión, registra un evento `Entrada` en `SISAccesos` y entra al
-dashboard (`/`). Al presionar "Salir" (`/logout`) se registra `Salida`, sin importar por cuál de los
-dos caminos se entró.
+El único inicio de sesión es `/login` con usuario y contraseña de Mirane (`SISUsuarios`). Al entrar
+se registra un evento `Entrada` en `SISAccesos` con `Origen = 'Manual'`; al presionar "Cerrar sesión"
+(`/logout`) se registra `Salida`. Cualquier ruta protegida sin sesión redirige a `/login`.
 
-### 9.1 Preparación (una sola vez por instalación)
+> **Login por QR (eliminado el 04/09/2026).** Hasta esa fecha existía `/marcar`, una segunda puerta
+> de entrada donde el operario escaneaba con la cámara un QR impreso (`SISUsuarios.CodigoQR`) en vez
+> de escribir su contraseña. Se quitó a pedido del usuario junto con el resto de usos de la cámara,
+> y con ella `renderMarcar()`, `POST /marcar/registrar`, `buscarUsuarioPorQR()` y el script
+> `generar-qr-usuario.js`. La columna `SISUsuarios.CodigoQR` sigue en la base (ya no se lee) y
+> `agregar_qr_accesos.sql` se conserva porque es el script que también creó `SISAccesos`.
 
-1. Ejecutar `agregar_qr_accesos.sql` contra la base de Mirane (agrega `SISUsuarios.CodigoQR` y crea `SISAccesos`).
-2. Por cada operario, generar su QR:
-   ```powershell
-   node generar-qr-usuario.js <CodigoUsuario>
-   ```
-   Esto actualiza `SISUsuarios.CodigoQR` y deja un `qr-<CodigoUsuario>.png` en la carpeta del proyecto — ese PNG es el que se imprime (carnet, pulsera, etc.).
+### 9.1 Notas
 
-### 9.2 Uso diario
-
-- Entrar a `http://<ip-del-pc>:3000/marcar` (o `/login`, quedan enlazadas entre sí) desde la tablet.
-- **Por QR**: el operario acerca su código a la cámara → el sistema lo busca en `SISUsuarios.CodigoQR`, y si está `Activo` abre sesión, registra `Entrada` (`Origen = 'QR'`) y entra a `/`.
-- **Por usuario/contraseña**: igual que siempre, y también registra `Entrada` (`Origen = 'Manual'`).
-- **Salir**: el enlace "Salir" del dashboard registra `Salida` antes de cerrar la sesión y vuelve a `/marcar`.
-
-### 9.3 Notas
-
-- El QR **identifica** al operario, no lo autentica de forma fuerte: es una imagen que se puede fotografiar o compartir. Quien tenga el QR de otro entra al dashboard *como esa persona* — no reemplaza un control de acceso que necesite evitar suplantación (para eso haría falta biometría).
-- La cámara requiere contexto seguro (HTTPS o `localhost`) según el navegador; en la misma red local por HTTP puede que algunos navegadores (sobre todo Chrome en Android) bloqueen el acceso a la cámara — si pasa esto, hay que servir `/marcar` por HTTPS (certificado autofirmado + aceptarlo una vez en la tablet, o un proxy con certificado válido).
-- `SISAccesos` queda como bitácora independiente de la sesión: aunque la cookie dure 8h y se cierre sola, el par Entrada/Salida real solo se registra cuando de verdad se usa `/login`, `/marcar` o "Salir".
+- `SISAccesos` queda como bitácora independiente de la sesión: aunque la cookie dure 8h y se cierre sola, el par Entrada/Salida real solo se registra cuando de verdad se usa `/login` o "Cerrar sesión".
+- `/logout` hace algo más que cerrar la sesión: si el operario tenía una ejecución `Activa` a su nombre, la deja en `PendienteOperador` para que otro pueda retomarla (ver `server.js`).
