@@ -40,16 +40,29 @@ function desencriptar(base64Cifrado) {
   return claro.toString('latin1');
 }
 
-// Para descifrar un valor leido directo de una columna de SQL Server (ej. SISUsuarios.Clave)
-// -- ahi el driver ya entrega el string "crudo" (mismo formato que produce .NET internamente,
-// Encoding.Default.GetString), no Base64. No usar desencriptar() con estos valores.
+// Para descifrar el Clave de SISUsuarios. Recibe el valor ya como Buffer (ver FIX 05/09/2026
+// mas abajo) o, por compatibilidad, como el string "crudo" que entregaba el driver para una
+// columna VARCHAR.
 // FIX 31/08/2026: iconv-lite ('win1252') en vez de Buffer.from(..., 'latin1') en los dos
-// extremos -- ver nota arriba, evita corromper bytes 0x80-0x9F del cifrado (entrada) o de la
-// contraseña reconstruida (salida).
-function desencriptarDesdeBD(textoCrudo) {
-  if (!textoCrudo) return '';
+// extremos -- evita corromper bytes 0x80-0x9F del cifrado (entrada) o de la contraseña
+// reconstruida (salida), que es lo que hace Encoding.Default (CP1252) en .NET.
+// FIX 05/09/2026 (bug real -- "bad decrypt" con J.GAMBOAF/J.MANTILLAD/A.ROJASR, aunque el
+// Clave guardado en la BD es correcto): windows-1252 tiene 5 bytes SIN DEFINIR (0x81, 0x8D,
+// 0x8F, 0x90, 0x9D). El estandar WHATWG que implementa iconv-lite (y que tedious usa para
+// decodificar columnas VARCHAR) mapea los 5 a U+FFFD (caracter de reemplazo) -- una vez ahi,
+// el byte original se PIERDE, y volver a codificar a 'win1252' no lo puede recuperar (los 5
+// dan 0x9D de vuelta, sin importar cual era el original). Esto rompe justo esos ~2% de claves
+// cuyo cifrado (bytes practicamente aleatorios) contiene alguno de esos 5 bytes -- confirmado
+// con los 3 usuarios de arriba, cada uno con un byte distinto de esos 5 en su Clave.
+// .NET/Windows en cambio SI puede leer esos 5 bytes sin perdida (CP1252 real de Windows los
+// trata como pass-through), por eso desde el escritorio de Mirane siempre funcionaron.
+// Solucion real: no pasar el cifrado por NINGUN decode de texto -- pedirlo como VARBINARY en
+// el SELECT (ver auth.js) para que tedious lo entregue como Buffer crudo, sin perdida posible.
+// Se deja el iconv-lite como fallback SOLO por si algun llamador viejo todavia pasa un string.
+function desencriptarDesdeBD(claveCruda) {
+  if (!claveCruda || (typeof claveCruda === 'string' && claveCruda.length === 0)) return '';
+  const datos = Buffer.isBuffer(claveCruda) ? claveCruda : iconv.encode(claveCruda, 'win1252');
   const decipher = crypto.createDecipheriv('des-ede-cbc', KEY, IV);
-  const datos = iconv.encode(textoCrudo, 'win1252');
   const claro = Buffer.concat([decipher.update(datos), decipher.final()]);
   return iconv.decode(claro, 'win1252');
 }

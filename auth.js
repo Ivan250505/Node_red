@@ -7,10 +7,14 @@ const { desencriptarDesdeBD } = require('./crypto-mirane');
 // Codigo (login) y del CodigoOperarioPRD (PRDOperarios, para Selladora -- ver
 // agregar_codigooperarioprd_sisusuarios.sql).
 async function validarLogin(pool, codigo, passwordEscrito) {
+  // FIX 05/09/2026: se pide Clave como VARBINARY (ClaveBin), no como VARCHAR -- asi tedious
+  // entrega el cifrado como Buffer crudo, sin pasarlo por ningun decode de texto que pueda
+  // perder bytes (ver nota larga en crypto-mirane.js:desencriptarDesdeBD). Se deja Clave
+  // tambien en el SELECT solo por si algo mas de este archivo llega a necesitarlo como texto.
   const result = await pool.request()
     .input('codigo', codigo)
     .query(`
-      SELECT Codigo, Clave, Nombre, Estado, Tercero, CodigoOperarioPRD
+      SELECT Codigo, Clave, CAST(Clave AS VARBINARY(50)) AS ClaveBin, Nombre, Estado, Tercero, CodigoOperarioPRD
       FROM SISUsuarios
       WHERE Codigo = @codigo
     `);
@@ -20,7 +24,7 @@ async function validarLogin(pool, codigo, passwordEscrito) {
 
   if (usuario.Estado !== 'Activo') return null;
 
-  const passwordReal = desencriptarDesdeBD(usuario.Clave);
+  const passwordReal = desencriptarDesdeBD(usuario.ClaveBin);
   if (passwordReal !== passwordEscrito) return null;
 
   return {
