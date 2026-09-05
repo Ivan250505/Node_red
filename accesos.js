@@ -1,27 +1,7 @@
-// Bitacora de entrada/salida en SISAccesos. El QR (via SISUsuarios.CodigoQR) es una
-// forma alterna de identificarse en /marcar, que ahora es login igual que /login --
-// ambos caminos registran 'Entrada' al entrar, y /logout registra 'Salida' al salir.
-
-async function buscarUsuarioPorQR(pool, codigoQR) {
-  const result = await pool.request()
-    .input('codigoQR', codigoQR)
-    .query(`
-      SELECT Codigo, Nombre, Estado, Tercero, CodigoOperarioPRD
-      FROM SISUsuarios
-      WHERE CodigoQR = @codigoQR
-    `);
-
-  if (result.recordset.length === 0) return null;
-  const usuario = result.recordset[0];
-  if (usuario.Estado !== 'Activo') return null;
-
-  return {
-    codigo: usuario.Codigo,
-    nombre: usuario.Nombre || usuario.Codigo,
-    generadoPor: usuario.Tercero,
-    codigoOperarioPRD: usuario.CodigoOperarioPRD || null
-  };
-}
+// Bitacora de entrada/salida en SISAccesos. Se registra 'Entrada' al iniciar sesion en /login
+// y 'Salida' en /logout. El ingreso por QR con la camara se elimino el 04/09/2026 a pedido del
+// usuario -- el unico inicio de sesion es usuario/contrasena, por eso ya no existe
+// buscarUsuarioPorQR() ni la pantalla /marcar.
 
 async function registrarEvento(pool, codigo, tipoEvento, origen) {
   const insertado = await pool.request()
@@ -37,4 +17,4 @@ async function registrarEvento(pool, codigo, tipoEvento, origen) {
   return insertado.recordset[0].FechaHora;
 }
 
-module.exports = { buscarUsuarioPorQR, registrarEvento };
+module.exports = { registrarEvento };

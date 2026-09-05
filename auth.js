@@ -33,7 +33,7 @@ async function validarLogin(pool, codigo, passwordEscrito) {
 
 function requireLogin(req, res, next) {
   if (req.session && req.session.usuario) return next();
-  res.redirect('/marcar');
+  res.redirect('/login');
 }
 
 // No hay un sistema de roles en SISUsuarios (no existe una columna tipo "EsAdmin") -- el unico

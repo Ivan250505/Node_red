@@ -7,7 +7,7 @@ const session = require('express-session');
 const sql = require('mssql');
 const { desencriptar } = require('./crypto-mirane');
 const { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO } = require('./auth');
-const { buscarUsuarioPorQR, registrarEvento } = require('./accesos');
+const { registrarEvento } = require('./accesos');
 const { consultarSerial, confirmarRollo } = require('./scan-rollo');
 const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
 const { obtenerLineaOriginalControlSellado } = require('./sel-inventario-mp');
@@ -172,10 +172,33 @@ function renderLogin(error) {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
       background: linear-gradient(135deg, #00a2cb, #006984);
+      position: relative; overflow: hidden;
+    }
+    /* Misma trama de puntos del encabezado (ver estilosBase): el fondo del login es el mismo
+    degradado azul, asi que lleva la misma textura en el mismo sentido (135deg). */
+    body::before, body::after {
+      content: ""; position: fixed; inset: 0; pointer-events: none;
+      background-size: 11px 11px;
+      background-position: 0 0, 5.5px 5.5px;
+    }
+    body::before {
+      background-image:
+        radial-gradient(circle at center, rgba(255,255,255,0.16) 0.7px, transparent 1.2px),
+        radial-gradient(circle at center, rgba(255,255,255,0.16) 0.7px, transparent 1.2px);
+      -webkit-mask-image: linear-gradient(135deg, #000 0%, transparent 65%);
+              mask-image: linear-gradient(135deg, #000 0%, transparent 65%);
+    }
+    body::after {
+      background-image:
+        radial-gradient(circle at center, rgba(255,255,255,0.24) 1.7px, transparent 2.2px),
+        radial-gradient(circle at center, rgba(255,255,255,0.24) 1.7px, transparent 2.2px);
+      -webkit-mask-image: linear-gradient(135deg, transparent 35%, #000 100%);
+              mask-image: linear-gradient(135deg, transparent 35%, #000 100%);
     }
     .caja {
       background: white; border-radius: 16px; padding: 32px 28px; width: 100%; max-width: 340px;
       box-shadow: 0 8px 30px rgba(0,0,0,0.25);
+      position: relative; z-index: 1;
     }
     .logo-login { height: 40px; display: block; margin: 0 auto 14px; }
     .caja .sub { text-align: center; color: #64748b; font-size: 13px; margin-bottom: 24px; }
@@ -193,8 +216,6 @@ function renderLogin(error) {
       background: #fdeceb; color: #b00; border: 1px solid #f3b8b3;
       padding: 10px 12px; border-radius: 8px; margin-bottom: 16px; font-size: 13px;
     }
-    .ingresar-qr { text-align: center; margin-top: 16px; }
-    .ingresar-qr a { color: #64748b; font-size: 13px; text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -208,112 +229,9 @@ function renderLogin(error) {
       <input type="password" name="password" autocomplete="current-password" required>
       <button type="submit">Ingresar</button>
     </form>
-    <div class="ingresar-qr"><a href="/marcar">Ingresar escaneando tu código QR</a></div>
   </div>
   <script src="/sweetalert2.min.js"></script>
   ${error ? `<script>Swal.fire({ icon: 'error', title: 'No se pudo ingresar', text: ${jsString(error)}, confirmButtonColor: '#71bf44' });</script>` : ''}
-</body>
-</html>`;
-}
-
-// Pantalla publica de marcacion por QR: no pasa por requireLogin porque es justamente
-// para que el operario no tenga que escribir usuario/contrasena en la tablet de planta.
-function renderMarcar() {
-  return `<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Marcar — Carlixplast</title>
-  <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center;
-      background: linear-gradient(135deg, #00a2cb, #006984); color: white; padding: 20px 16px;
-      box-sizing: border-box;
-    }
-    .logo-wrap {
-      background: white; padding: 10px 22px; border-radius: 12px; margin-bottom: 18px;
-    }
-    .logo { height: 40px; display: block; }
-    h1 { font-size: 18px; margin: 0 0 16px; text-align: center; }
-    #lector {
-      width: 100%; max-width: 380px; border-radius: 16px; overflow: hidden;
-      box-shadow: 0 8px 30px rgba(0,0,0,0.25); background: black;
-    }
-    .ingresar-manual {
-      margin-top: 22px; text-align: center;
-    }
-    .ingresar-manual a {
-      color: white; opacity: 0.9; font-size: 13px; text-decoration: underline;
-    }
-  </style>
-</head>
-<body>
-  <div class="logo-wrap"><img class="logo" src="/logo-carlixplast.png" alt="Carlixplast"></div>
-  <h1>Escanea tu código para ingresar</h1>
-  <div id="lector"></div>
-  <div class="ingresar-manual"><a href="/login">Ingresar por usuario y contraseña</a></div>
-
-  <script src="/html5-qrcode.min.js"></script>
-  <script src="/sweetalert2.min.js"></script>
-  <script>
-    let procesando = false;
-
-    function continuar() { procesando = false; }
-
-    function mostrarError(mensaje) {
-      Swal.fire({
-        icon: 'error', title: 'No se pudo ingresar', text: mensaje,
-        confirmButtonText: 'Reintentar', confirmButtonColor: '#71bf44'
-      }).then(() => continuar());
-    }
-
-    function mostrarExitoYRedirigir(nombre, redirect) {
-      Swal.fire({
-        icon: 'success', title: 'Bienvenido, ' + nombre,
-        timer: 900, showConfirmButton: false
-      }).then(() => { window.location.href = redirect || '/'; });
-    }
-
-    async function onScan(textoLeido) {
-      if (procesando) return;
-      procesando = true;
-      try {
-        const resp = await fetch('/marcar/registrar', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ codigoQR: textoLeido })
-        });
-        const datos = await resp.json();
-        if (datos.ok) {
-          mostrarExitoYRedirigir(datos.nombre, datos.redirect);
-        } else {
-          mostrarError(datos.error);
-        }
-      } catch (err) {
-        mostrarError('Error de conexión: ' + err.message);
-      }
-    }
-
-    const lector = new Html5Qrcode('lector');
-    Html5Qrcode.getCameras().then(camaras => {
-      if (!camaras || camaras.length === 0) {
-        mostrarError('No se encontró ninguna cámara en este dispositivo.');
-        return;
-      }
-      // Prefiere la camara trasera (environment) si el navegador la distingue.
-      const trasera = camaras.find(c => /back|trasera|rear|environment/i.test(c.label));
-      const camaraId = trasera ? trasera.id : camaras[0].id;
-      lector.start(
-        camaraId,
-        { fps: 10, qrbox: 250 },
-        onScan
-      );
-    }).catch(err => {
-      mostrarError('No se pudo acceder a la cámara: ' + err);
-    });
-  </script>
 </body>
 </html>`;
 }
@@ -344,14 +262,75 @@ function estilosBase() {
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       margin: 0;
-      background: var(--verde-fondo-suave);
+      /* El verde plano se cambio por un degradado en 135deg -- el mismo sentido del encabezado --
+      para que el cuerpo no se vea de un solo color (a pedido del usuario, 04/09/2026). */
+      background: linear-gradient(135deg, #d9efcc 0%, var(--verde-fondo-suave) 55%, #b6dfa3 100%);
+      background-attachment: fixed;
       color: var(--texto);
+      position: relative;
+    }
+    /* La misma trama de puntos del encabezado, ahora en verde sobre el fondo del cuerpo: dos
+    rejillas al tresbolillo de 11px recortadas con mask-image en 135deg (::before puntos finos que
+    se apagan, ::after puntos mayores que aparecen). Van en position: fixed para que la textura no
+    se corte ni se mueva al hacer scroll, y con z-index 0 -- header y main se elevan a z-index 1
+    para quedar por encima. Misma construccion que header::before/::after, ver el comentario de
+    header. */
+    body::before, body::after {
+      content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+      background-size: 11px 11px;
+      background-position: 0 0, 5.5px 5.5px;
+    }
+    body::before {
+      background-image:
+        radial-gradient(circle at center, rgba(74,156,46,0.10) 0.7px, transparent 1.2px),
+        radial-gradient(circle at center, rgba(74,156,46,0.10) 0.7px, transparent 1.2px);
+      -webkit-mask-image: linear-gradient(135deg, #000 0%, transparent 65%);
+              mask-image: linear-gradient(135deg, #000 0%, transparent 65%);
+    }
+    body::after {
+      background-image:
+        radial-gradient(circle at center, rgba(74,156,46,0.16) 1.7px, transparent 2.2px),
+        radial-gradient(circle at center, rgba(74,156,46,0.16) 1.7px, transparent 2.2px);
+      -webkit-mask-image: linear-gradient(135deg, transparent 35%, #000 100%);
+              mask-image: linear-gradient(135deg, transparent 35%, #000 100%);
     }
     header {
       background: linear-gradient(135deg, var(--azul), var(--azul-osc));
       color: white;
       padding: 18px 20px 22px;
+      position: relative;
+      z-index: 1;
+      overflow: hidden;
     }
+    /* Trama de puntos (halftone) DENTRO del encabezado, para que no se vea tan plano: dos rejillas
+    al tresbolillo -- ::before son puntos finos que se apagan, ::after son puntos algo mayores que
+    aparecen -- recortadas cada una con mask-image en 135deg, el MISMO sentido del degradado azul
+    del header. Va aca en estilosBase() y no en una pagina suelta para que salga igual en todas las
+    pestanas (a pedido del usuario, 04/09/2026). Se hace con mask y no con una capa por fila de
+    puntos porque asi la diagonal es real y se adapta sola al ancho de cualquier tableta (las
+    paradas del mask van en %). header > * queda position: relative para que el contenido pinte por
+    encima de las dos capas. Diseno acordado (opcion B):
+    https://claude.ai/code/artifact/9bf9ae83-f817-4830-bc10-9afca04e83d2 */
+    header::before, header::after {
+      content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 0;
+      background-size: 11px 11px;
+      background-position: 0 0, 5.5px 5.5px;
+    }
+    header::before {
+      background-image:
+        radial-gradient(circle at center, rgba(255,255,255,0.16) 0.7px, transparent 1.2px),
+        radial-gradient(circle at center, rgba(255,255,255,0.16) 0.7px, transparent 1.2px);
+      -webkit-mask-image: linear-gradient(135deg, #000 0%, transparent 65%);
+              mask-image: linear-gradient(135deg, #000 0%, transparent 65%);
+    }
+    header::after {
+      background-image:
+        radial-gradient(circle at center, rgba(255,255,255,0.24) 1.7px, transparent 2.2px),
+        radial-gradient(circle at center, rgba(255,255,255,0.24) 1.7px, transparent 2.2px);
+      -webkit-mask-image: linear-gradient(135deg, transparent 35%, #000 100%);
+              mask-image: linear-gradient(135deg, transparent 35%, #000 100%);
+    }
+    header > * { position: relative; z-index: 1; }
     header h1 { margin: 0 0 4px; font-size: 20px; }
     header .sub { font-size: 13px; opacity: 0.85; }
     header a.volver {
@@ -394,7 +373,7 @@ function estilosBase() {
     .avance-header-barra { height: 8px; border-radius: 999px; background: #eef0f2; overflow: hidden; margin-bottom: 6px; }
     .avance-header-relleno { height: 100%; border-radius: 999px; }
     .avance-header-stats { display: flex; justify-content: space-between; font-size: 12px; color: var(--texto-suave); font-weight: 600; }
-    main { max-width: 960px; margin: 0 auto; padding: 16px 14px 30px; }
+    main { max-width: 960px; margin: 0 auto; padding: 16px 14px 30px; position: relative; z-index: 1; }
     .barra {
       display: flex;
       flex-wrap: wrap;
@@ -715,10 +694,10 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
           <button type="submit" class="btn-accion" style="background:#b46200;">${textoBoton}</button>
         </form>`;
     } else if (o.Estado === 'Pendiente') {
-      acciones += `<a class="btn-accion btn-iniciar" href="/selladora/${maquinaCodigo}/orden/${o.IdOrden}/escanear?nuevo=0">▶ Iniciar</a>`;
+      acciones += `<button type="button" class="btn-accion btn-iniciar" onclick="abrirEscaneoRollo(${o.IdOrden}, false)">▶ Iniciar</button>`;
     } else if (o.Estado === 'Activa') {
       acciones += `
-        <a class="btn-accion btn-anadir" href="/selladora/${maquinaCodigo}/orden/${o.IdOrden}/escanear?nuevo=1">+ Rollo</a>
+        <button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${o.IdOrden}, true)">+ Rollo</button>
         <form method="post" action="/api/selladora/orden/${o.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
           <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
         </form>`;
@@ -1443,16 +1422,159 @@ function scriptConfirmarFinalizar() {
   `;
 }
 
-// Antes de entrar a producir -- al Iniciar una orden con su primer rollo (renderEscanear, nuevo=0
-// unicamente, NO aplica a +Rollo) o al Retomar/Reanudar una ejecucion tras un cambio de operario
+// Escaneo del rollo como ventana emergente (SweetAlert) sobre la misma pagina, en vez de la
+// pantalla /escanear aparte que existio hasta el 04/09/2026: al quitarle la camara esa pantalla
+// quedaba con un solo campo de texto, y a pedido del usuario se paso a modal para no navegar ni
+// perder de vista la orden. Son dos pasos encadenados -- pedirSerialRollo() (la pistola escribe
+// el serial y manda Enter, que confirma solo) y confirmarRolloModal() (vista previa del rollo y,
+// al Iniciar, el campo Bolsas x golpe). Reusa TAL CUAL los endpoints que usaba la pantalla:
+// /rollo/preparar (valida y trae las bolsas x golpe actuales), /rollo/consultar y /rollo. La
+// pagina que lo cargue debe traer tambien scriptPreguntaActividadInicial(): al Iniciar se
+// pregunta por la actividad antes de entrar a Informacion, igual que antes.
+function scriptEscanearRollo(maquinaCodigo) {
+  return `
+    var MAQUINA_ESCANEO = ${JSON.stringify(maquinaCodigo)};
+
+    function errorRollo(mensaje) {
+      Swal.fire({ icon: 'error', title: 'No se pudo continuar', text: mensaje, confirmButtonColor: '#71bf44' });
+    }
+
+    function filaRollo(etiqueta, valor) {
+      return '<div style="display:flex;justify-content:space-between;gap:12px;font-size:14px;margin-bottom:6px;">' +
+             '<span style="color:#64748b;">' + etiqueta + '</span><strong>' + valor + '</strong></div>';
+    }
+
+    function abrirEscaneoRollo(idOrden, esNuevoRollo) {
+      var titulo = esNuevoRollo ? 'Añadir rollo' : 'Iniciar ejecución';
+      fetch('/api/selladora/orden/' + idOrden + '/rollo/preparar?nuevo=' + (esNuevoRollo ? '1' : '0'))
+        .then(function(r) { return r.json(); })
+        .then(function(datos) {
+          if (!datos.ok) { errorRollo(datos.error); return; }
+          pedirSerialRollo(idOrden, esNuevoRollo, titulo, datos.bolsasActual || 0);
+        })
+        .catch(function(err) { errorRollo('Error de conexión: ' + err.message); });
+    }
+
+    function pedirSerialRollo(idOrden, esNuevoRollo, titulo, bolsasActual) {
+      Swal.fire({
+        title: titulo,
+        html: '<div style="text-align:left;font-size:13px;color:#64748b;margin-bottom:10px;">' +
+              'Escanee la etiqueta del rollo con la pistola (código de 19 dígitos) o escríbalo.</div>' +
+              '<input id="rollo-serial" class="swal2-input" style="margin:0;width:100%;" inputmode="numeric" placeholder="Serial del rollo">',
+        showCancelButton: true,
+        cancelButtonText: 'Cancelar',
+        confirmButtonText: 'Buscar',
+        confirmButtonColor: '#71bf44',
+        showLoaderOnConfirm: true,
+        allowOutsideClick: function() { return !Swal.isLoading(); },
+        didOpen: function() {
+          var campo = document.getElementById('rollo-serial');
+          campo.focus();
+          // La pistola escribe el serial como si fuera un teclado y manda Enter al terminar: con
+          // eso se busca solo, sin que el operario tenga que tocar "Buscar" (mismo comportamiento
+          // que tenia el input de la pantalla /escanear).
+          campo.addEventListener('keydown', function(evento) {
+            if (evento.key === 'Enter') { evento.preventDefault(); Swal.clickConfirm(); }
+          });
+        },
+        preConfirm: function() {
+          var serial = (document.getElementById('rollo-serial').value || '').trim();
+          if (!serial) { Swal.showValidationMessage('Escanee o escriba el serial del rollo.'); return false; }
+          return fetch('/api/selladora/orden/' + idOrden + '/rollo/consultar', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ serial: serial, esNuevoRollo: esNuevoRollo })
+          }).then(function(r) { return r.json(); }).then(function(datos) {
+            if (!datos.ok) { Swal.showValidationMessage(datos.error); return false; }
+            return datos;
+          }).catch(function(err) {
+            Swal.showValidationMessage('Error de conexión: ' + err.message);
+            return false;
+          });
+        }
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) {
+          confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, resultado.value);
+        }
+      });
+    }
+
+    function confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, rollo) {
+      var detalle =
+        filaRollo('Serial', rollo.serial) +
+        filaRollo('Peso (Kg)', rollo.cantidad) +
+        filaRollo('Lote', rollo.lote || '—') +
+        filaRollo('Bodega', rollo.bodegaNombre) +
+        filaRollo('Referencia', rollo.referencia);
+      // Al +Rollo las bolsas x golpe ya vienen de la ejecucion en curso (solo se muestran); al
+      // Iniciar las escribe el operario -- el servidor vuelve a decidir cual usar, esto es la UI.
+      var campoBolsas = esNuevoRollo
+        ? filaRollo('Bolsas x golpe', bolsasActual || '—')
+        : '<label for="rollo-bolsas" style="display:block;text-align:left;font-size:13px;font-weight:600;margin:12px 0 6px;">Bolsas x golpe</label>' +
+          '<input id="rollo-bolsas" class="swal2-input" style="margin:0;width:100%;" type="number" min="1" inputmode="numeric">';
+      Swal.fire({
+        title: titulo,
+        html: '<div style="text-align:left;">' + detalle + campoBolsas + '</div>',
+        showCancelButton: true,
+        cancelButtonText: 'Cancelar',
+        confirmButtonText: esNuevoRollo ? 'Añadir rollo' : 'Iniciar',
+        confirmButtonColor: '#71bf44',
+        showLoaderOnConfirm: true,
+        allowOutsideClick: function() { return !Swal.isLoading(); },
+        didOpen: function() {
+          var campo = document.getElementById('rollo-bolsas');
+          if (campo) campo.focus();
+        },
+        preConfirm: function() {
+          var bolsas = bolsasActual;
+          if (!esNuevoRollo) {
+            bolsas = parseInt(document.getElementById('rollo-bolsas').value, 10);
+            if (!bolsas || bolsas <= 0) { Swal.showValidationMessage('Ingrese un número de bolsas x golpe válido.'); return false; }
+          }
+          return fetch('/api/selladora/orden/' + idOrden + '/rollo', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ serial: rollo.serial, esNuevoRollo: esNuevoRollo, bolsasXGolpe: bolsas })
+          }).then(function(r) { return r.json(); }).then(function(datos) {
+            if (!datos.ok) { Swal.showValidationMessage(datos.error); return false; }
+            return datos;
+          }).catch(function(err) {
+            Swal.showValidationMessage('Error de conexión: ' + err.message);
+            return false;
+          });
+        }
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        Swal.fire({
+          icon: 'success',
+          title: esNuevoRollo ? 'Rollo añadido' : 'Ejecución iniciada',
+          timer: 1000, showConfirmButton: false
+        }).then(function() {
+          if (esNuevoRollo) {
+            // Se recarga la misma pagina en la que estaba (cola de la maquina o Informacion) --
+            // antes la pantalla /escanear devolvia siempre a la cola de la maquina.
+            window.location.reload();
+          } else {
+            // Al Iniciar, termine con actividad o directo a produccion, se entra a Informacion de
+            // la orden (a pedido del usuario, 31/08/2026) -- ver scriptPreguntaActividadInicial().
+            preguntarActividadInicial(idOrden, function() {
+              window.location.href = '/selladora/' + encodeURIComponent(MAQUINA_ESCANEO) + '/orden/' + idOrden;
+            });
+          }
+        });
+      });
+    }
+  `;
+}
+
+// Antes de entrar a producir -- al Iniciar una orden con su primer rollo (scriptEscanearRollo,
+// esNuevoRollo=false unicamente, NO aplica a +Rollo) o al Retomar/Reanudar una ejecucion tras un cambio de operario
 // (confirmarTomarControlEjecucion arriba) -- se pregunta si hay alguna actividad de las que se
 // registran como pausa (Alistamiento, Mantenimiento, etc.) por hacer primero, o si se entra directo
 // a producir (a pedido del usuario, 31/08/2026). Si elige una actividad, queda registrada igual que
 // si hubiera usado el boton "Pausa" normal (mismo POST /pausar) -- la ejecucion arranca/vuelve en
 // 'En pausa' desde ese momento, en vez de tener que pausarla a mano despues de haber entrado.
 // Comparte los mismos motivos/submotivos que abrirPausa() en scriptComandos(), pero se duplican aca
-// (MOTIVOS_PAUSA_INICIAL) porque esta funcion se usa en paginas (renderEscanear, renderPage) que no
-// cargan scriptComandos.
+// (MOTIVOS_PAUSA_INICIAL) porque esta funcion se usa en paginas (renderPage) que no cargan
+// scriptComandos.
 function scriptPreguntaActividadInicial() {
   return `
     var MOTIVOS_PAUSA_INICIAL = [
@@ -1592,6 +1714,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
+  <script>${scriptEscanearRollo(maquinaCodigo)}</script>
   <script>${scriptActualizarCola(maquinaCodigo)}</script>
   ${idOrdenPreguntarActividad ? `<script>
     // Termine con actividad o directo a produccion, se entra a Informacion de la orden retomada --
@@ -1712,10 +1835,10 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   let acciones = '';
   const activa = orden.Estado === 'Activa';
   if (orden.Estado === 'Pendiente') {
-    acciones = `<a class="btn-accion btn-iniciar" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/escanear?nuevo=0">▶ Iniciar</a>`;
+    acciones = `<button type="button" class="btn-accion btn-iniciar" onclick="abrirEscaneoRollo(${orden.IdOrden}, false)">▶ Iniciar</button>`;
   } else if (activa) {
     acciones = `
-      <a class="btn-accion btn-anadir" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/escanear?nuevo=1">+ Rollo</a>
+      <button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${orden.IdOrden}, true)">+ Rollo</button>
       <form method="post" action="/api/selladora/orden/${orden.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
         <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
       </form>
@@ -1891,6 +2014,8 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     <div class="ejecucion-box">${filasHistorial}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptPreguntaActividadInicial()}</script>
+  <script>${scriptEscanearRollo(maquinaCodigo)}</script>
   <script>${scriptConfirmarFinalizar()}</script>
   ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo, calidadFlags, pausaActiva, proximaCalidad)}</script><script>${scriptPesoEnVivo()}</script><script>${scriptResumenBultoActivo(orden.IdOrden, maquinaCodigo)}</script>` : ''}
   ${avanceCard ? `<script>${scriptAvanceProduccion(orden.IdOrden, maquinaCodigo)}</script>` : ''}
@@ -2202,31 +2327,7 @@ app.get('/logout', async (req, res) => {
   } catch (err) {
     console.error('Error registrando Salida:', err.message);
   }
-  req.session.destroy(() => res.redirect('/marcar'));
-});
-
-// /marcar es ahora la pantalla de login principal (QR), con enlace de respaldo al login
-// clasico de usuario/contrasena (/login). Cualquiera de los dos caminos crea sesion,
-// registra 'Entrada' en SISAccesos y entra al dashboard (/); /logout registra 'Salida'.
-app.get('/marcar', (req, res) => {
-  if (req.session && req.session.usuario) return res.redirect('/');
-  res.send(renderMarcar());
-});
-
-app.post('/marcar/registrar', async (req, res) => {
-  const { codigoQR } = req.body;
-  if (!codigoQR) return res.json({ ok: false, error: 'Código vacío.' });
-  try {
-    const p = await getPool();
-    const usuario = await buscarUsuarioPorQR(p, codigoQR);
-    if (!usuario) return res.json({ ok: false, error: 'Código no reconocido o usuario inactivo.' });
-
-    req.session.usuario = usuario;
-    await registrarEvento(p, usuario.codigo, 'Entrada', 'QR');
-    res.json({ ok: true, nombre: usuario.nombre, redirect: '/' });
-  } catch (err) {
-    res.json({ ok: false, error: err.message });
-  }
+  req.session.destroy(() => res.redirect('/login'));
 });
 
 // Selladoras con una orden accionable en este momento (Activa, Pendiente de iniciar, o
@@ -2794,169 +2895,6 @@ app.post('/api/selladora/orden/:idOrden/tomar-control-ejecucion', requireLogin, 
   }
 });
 
-// Pantalla de escaneo (Iniciar cuando nuevo=0, Añadir Rollo cuando nuevo=1) -- mismo lector
-// Html5Qrcode que ya usa renderMarcar() para el QR de acceso, aca configurado para el codigo de
-// barras de 19 digitos (Code128C) que trae la etiqueta impresa del rollo.
-function renderEscanear(maquinaCodigo, maquinaNombre, idOrden, nuevo, bolsasActual) {
-  const tituloAccion = nuevo ? 'Añadir Rollo' : 'Iniciar Ejecución';
-  return `<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${tituloAccion} — ${maquinaNombre}</title>
-  <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      margin: 0; min-height: 100vh; background: #f4f6f8; color: #1c2733; padding: 16px;
-      box-sizing: border-box;
-    }
-    h1 { font-size: 18px; margin: 0 0 4px; }
-    .sub { font-size: 13px; color: #64748b; margin-bottom: 16px; }
-    #lector { width: 100%; max-width: 380px; border-radius: 16px; overflow: hidden; background: black; margin: 0 auto; }
-    #manual { max-width: 380px; margin: 14px auto 0; display: flex; gap: 8px; }
-    #manual input { flex: 1; padding: 10px 12px; border: 1px solid #d0d7de; border-radius: 10px; font-size: 16px; box-sizing: border-box; }
-    #manual button { padding: 10px 14px; border: none; border-radius: 10px; background: #0078d7; color: white; font-weight: 600; }
-    #resultado { max-width: 380px; margin: 16px auto 0; padding: 16px; border-radius: 14px; background: white; box-shadow: 0 1px 4px rgba(0,0,0,0.08); display: none; }
-    #resultado .fila { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 6px; }
-    #resultado label { display: block; font-size: 13px; font-weight: 600; margin: 10px 0 6px; }
-    #resultado input { width: 100%; padding: 10px 12px; border: 1px solid #d0d7de; border-radius: 10px; font-size: 16px; box-sizing: border-box; }
-    #resultado button { margin-top: 12px; width: 100%; padding: 12px; border: none; border-radius: 10px; font-size: 15px; font-weight: 600; background: #0078d7; color: white; cursor: pointer; }
-    .volver {
-      display: block; max-width: 380px; margin: 16px auto 0; padding: 12px; color: #64748b;
-      font-size: 18px; font-weight: 600; text-decoration: none; text-align: center;
-      border: 1px solid #d0d7de; border-radius: 10px; box-sizing: border-box;
-    }
-  </style>
-</head>
-<body>
-  <h1>${tituloAccion}</h1>
-  <div class="sub">${maquinaNombre} — escanee la etiqueta del rollo (código de 19 dígitos)</div>
-  <div id="lector"></div>
-  <div id="manual">
-    <input type="text" id="txtManual" placeholder="O escriba el código manualmente" inputmode="numeric" autofocus>
-    <button type="button" onclick="consultar(document.getElementById('txtManual').value)">Buscar</button>
-  </div>
-  <div id="resultado"></div>
-  <a class="volver" href="${nuevo ? `/selladora/${maquinaCodigo}/orden/${idOrden}` : `/selladora/${maquinaCodigo}`}">‹ Volver</a>
-
-  <script src="/html5-qrcode.min.js"></script>
-  <script src="/sweetalert2.min.js"></script>
-  <script>${scriptPreguntaActividadInicial()}</script>
-  <script>
-    // Cursor listo para escribir el codigo apenas se entra a esta pantalla, en cualquier
-    // dispositivo (a pedido del usuario, 01/09/2026) -- el atributo autofocus del input no siempre
-    // alcanza (algunos navegadores/WebView de tablet lo ignoran), asi que se refuerza con .focus()
-    // al cargar.
-    const inputManual = document.getElementById('txtManual');
-    inputManual.focus();
-    // Las pistolas lectoras de codigo de barras escriben el serial como si fuera un teclado y
-    // mandan un Enter al terminar -- se busca solo apenas se detecta ese Enter, sin que el
-    // operario tenga que tocar "Buscar" (a pedido del usuario, 04/09/2026). Funciona igual si
-    // alguien lo escribe a mano y presiona Enter.
-    inputManual.addEventListener('keydown', function(evento) {
-      if (evento.key === 'Enter') {
-        evento.preventDefault();
-        consultar(inputManual.value);
-      }
-    });
-
-    const idOrden = ${JSON.stringify(idOrden)};
-    const esNuevoRollo = ${nuevo ? 'true' : 'false'};
-    const bolsasActual = ${Number(bolsasActual) || 0};
-    // Al Iniciar (no al +Rollo), termine con actividad o directo a produccion, se entra a
-    // Informacion de la orden -- no a la cola de la maquina (a pedido del usuario, 31/08/2026).
-    const destinoTrasIniciar = ${JSON.stringify(`/selladora/${maquinaCodigo}/orden/${idOrden}`)};
-    const divResultado = document.getElementById('resultado');
-    let procesando = false;
-    let ultimaConsulta = null;
-
-    async function consultar(serial) {
-      serial = (serial || '').trim();
-      if (!serial || procesando) return;
-      procesando = true;
-      try {
-        const resp = await fetch('/api/selladora/orden/' + idOrden + '/rollo/consultar', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ serial, esNuevoRollo })
-        });
-        const datos = await resp.json();
-        if (!datos.ok) { mostrarError(datos.error); return; }
-        ultimaConsulta = datos;
-        mostrarPreview(datos);
-      } catch (err) {
-        mostrarError('Error de conexión: ' + err.message);
-      } finally {
-        procesando = false;
-      }
-    }
-
-    function mostrarError(mensaje) {
-      divResultado.style.display = 'none';
-      Swal.fire({ icon: 'error', title: 'No se pudo continuar', text: mensaje, confirmButtonColor: '#71bf44' });
-    }
-
-    function mostrarPreview(datos) {
-      divResultado.className = '';
-      const bolsasCampo = esNuevoRollo
-        ? '<div class="fila"><span>Bolsas x golpe</span><strong>' + (bolsasActual || '—') + '</strong></div>'
-        : '<label for="txtBolsas">Bolsas x golpe</label><input type="number" id="txtBolsas" min="1" inputmode="numeric">';
-      divResultado.innerHTML =
-        '<div class="fila"><span>Serial</span><strong>' + datos.serial + '</strong></div>' +
-        '<div class="fila"><span>Peso (Kg)</span><strong>' + datos.cantidad + '</strong></div>' +
-        '<div class="fila"><span>Lote</span><strong>' + (datos.lote || '—') + '</strong></div>' +
-        '<div class="fila"><span>Bodega</span><strong>' + datos.bodegaNombre + '</strong></div>' +
-        '<div class="fila"><span>Referencia</span><strong>' + datos.referencia + '</strong></div>' +
-        bolsasCampo +
-        '<button type="button" onclick="confirmar()">' + (esNuevoRollo ? 'Añadir Rollo' : 'Iniciar') + '</button>';
-      divResultado.style.display = 'block';
-    }
-
-    async function confirmar() {
-      if (!ultimaConsulta) return;
-      let bolsasXGolpe = bolsasActual;
-      if (!esNuevoRollo) {
-        const campo = document.getElementById('txtBolsas');
-        bolsasXGolpe = parseInt(campo.value, 10);
-        if (!bolsasXGolpe || bolsasXGolpe <= 0) {
-          Swal.fire({ icon: 'warning', title: 'Dato inválido', text: 'Ingrese un número de bolsas x golpe válido.', confirmButtonColor: '#71bf44' });
-          return;
-        }
-      }
-      try {
-        const resp = await fetch('/api/selladora/orden/' + idOrden + '/rollo', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ serial: ultimaConsulta.serial, esNuevoRollo, bolsasXGolpe })
-        });
-        const datos = await resp.json();
-        if (!datos.ok) { mostrarError(datos.error); return; }
-        Swal.fire({
-          icon: 'success', title: esNuevoRollo ? 'Rollo añadido' : 'Ejecución iniciada',
-          timer: 1000, showConfirmButton: false
-        }).then(() => {
-          // Al Iniciar (primer rollo, no al +Rollo de mitad de produccion) se pregunta si hay
-          // alguna actividad de las que se registran como pausa por hacer antes de producir (a
-          // pedido del usuario, 31/08/2026) -- ver scriptPreguntaActividadInicial().
-          if (esNuevoRollo) { window.location.href = datos.redirect; }
-          else { preguntarActividadInicial(idOrden, function() { window.location.href = destinoTrasIniciar; }); }
-        });
-      } catch (err) {
-        mostrarError('Error de conexión: ' + err.message);
-      }
-    }
-
-    const lector = new Html5Qrcode('lector', { formatsToSupport: [Html5QrcodeSupportedFormats.CODE_128] });
-    Html5Qrcode.getCameras().then(camaras => {
-      if (!camaras || camaras.length === 0) return;
-      const trasera = camaras.find(c => /back|trasera|rear|environment/i.test(c.label));
-      const camaraId = trasera ? trasera.id : camaras[0].id;
-      lector.start(camaraId, { fps: 10, qrbox: 250 }, function (texto) { consultar(texto); });
-    }).catch(() => {});
-  </script>
-</body>
-</html>`;
-}
-
 function renderErrorSimple(mensaje, volverA) {
   const destino = volverA || '/';
   return `<!DOCTYPE html>
@@ -2988,36 +2926,27 @@ async function obtenerCodigoMaquinaDeOrden(p, idOrden) {
   return r.recordset[0].Maquina;
 }
 
-app.get('/selladora/:codigo/orden/:idOrden/escanear', requireLogin, async (req, res) => {
-  const { codigo, idOrden } = req.params;
-  const nuevo = req.query.nuevo === '1';
+// Valida que la orden pueda Iniciar / recibir +Rollo ANTES de abrir la ventana emergente de
+// escaneo, y devuelve las bolsas x golpe en curso para mostrarlas en la vista previa. Reemplaza
+// a GET /selladora/:codigo/orden/:idOrden/escanear (la pantalla aparte, eliminada el 04/09/2026):
+// hace exactamente las mismas validaciones, solo que responde JSON en vez de una pagina. La
+// escritura la sigue haciendo POST .../rollo, que vuelve a validar por su cuenta.
+app.get('/api/selladora/orden/:idOrden/rollo/preparar', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  const esNuevoRollo = req.query.nuevo === '1';
   const usuario = req.session.usuario;
 
   if (!usuario.codigoOperarioPRD) {
-    return res.status(403).send(renderErrorSimple(
-      'Su usuario no tiene un operario de planta configurado (CodigoOperarioPRD). Pida a sistemas que lo configure antes de usar Iniciar/Añadir Rollo.',
-      `/selladora/${codigo}`
-    ));
+    return res.json({ ok: false, error: 'Su usuario no tiene un operario de planta configurado (CodigoOperarioPRD). Pida a sistemas que lo configure antes de usar Iniciar/Añadir Rollo.' });
   }
 
   try {
     const p = await getPool();
-    const maquina = await p.request().input('codigo', codigo).query(`SELECT Nombre FROM PRDMaquinas WHERE Codigo = @codigo`);
-    const nombreMaquina = maquina.recordset[0] ? maquina.recordset[0].Nombre : 'Selladora';
-
-    let bolsasActual = 0;
-    if (nuevo) {
-      const v = await validarPuedeAnadirRollo(p, idOrden);
-      if (!v.ok) return res.status(400).send(renderErrorSimple(v.error, `/selladora/${codigo}`));
-      bolsasActual = v.bolsasActual;
-    } else {
-      const v = await validarPuedeIniciar(p, idOrden);
-      if (!v.ok) return res.status(400).send(renderErrorSimple(v.error, `/selladora/${codigo}`));
-    }
-
-    res.send(renderEscanear(codigo, nombreMaquina, idOrden, nuevo, bolsasActual));
+    const v = esNuevoRollo ? await validarPuedeAnadirRollo(p, idOrden) : await validarPuedeIniciar(p, idOrden);
+    if (!v.ok) return res.json({ ok: false, error: v.error });
+    res.json({ ok: true, bolsasActual: v.bolsasActual || 0 });
   } catch (err) {
-    res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
+    res.json({ ok: false, error: err.message });
   }
 });
 
