@@ -655,6 +655,7 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
     ${contenido}
   </main>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptAvisoPedidoNuevo(null)}</script>
   ${error ? `<script>Swal.fire({ icon: 'error', title: 'Error', text: ${jsString(error)}, confirmButtonColor: '#71bf44' });</script>` : ''}
 </body>
 </html>`;
@@ -869,6 +870,136 @@ function scriptActualizarCola(maquinaCodigo) {
         } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
       }
       setInterval(actualizar, 4000);
+    })();
+  `;
+}
+
+// Aviso de "entro un pedido nuevo a la cola" (a pedido del usuario, 06/09/2026). Va en TODAS las
+// paginas con sesion -- Dashboard, Programacion maquina, Informacion, Bultos y Tablet fija -- para
+// que le llegue al operario este donde este, no solo en la pantalla de la cola.
+//
+// No es una notificacion push del sistema operativo: la WebView de Android no implementa la
+// Notification API, y el Push API de verdad ademas exigiria HTTPS y salida a FCM, que esta
+// instalacion no tiene (sirve por HTTP en la red local). Esto es un sondeo cada 10s contra
+// /api/cola/novedades comparando contra la ultima foto de la cola guardada en localStorage. Si mas
+// adelante la carcasa de Android Studio expone un @JavascriptInterface, el punto donde engancharlo
+// es mostrar(), junto al pitido y la vibracion.
+function scriptAvisoPedidoNuevo(maquinaCodigo) {
+  return `
+    (function() {
+      var MAQUINA = ${JSON.stringify(maquinaCodigo || '')};
+      // La foto de la cola se guarda por maquina: la tableta de la 05 no se entera de lo que le
+      // programen a la 07. Al ser localStorage la comparten todas las pestanas del mismo WebView,
+      // asi que navegar entre Informacion/Bultos/Programacion no reinicia el aviso ni lo repite.
+      var CLAVE = 'carlixplast.cola.vistas.' + (MAQUINA || 'todas');
+      var INTERVALO_MS = 10000;
+      var pendientes = [];
+      var audio = null;
+
+      function leerVistas() {
+        try { var v = JSON.parse(localStorage.getItem(CLAVE)); return Array.isArray(v) ? v : null; }
+        catch (e) { return null; }
+      }
+      function guardarVistas(ids) {
+        try { localStorage.setItem(CLAVE, JSON.stringify(ids)); } catch (e) {}
+      }
+      function escapar(texto) {
+        return String(texto == null ? '' : texto)
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      }
+
+      // Dos pitidos cortos generados con WebAudio -- no hace falta servir un archivo de sonido ni
+      // depender de internet. El navegador no deja sonar hasta que hubo un toque en la pagina, por
+      // eso se intenta reanudar el contexto en el primer toque y, si aun esta suspendido, se deja
+      // pasar en silencio: el modal y la vibracion igual avisan.
+      function contexto() {
+        var Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return null;
+        if (!audio) audio = new Ctx();
+        return audio;
+      }
+      function desbloquearAudio() {
+        var ctx = contexto();
+        if (ctx && ctx.state === 'suspended') { try { ctx.resume(); } catch (e) {} }
+        window.removeEventListener('pointerdown', desbloquearAudio);
+        window.removeEventListener('keydown', desbloquearAudio);
+      }
+      window.addEventListener('pointerdown', desbloquearAudio);
+      window.addEventListener('keydown', desbloquearAudio);
+
+      function pitar() {
+        try {
+          var ctx = contexto();
+          if (!ctx || ctx.state !== 'running') return;
+          [0, 0.26].forEach(function(retraso) {
+            var osc = ctx.createOscillator();
+            var vol = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.value = 880;
+            vol.gain.value = 0.22;
+            osc.connect(vol); vol.connect(ctx.destination);
+            osc.start(ctx.currentTime + retraso);
+            osc.stop(ctx.currentTime + retraso + 0.18);
+          });
+        } catch (e) {}
+      }
+
+      function mostrar() {
+        if (pendientes.length === 0) return;
+        if (typeof Swal === 'undefined') { setTimeout(mostrar, 2000); return; }
+        // Nunca pisar un modal abierto: el chequeo de Calidad, el motivo de pausa, el cronometro o
+        // el escaneo del rollo se perderian a media captura. Se reintenta hasta que la pantalla
+        // este libre (mismo criterio que intentarAbrirCalidad).
+        if (Swal.isVisible()) { setTimeout(mostrar, 5000); return; }
+
+        var lote = pendientes;
+        pendientes = [];
+        var titulo = lote.length === 1 ? 'Nuevo pedido en la cola' : lote.length + ' pedidos nuevos en la cola';
+        var filas = lote.map(function(o) {
+          var maquina = MAQUINA ? '' : ' <span style="color:#64748b;">· ' + escapar(o.maquinaNombre) + '</span>';
+          return '<div style="text-align:left;padding:8px 0;border-top:1px solid #eef0f2;">' +
+                 '<strong>Pedido ' + escapar(o.numeroPedido || '—') + '</strong>' + maquina +
+                 '<br><span style="color:#64748b;font-size:14px;">' + escapar(o.elemento) + '</span></div>';
+        }).join('');
+
+        pitar();
+        if (navigator.vibrate) { try { navigator.vibrate([200, 100, 200]); } catch (e) {} }
+        Swal.fire({
+          icon: 'info',
+          title: titulo,
+          html: filas,
+          confirmButtonText: 'Entendido',
+          confirmButtonColor: '#71bf44'
+        });
+      }
+
+      async function revisar() {
+        try {
+          var url = '/api/cola/novedades' + (MAQUINA ? '?maquina=' + encodeURIComponent(MAQUINA) : '');
+          var resp = await fetch(url);
+          if (!resp.ok) return;
+          var datos = await resp.json();
+          if (!datos.ok || !Array.isArray(datos.ordenes)) return;
+
+          var ids = datos.ordenes.map(function(o) { return o.idOrden; });
+          var vistas = leerVistas();
+          // Primera vez en esta tableta: solo se toma la foto, sin avisar de toda la cola que ya
+          // estaba ahi. Se guarda la cola COMPLETA (no se acumulan ids historicos), asi una orden
+          // que salio y volvio a la cola vuelve a avisar.
+          if (vistas === null) { guardarVistas(ids); return; }
+
+          var nuevos = datos.ordenes.filter(function(o) {
+            // PendienteValidacion es una orden que esta terminando, no trabajo nuevo: entra a la
+            // foto para no avisar despues, pero no dispara el aviso.
+            return vistas.indexOf(o.idOrden) === -1 && (o.estado === 'Pendiente' || o.estado === 'Activa');
+          });
+          guardarVistas(ids);
+          if (nuevos.length > 0) { pendientes = pendientes.concat(nuevos); mostrar(); }
+        } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
+      }
+
+      revisar();
+      setInterval(revisar, INTERVALO_MS);
     })();
   `;
 }
@@ -1712,6 +1843,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
     <div id="cola-ordenes">${renderColaOrdenes(colaOrdenes || [], maquinaCodigo, miOperario)}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
@@ -1788,6 +1920,7 @@ function renderTabletFija(usuario, maquinas, maquinaActual, error) {
     </div>
   </main>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptAvisoPedidoNuevo(null)}</script>
   ${error ? `<script>Swal.fire({ icon: 'error', title: 'Error', text: ${jsString(error)}, confirmButtonColor: '#71bf44' });</script>` : ''}
 </body>
 </html>`;
@@ -2014,6 +2147,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     <div class="ejecucion-box">${filasHistorial}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
   <script>${scriptConfirmarFinalizar()}</script>
@@ -2281,6 +2415,7 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, usu
     <div id="contenedor-bultos">${renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto)}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
   <script>${scriptReimprimir(orden.IdOrden, maquinaCodigo)}</script>
   <script>${scriptPaginadorPesajes()}</script>
   <script>${scriptActualizarBultos()}</script>
@@ -2412,6 +2547,43 @@ app.get('/selladora/:codigo', requireLogin, async (req, res) => {
     res.send(renderPage(null, req.session.usuario.nombre, nombre, codigo, ordenes, req.session.usuario.codigoOperarioPRD, idOrdenPreguntarActividad));
   } catch (err) {
     res.status(500).send(renderPage(err.message, req.session.usuario.nombre, 'Selladora', codigo, [], req.session.usuario.codigoOperarioPRD, null));
+  }
+});
+
+// Cola actual en JSON, para el sondeo de scriptAvisoPedidoNuevo. Mismo filtro de estados que
+// obtenerColaOrdenes, pero sin renderizar HTML y sin el JOIN de operario: lo unico que necesita el
+// cliente es que orden esta en la cola para compararla con la foto anterior. Sin ?maquina (el
+// Dashboard y Tablet fija, que no estan parados en ninguna) devuelve la cola de todas.
+app.get('/api/cola/novedades', requireLogin, async (req, res) => {
+  const maquina = (req.query.maquina || '').trim();
+  try {
+    const p = await getPool();
+    const peticion = p.request();
+    if (maquina) peticion.input('maquina', maquina);
+    const resultado = await peticion.query(`
+      SELECT ord.IdOrden, ord.Estado, ISNULL(ord.NumeroPedido, '') AS NumeroPedido,
+             ie.Referencia AS Elemento, ord.Maquina, ISNULL(maq.Nombre, ord.Maquina) AS MaquinaNombre
+      FROM SEL_OrdenProduccion ord
+      INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
+      LEFT JOIN PRDMaquinas maq ON maq.Codigo = ord.Maquina
+      WHERE ord.Estado IN ('Activa','Pendiente','PendienteValidacion')
+        ${maquina ? 'AND ord.Maquina = @maquina' : ''}
+      ORDER BY ord.IdOrden ASC
+    `);
+
+    res.json({
+      ok: true,
+      ordenes: resultado.recordset.map(o => ({
+        idOrden: o.IdOrden,
+        estado: o.Estado,
+        numeroPedido: o.NumeroPedido,
+        elemento: o.Elemento,
+        maquina: o.Maquina,
+        maquinaNombre: o.MaquinaNombre
+      }))
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
