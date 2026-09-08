@@ -874,6 +874,105 @@ function scriptActualizarCola(maquinaCodigo) {
   `;
 }
 
+// Aviso de "Programación pidió suspender esta orden" (a pedido del usuario, 07/09/2026 -- reunión
+// Germán/Ángela/Carlos, alternativa A: la decisión de reprorizar es de Programación/escritorio, el
+// operario solo decide el detalle físico de terminar o no el bulto en curso).
+//
+// Sondea /selladora/:codigo/estado-suspension cada 5s (mismo criterio de "nunca pisar un modal
+// abierto" que ya usa intentarAbrirCalidad -- reintenta en vez de forzarse encima). Si el servidor
+// contesta que hay una orden con SEL_EjecucionOrden.Estado='PendienteSuspension' para esta máquina,
+// muestra un modal con dos botones y el mismo pitido/vibración que ya usa scriptAvisoPedidoNuevo
+// (WebAudio, sin archivo de sonido -- no repetir esa lógica aparte, se duplica acá porque cada
+// script de esta app vive en su propia función aislada, no hay un modulo compartido entre ellos).
+//
+// "Sí, terminar el bulto": no hace falta que el cliente haga nada más ahí mismo -- el servidor pasa
+// la bandera a 'SuspensionEnCurso' (deja de preguntar) y cuando el PLC cierre el bulto por su
+// cuenta, el trigger nuevo (trg_SEL_Bultos_SuspenderTemporal, ver nueva produccion/SQL) hace la
+// transición sola, sin que el operario tenga que volver a tocar nada.
+// "No, suspender ahora": el servidor corta el bulto Activo ya mismo (sin esperar al PLC).
+function scriptAvisoSuspension(maquinaCodigo) {
+  return `
+    (function() {
+      var MAQUINA = ${jsString(maquinaCodigo)};
+      var idPreguntado = null; // no repreguntar por la MISMA orden en lo que dure la sesión de la pestaña
+      var audio = null;
+
+      function contexto() {
+        var Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return null;
+        if (!audio) audio = new Ctx();
+        return audio;
+      }
+      function pitar() {
+        try {
+          var ctx = contexto();
+          if (!ctx || ctx.state !== 'running') return;
+          [0, 0.26].forEach(function(retraso) {
+            var osc = ctx.createOscillator();
+            var vol = ctx.createGain();
+            osc.type = 'square';
+            osc.frequency.value = 660;
+            vol.gain.value = 0.22;
+            osc.connect(vol); vol.connect(ctx.destination);
+            osc.start(ctx.currentTime + retraso);
+            osc.stop(ctx.currentTime + retraso + 0.18);
+          });
+        } catch (e) {}
+      }
+
+      async function responder(idOrden, terminarBulto) {
+        try {
+          await fetch('/api/selladora/orden/' + idOrden + '/responder-suspension', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ terminarBulto: terminarBulto })
+          });
+        } catch (e) {}
+        location.reload();
+      }
+
+      function preguntar(datos) {
+        if (typeof Swal === 'undefined') { setTimeout(function() { revisar(); }, 2000); return; }
+        if (Swal.isVisible()) { setTimeout(function() { revisar(); }, 5000); return; }
+
+        idPreguntado = datos.idOrden;
+        pitar();
+        if (navigator.vibrate) { try { navigator.vibrate([200, 100, 200, 100, 200]); } catch (e) {} }
+        Swal.fire({
+          icon: 'warning',
+          title: 'Programación pidió suspender esta orden',
+          html: 'Pedido <strong>' + (datos.numeroPedido || '—') + '</strong> · ' + (datos.elemento || '') +
+                '<br><br>¿Desea terminar el bulto que está llenando ahora antes de suspender?',
+          showDenyButton: true,
+          confirmButtonText: 'Sí, terminar el bulto',
+          denyButtonText: 'No, suspender ya',
+          confirmButtonColor: '#71bf44',
+          denyButtonColor: '#c00000',
+          allowOutsideClick: false,
+          allowEscapeKey: false
+        }).then(function(resultado) {
+          if (resultado.isConfirmed) { responder(datos.idOrden, true); }
+          else if (resultado.isDenied) { responder(datos.idOrden, false); }
+        });
+      }
+
+      async function revisar() {
+        try {
+          var resp = await fetch('/selladora/' + MAQUINA + '/estado-suspension');
+          if (!resp.ok) return;
+          var datos = await resp.json();
+          if (!datos.ok || !datos.pendiente) return;
+          if (idPreguntado === datos.idOrden) return; // ya se le preguntó por esta misma orden
+          preguntar(datos);
+        } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
+      }
+
+      revisar();
+      setInterval(revisar, 5000);
+    })();
+  `;
+}
+
 // Aviso de "entro un pedido nuevo a la cola" (a pedido del usuario, 06/09/2026). Va en TODAS las
 // paginas con sesion -- Dashboard, Programacion maquina, Informacion, Bultos y Tablet fija -- para
 // que le llegue al operario este donde este, no solo en la pantalla de la cola.
@@ -1848,6 +1947,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
   <script>${scriptActualizarCola(maquinaCodigo)}</script>
+  <script>${scriptAvisoSuspension(maquinaCodigo)}</script>
   ${idOrdenPreguntarActividad ? `<script>
     // Termine con actividad o directo a produccion, se entra a Informacion de la orden retomada --
     // no se queda en la cola de la maquina (a pedido del usuario, 31/08/2026).
@@ -2151,6 +2251,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
   <script>${scriptConfirmarFinalizar()}</script>
+  <script>${scriptAvisoSuspension(maquinaCodigo)}</script>
   ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo, calidadFlags, pausaActiva, proximaCalidad)}</script><script>${scriptPesoEnVivo()}</script><script>${scriptResumenBultoActivo(orden.IdOrden, maquinaCodigo)}</script>` : ''}
   ${avanceCard ? `<script>${scriptAvanceProduccion(orden.IdOrden, maquinaCodigo)}</script>` : ''}
 </body>
@@ -3271,6 +3372,79 @@ app.post('/api/selladora/orden/:idOrden/reanudar', requireLogin, async (req, res
     `);
     await p.request().input('idEjecucion', IdEjecucion).query(
       `UPDATE SEL_EjecucionOrden SET Estado = 'Activa' WHERE IdEjecucion = @idEjecucion`
+    );
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// GET: para el sondeo de scriptAvisoSuspension -- por MÁQUINA (no por orden), así sirve tanto en la
+// página de la cola (renderPage) como en el detalle de la orden (renderOrdenDetalle) sin que el
+// cliente necesite saber de antemano cuál es la orden activa (07/09/2026, reunión Germán/Ángela/
+// Carlos, alternativa A: Programación pone la bandera, el operario solo responde).
+app.get('/selladora/:codigo/estado-suspension', requireLogin, async (req, res) => {
+  const maquinaCodigo = req.params.codigo;
+  try {
+    const p = await getPool();
+    const dt = await p.request().input('maquina', maquinaCodigo).query(`
+      SELECT TOP 1 ord.IdOrden, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento
+      FROM SEL_OrdenProduccion ord
+      INNER JOIN SEL_EjecucionOrden eo ON eo.IdOrden = ord.IdOrden
+      INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
+      WHERE ord.Maquina = @maquina AND eo.Estado = 'PendienteSuspension' AND eo.HoraFinReal IS NULL
+      ORDER BY eo.IdEjecucion DESC
+    `);
+    if (dt.recordset.length === 0) {
+      return res.json({ ok: true, pendiente: false });
+    }
+    const fila = dt.recordset[0];
+    res.json({ ok: true, pendiente: true, idOrden: fila.IdOrden, numeroPedido: fila.NumeroPedido, elemento: fila.Elemento });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// POST: respuesta del operario al aviso de suspensión (ver scriptAvisoSuspension).
+//  terminarBulto=true  -> solo reconoce el aviso (pasa a 'SuspensionEnCurso') para dejar de
+//                         preguntar; el bulto Activo sigue llenándose normal y cuando el PLC lo
+//                         cierre solo, el trigger nuevo trg_SEL_Bultos_SuspenderTemporal hace la
+//                         transición a Suspendido/Suspendida sin que nadie más intervenga (ver
+//                         nueva produccion/crear_trigger_suspender_temporal.sql).
+//  terminarBulto=false -> corta YA MISMO el bulto Activo (sin esperar al PLC) y deja la orden
+//                         Suspendida de una vez.
+app.post('/api/selladora/orden/:idOrden/responder-suspension', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  const terminarBulto = !!(req.body && req.body.terminarBulto);
+  try {
+    const p = await getPool();
+    const dtEj = await p.request().input('idOrden', idOrden).query(
+      `SELECT TOP 1 IdEjecucion, Estado FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden ORDER BY IdEjecucion DESC`
+    );
+    if (dtEj.recordset.length === 0) {
+      return res.json({ ok: false, error: 'No se encontró la ejecución de esta orden.' });
+    }
+    const { IdEjecucion, Estado } = dtEj.recordset[0];
+    if (Estado !== 'PendienteSuspension') {
+      return res.json({ ok: false, error: 'Esta orden no tiene una suspensión pendiente.' });
+    }
+
+    if (terminarBulto) {
+      await p.request().input('idEjecucion', IdEjecucion).query(
+        `UPDATE SEL_EjecucionOrden SET Estado = 'SuspensionEnCurso' WHERE IdEjecucion = @idEjecucion`
+      );
+      return res.json({ ok: true });
+    }
+
+    await p.request().input('idEjecucion', IdEjecucion).query(`
+      UPDATE SEL_Bultos SET estado = 'Suspendido' WHERE id_ejecucion = @idEjecucion AND estado = 'Activo'
+    `);
+    await p.request().input('idEjecucion', IdEjecucion).query(
+      `UPDATE SEL_EjecucionOrden SET Estado = 'Suspendida' WHERE IdEjecucion = @idEjecucion`
+    );
+    await p.request().input('idOrden', idOrden).query(
+      `UPDATE SEL_OrdenProduccion SET Estado = 'Suspendida' WHERE IdOrden = @idOrden`
     );
 
     res.json({ ok: true });
