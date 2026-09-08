@@ -474,6 +474,10 @@ function estilosBase() {
     }
     .btn-iniciar { background: #0078d7; }
     .btn-anadir { background: #0078d7; }
+    .btn-traslado { background: #8e44ad; }
+    .seccion-traslado { margin-top: 16px; }
+    .seccion-traslado .traslado-campo { margin-bottom: 12px; }
+    .seccion-traslado .traslado-campo:last-of-type { margin-bottom: 16px; }
     .btn-finalizar { background: #c00000; }
     .btn-info { background: var(--verde); }
     .btn-accion:active { transform: translateY(1px); }
@@ -2354,6 +2358,51 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto) {
     : `<div class="vacio">Esta orden todavía no tiene bultos.</div>`;
 }
 
+// Sección "Trasladar paquete" (reunión 07/09/2026, líneas 279-288): cuando al operario le quedan
+// paquetes sueltos que no alcanzan a completar un bulto, los mueve a un bulto ya existente en vez de
+// dejarlos huérfanos. Sección fija debajo de las tarjetas (NO se regenera con el polling de
+// /bultos/fragmento -- ver renderBultosOrden -- para no perder la selección de los desplegables a
+// medio llenar). Las opciones se arman server-side con los mismos datos que ya trae la página
+// (bultos/pesajesPorBulto), sin pedir nada aparte. La lógica real vive en
+// dbo.sp_SEL_TrasladarPaquete (ver crear_sp_trasladar_paquete.sql), este bloque solo arma el
+// formulario -- scriptTraslado() hace el fetch y dispara la reimpresión.
+function renderSeccionTraslado(bultos, pesajesPorBulto) {
+  if (bultos.length < 2) return ''; // hace falta al menos un bulto origen y uno destino
+
+  const opcionesPaquete = [];
+  bultos.forEach(b => {
+    const pesajes = pesajesPorBulto.get(b.id) || [];
+    pesajes.forEach(pe => {
+      opcionesPaquete.push(
+        `<option value="${pe.id_paquete}">Bulto ${b.numRelativo} — Paquete ${pe.ConsecutivoPaquete} (${Number(pe.PesoPaqueGr)} kg)</option>`
+      );
+    });
+  });
+  if (opcionesPaquete.length === 0) return ''; // sin paquetes pesados todavía, nada que trasladar
+
+  const opcionesBulto = bultos.map(b => `<option value="${b.id}">Bulto ${b.numRelativo}</option>`).join('');
+
+  return `
+  <div class="card seccion-traslado">
+    <div class="card-top"><span class="bulto-num">🔀 Trasladar paquete entre bultos</span></div>
+    <div class="traslado-campo">
+      <label>Paquete a mover</label>
+      <select id="selPaqueteOrigen">
+        <option value="">Seleccione…</option>
+        ${opcionesPaquete.join('')}
+      </select>
+    </div>
+    <div class="traslado-campo">
+      <label>Bulto destino</label>
+      <select id="selBultoDestino">
+        <option value="">Seleccione…</option>
+        ${opcionesBulto}
+      </select>
+    </div>
+    <button type="button" class="btn-accion btn-traslado" onclick="confirmarTraslado()">🔀 Trasladar</button>
+  </div>`;
+}
+
 // Boton "🖨️" de cada paquete ya pesado (dentro del desplegable "Paquetes pesados" de cada bulto,
 // ver renderTarjetasBultos) -- a pedido del usuario (01/09/2026), reimprime la etiqueta de un
 // paquete puntual del historial, no solo la del que la bascula tiene activo ahora mismo (eso ya lo
@@ -2398,6 +2447,78 @@ function scriptReimprimir(idOrden, maquinaCodigo) {
             Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo enviar el comando: ' + err.message, confirmButtonColor: '#71bf44' });
           })
           .finally(function() { enlace.classList.remove('deshabilitado'); });
+      });
+    }
+  `;
+}
+
+// "Trasladar paquete" (ver renderSeccionTraslado): pide confirmación, llama a
+// /api/selladora/paquete/trasladar (dbo.sp_SEL_TrasladarPaquete hace todo el trabajo transaccional
+// en la BD) y, si sale bien, reimprime de una la etiqueta del paquete YA en su bulto nuevo -- mismo
+// comando 'reimprimir_etiqueta' que ya usa reimprimirPaquete() en scriptReimprimir, sin pedir
+// confirmación de nuevo (el operario ya confirmó el traslado un paso antes). Al final recarga la
+// página -- más simple y confiable que parchar a mano las tarjetas y los dos desplegables a la vez.
+function scriptTraslado(idOrden, maquinaCodigo) {
+  return `
+    function confirmarTraslado() {
+      var selOrigen = document.getElementById('selPaqueteOrigen');
+      var selDestino = document.getElementById('selBultoDestino');
+      var idPaquete = selOrigen.value;
+      var idBultoDestino = selDestino.value;
+      if (!idPaquete || !idBultoDestino) {
+        Swal.fire({ icon: 'warning', title: 'Seleccione el paquete y el bulto destino.', confirmButtonColor: '#71bf44' });
+        return;
+      }
+      var textoPaquete = selOrigen.options[selOrigen.selectedIndex].text;
+      var textoBulto = selDestino.options[selDestino.selectedIndex].text;
+      Swal.fire({
+        icon: 'warning',
+        title: '¿Trasladar ' + textoPaquete + ' a ' + textoBulto + '?',
+        text: 'El paquete queda reetiquetado con el serial del bulto destino.',
+        showCancelButton: true,
+        confirmButtonText: 'Sí, trasladar',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#71bf44',
+        cancelButtonColor: '#c0392b'
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        Swal.fire({ title: 'Trasladando…', allowOutsideClick: false, didOpen: function() { Swal.showLoading(); } });
+        fetch('/api/selladora/paquete/trasladar', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idPaquete: idPaquete, idBultoDestino: idBultoDestino })
+        })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (!data.ok) {
+              Swal.fire({ icon: 'error', title: 'No se pudo trasladar', text: data.error || '', confirmButtonColor: '#71bf44' });
+              return;
+            }
+            // Reimprime de una la etiqueta del paquete, ya con sus datos nuevos.
+            return fetch('/api/comando', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                comando: 'reimprimir_etiqueta',
+                idOrden: ${JSON.stringify(idOrden)},
+                maquinaCodigo: ${jsString(maquinaCodigo)},
+                datos: {
+                  idBulto: data.idBultoDestino,
+                  consecutivoPaquete: data.consecutivoNuevo,
+                  pesoGr: data.pesoGr,
+                  serialBulto: data.serialPadreDestino
+                }
+              })
+            }).then(function() {
+              Swal.fire({
+                icon: 'success', title: 'Paquete trasladado', text: 'Etiqueta reimpresa. Nuevo serial: ' + data.detalleNuevo,
+                confirmButtonColor: '#71bf44'
+              }).then(function() { location.reload(); });
+            });
+          })
+          .catch(function(err) {
+            Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo trasladar: ' + err.message, confirmButtonColor: '#71bf44' });
+          });
       });
     }
   `;
@@ -2514,10 +2635,12 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, usu
   </header>
   <main>
     <div id="contenedor-bultos">${renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto)}</div>
+    ${renderSeccionTraslado(bultos, pesajesPorBulto)}
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
   <script>${scriptReimprimir(orden.IdOrden, maquinaCodigo)}</script>
+  <script>${scriptTraslado(orden.IdOrden, maquinaCodigo)}</script>
   <script>${scriptPaginadorPesajes()}</script>
   <script>${scriptActualizarBultos()}</script>
 </body>
@@ -2903,13 +3026,16 @@ const OFFSET_RESIDUO_POR_TIPO = { 1000: 'Retal', 2000: 'Refilado', 3000: 'Troque
 // scriptActualizarBultos pide solo el fragmento, para no reconstruir cabecera/estilos en cada
 // actualizacion).
 async function obtenerBultosYPesajes(p, idOrden) {
+  // FIX 08/09/2026 (traslado de paquetes entre bultos, ver sp_SEL_TrasladarPaquete): un bulto que
+  // queda sin ningun paquete tras un traslado se marca 'Anulado' (nunca se borra, queda de
+  // auditoria) -- se excluye aca para que no aparezca como una tarjeta vacia mas en la pagina.
   const bultosResult = await p.request().input('idOrden', idOrden).query(`
     SELECT b.id, b.num_bulto, b.serialPadre, b.CantidadTotal, b.estado, ISNULL(b.Golpes,0) AS Golpes, b.Potencia,
            FORMAT(b.HoraInicio, 'dd/MM/yyyy HH:mm') AS HoraInicio,
            FORMAT(b.HoraFin, 'dd/MM/yyyy HH:mm') AS HoraFin
     FROM SEL_Bultos b
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
-    WHERE ej.IdOrden = @idOrden
+    WHERE ej.IdOrden = @idOrden AND b.estado <> 'Anulado'
     ORDER BY b.num_bulto ASC
   `);
   const bultos = bultosResult.recordset.map((b, idx) => ({ ...b, numRelativo: idx + 1 }));
@@ -2917,8 +3043,11 @@ async function obtenerBultosYPesajes(p, idOrden) {
   let pesajesPorBulto = new Map();
   let residuosPorBulto = new Map();
   if (bultos.length > 0) {
+    // id_paquete (PK real de SEL_PesajeElemento) se necesita para identificar sin ambigüedad UN
+    // paquete puntual al trasladarlo (ver /api/selladora/paquete/trasladar) -- ConsecutivoPaquete
+    // solo es único DENTRO de un bulto, no en toda la orden.
     const pesajesResult = await p.request().input('idOrden', idOrden).query(`
-      SELECT pe.id_bulto, pe.ConsecutivoPaquete, FORMAT(pe.FechaHora,'dd/MM/yyyy HH:mm:ss') AS Hora, pe.PesoPaqueGr
+      SELECT pe.id_paquete, pe.id_bulto, pe.ConsecutivoPaquete, FORMAT(pe.FechaHora,'dd/MM/yyyy HH:mm:ss') AS Hora, pe.PesoPaqueGr
       FROM SEL_PesajeElemento pe
       INNER JOIN SEL_Bultos b ON b.id = pe.id_bulto
       INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
@@ -3058,6 +3187,41 @@ app.get('/selladora/:codigo/orden/:idOrden/bultos/fragmento', requireLogin, asyn
     res.send(renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto));
   } catch (err) {
     res.status(500).send('Error: ' + err.message);
+  }
+});
+
+// Traslado de un paquete de un bulto a otro (reunion 07/09/2026, seccion nueva en /bultos, ver
+// scriptTraslado() y el <details> "Trasladar paquete" en renderTarjetasBultos). Toda la logica
+// transaccional vive en dbo.sp_SEL_TrasladarPaquete (ver crear_sp_trasladar_paquete.sql) -- este
+// endpoint solo valida la sesion, llama al SP y devuelve los datos del paquete YA en su bulto nuevo
+// para que el cliente dispare la reimpresion de su etiqueta (mismo comando 'reimprimir_etiqueta' que
+// ya usa reimprimirPaquete() en scriptReimprimir).
+app.post('/api/selladora/paquete/trasladar', requireLogin, async (req, res) => {
+  const { idPaquete, idBultoDestino } = req.body;
+  if (!idPaquete || !idBultoDestino) {
+    return res.json({ ok: false, error: 'Falta idPaquete o idBultoDestino.' });
+  }
+  try {
+    const p = await getPool();
+    const result = await p.request()
+      .input('idPaquete', idPaquete)
+      .input('idBultoDestino', idBultoDestino)
+      .execute('sp_SEL_TrasladarPaquete');
+    const fila = result.recordset && result.recordset[0];
+    if (!fila) {
+      return res.json({ ok: false, error: 'El traslado no devolvió datos -- revise manualmente.' });
+    }
+    res.json({
+      ok: true,
+      detalleNuevo: fila.DetalleNuevo,
+      idBultoDestino: fila.IdBultoDestino,
+      serialPadreDestino: fila.SerialPadreDestino,
+      consecutivoNuevo: fila.ConsecutivoNuevo,
+      pesoGr: Number(fila.PesoGr),
+      idBultoOrigen: fila.IdBultoOrigen
+    });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
   }
 });
 
