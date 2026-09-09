@@ -465,6 +465,14 @@ function estilosBase() {
       box-shadow: 0 1px 4px rgba(0,0,0,0.08);
     }
     .isla .label { margin-bottom: 8px; }
+    /* Renglon de detalle dentro de una isla (ej. "3 bulto(s) en esta orden") -- .orden-elemento no
+       sirve aca porque su estilo esta acotado a .orden-cola. */
+    .isla .isla-detalle { font-size: 13px; color: var(--texto-suave); margin: -4px 0 10px; }
+    /* Islas de "Bultos producidos" / "Reporte de produccion": un solo boton cada una, y los dos
+       tienen que verse IGUAL (a pedido del usuario, 09/09/2026 -- el de reporte salia mas ancho
+       solo porque su texto era mas largo). El min-width los iguala sin depender del largo de la
+       etiqueta; text-align centra el texto dentro de ese ancho fijo. */
+    .isla .btn-isla { min-width: 140px; text-align: center; }
     .isla .orden-acciones { display: flex; gap: 8px; flex-wrap: wrap; }
     .isla .orden-acciones form { width: auto; }
     .btn-accion {
@@ -699,10 +707,13 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
           <button type="submit" class="btn-accion" style="background:#b46200;">${textoBoton}</button>
         </form>`;
     } else if (o.Estado === 'Pendiente') {
-      acciones += `<button type="button" class="btn-accion btn-iniciar" onclick="abrirEscaneoRollo(${o.IdOrden}, false)">▶ Iniciar</button>`;
+      // Iniciar ya no abre el escaneo del rollo de una: entra al protocolo de arranque
+      // (limpieza -> peligro quimico -> rollo -> chequeo del rollo -> alistamiento -> temperatura),
+      // ver scriptProtocoloArranque. El escaneo sigue estando, pero como paso 3.
+      acciones += `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${o.IdOrden})">▶ Iniciar</button>`;
     } else if (o.Estado === 'Activa') {
       acciones += `
-        <button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${o.IdOrden}, true)">+ Rollo</button>
+        <button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${o.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>
         <form method="post" action="/api/selladora/orden/${o.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
           <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
         </form>`;
@@ -1738,18 +1749,25 @@ function scriptEscanearRollo(maquinaCodigo) {
              '<span style="color:#64748b;">' + etiqueta + '</span><strong>' + valor + '</strong></div>';
     }
 
-    function abrirEscaneoRollo(idOrden, esNuevoRollo) {
+    // El parametro ganchos (09/09/2026) es opcional y solo lo manda el protocolo de arranque -- ver
+    // scriptProtocoloArranque. Sin el, esta pantalla se comporta exactamente como siempre:
+    //   antesDeConfirmar(idOrden, rollo, seguir) : corre con el rollo ya consultado y ANTES de la
+    //       ventana de confirmacion; decide con seguir('confirmar'|'reescanear'|'salir'). Ahi es
+    //       donde el protocolo mete las preguntas 4.1/4.2 (estado del rollo / peligro fisico).
+    //   alIniciar(idOrden) : reemplaza a preguntarActividadInicial() despues de que la ejecucion
+    //       arranco (el protocolo sigue con su propio alistamiento, paso 5).
+    function abrirEscaneoRollo(idOrden, esNuevoRollo, ganchos) {
       var titulo = esNuevoRollo ? 'Añadir rollo' : 'Iniciar ejecución';
       fetch('/api/selladora/orden/' + idOrden + '/rollo/preparar?nuevo=' + (esNuevoRollo ? '1' : '0'))
         .then(function(r) { return r.json(); })
         .then(function(datos) {
           if (!datos.ok) { errorRollo(datos.error); return; }
-          pedirSerialRollo(idOrden, esNuevoRollo, titulo, datos.bolsasActual || 0);
+          pedirSerialRollo(idOrden, esNuevoRollo, titulo, datos.bolsasActual || 0, ganchos);
         })
         .catch(function(err) { errorRollo('Error de conexión: ' + err.message); });
     }
 
-    function pedirSerialRollo(idOrden, esNuevoRollo, titulo, bolsasActual) {
+    function pedirSerialRollo(idOrden, esNuevoRollo, titulo, bolsasActual, ganchos) {
       Swal.fire({
         title: titulo,
         html: '<div style="text-align:left;font-size:13px;color:#64748b;margin-bottom:10px;">' +
@@ -1786,13 +1804,20 @@ function scriptEscanearRollo(maquinaCodigo) {
           });
         }
       }).then(function(resultado) {
-        if (resultado.isConfirmed) {
-          confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, resultado.value);
+        if (!resultado.isConfirmed) return;
+        var rollo = resultado.value;
+        if (ganchos && ganchos.antesDeConfirmar) {
+          ganchos.antesDeConfirmar(idOrden, rollo, function(decision) {
+            if (decision === 'confirmar') confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, rollo, ganchos);
+            else if (decision === 'reescanear') pedirSerialRollo(idOrden, esNuevoRollo, titulo, bolsasActual, ganchos);
+          });
+          return;
         }
+        confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, rollo, ganchos);
       });
     }
 
-    function confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, rollo) {
+    function confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, rollo, ganchos) {
       var detalle =
         filaRollo('Serial', rollo.serial) +
         filaRollo('Peso (Kg)', rollo.cantidad) +
@@ -1846,9 +1871,12 @@ function scriptEscanearRollo(maquinaCodigo) {
             // Se recarga la misma pagina en la que estaba (cola de la maquina o Informacion) --
             // antes la pantalla /escanear devolvia siempre a la cola de la maquina.
             window.location.reload();
+          } else if (ganchos && ganchos.alIniciar) {
+            // Protocolo de arranque: sigue el paso 5 (alistamiento), no la vieja pregunta.
+            ganchos.alIniciar(idOrden);
           } else {
-            // Al Iniciar, termine con actividad o directo a produccion, se entra a Informacion de
-            // la orden (a pedido del usuario, 31/08/2026) -- ver scriptPreguntaActividadInicial().
+            // Camino viejo, sin protocolo -- hoy solo queda como respaldo (todos los botones
+            // Iniciar entran por iniciarProtocoloArranque). Ver scriptPreguntaActividadInicial().
             preguntarActividadInicial(idOrden, function() {
               window.location.href = '/selladora/' + encodeURIComponent(MAQUINA_ESCANEO) + '/orden/' + idOrden;
             });
@@ -1969,9 +1997,386 @@ function scriptPreguntaActividadInicial() {
   `;
 }
 
+// Protocolo de arranque (09/09/2026, a pedido del usuario) -- lo que pasa al dar "▶ Iniciar" una
+// orden. Ya no se abre directo el escaneo del rollo: se recorre una secuencia fija de pasos que no
+// se pueden saltar ni reordenar.
+//
+//   1) Limpieza y desinfeccion -- se registra como actividad (SEL_TiempoMuerto, igual que el boton
+//      de Pausa), se avisa y arranca el cronometro.
+//   2) Al terminarla: "¿Detecta algun peligro quimico (aceites y lubricantes)?" -- si SI, sale el
+//      aviso de comunicarse con el jefe de planta y no se puede seguir; si NO, sigue.
+//   3) Se abre el escaneo del rollo (el de siempre, scriptEscanearRollo).
+//   4) Con el rollo ya consultado y ANTES de confirmarlo: "¿El rollo esta en buen estado?" y
+//      "¿Identifica algun peligro fisico?". Si el rollo esta mal o hay peligro fisico, se vuelve a
+//      pedir otro serial; solo con rollo bueno y sin peligro se confirma y arranca la ejecucion.
+//   5) Arranca el cronometro del alistamiento (SEL_TiempoMuerto, Tipo alistamiento/arranque).
+//   6) Al terminarlo se pide la temperatura de la perilla -- por eso ya no existe el boton
+//      "🌡️ Temperatura perilla" de la pagina de Informacion, este paso lo reemplaza.
+//
+// Nada de esto vive en el navegador: cada paso queda en la BASE apenas se responde (actividades en
+// SEL_TiempoMuerto, respuestas en SEL_ProtocoloArranque). Por eso si la tableta se recarga, se
+// apaga o se bloquea a mitad del protocolo, al volver a entrar se retoma en el mismo paso con el
+// cronometro en la hora real -- ver obtenerProtocoloPendiente() del lado del servidor y
+// reanudarProtocoloArranque() aca abajo.
+function scriptProtocoloArranque(maquinaCodigo) {
+  return `
+    var MAQUINA_PROTOCOLO = ${JSON.stringify(maquinaCodigo)};
+
+    function protocoloDestino(idOrden) {
+      return '/selladora/' + encodeURIComponent(MAQUINA_PROTOCOLO) + '/orden/' + idOrden;
+    }
+
+    function protocoloPost(url, cuerpo) {
+      return fetch(url, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cuerpo || {})
+      })
+        .then(function(r) { return r.json(); })
+        .catch(function(err) { return { ok: false, error: 'Error de conexión: ' + err.message }; });
+    }
+
+    // Ningun paso del protocolo se puede saltar: si la escritura falla (sin red, falta el script
+    // SQL, el usuario no tiene operario de planta configurado...) se muestra el error tal cual y se
+    // ofrece reintentar. "Salir" no marca el paso como hecho -- deja el protocolo donde estaba,
+    // para retomarlo despues desde el mismo boton Iniciar.
+    function protocoloIntentar(accion, alLograr) {
+      accion().then(function(datos) {
+        if (datos && datos.ok) { alLograr(datos); return; }
+        Swal.fire({
+          icon: 'error', title: 'No se pudo continuar',
+          text: (datos && datos.error) || 'Error desconocido.',
+          showCancelButton: true,
+          confirmButtonText: 'Reintentar', confirmButtonColor: '#71bf44',
+          cancelButtonText: 'Salir', cancelButtonColor: '#c0392b',
+          allowOutsideClick: false, allowEscapeKey: false
+        }).then(function(resultado) {
+          if (resultado.isConfirmed) protocoloIntentar(accion, alLograr);
+        });
+      });
+    }
+
+    function guardarPasoProtocolo(idOrden, datos, alLograr) {
+      protocoloIntentar(function() {
+        return protocoloPost('/api/selladora/orden/' + idOrden + '/protocolo/respuesta', datos);
+      }, alLograr);
+    }
+
+    // Cronometro de las dos actividades del protocolo (limpieza del paso 1, alistamiento del paso
+    // 5). Mismo comportamiento bloqueante que el de Pausa: sin cancelar, sin cerrar por click
+    // afuera ni Escape -- la unica salida es el boton de terminar, y solo si /reanudar funciono.
+    // Arranca desde la HoraInicio real guardada en la base, no desde que se abre la ventana.
+    function cronometroProtocolo(idOrden, opciones) {
+      var inicio = new Date(opciones.horaInicio).getTime();
+      var intervalId;
+      Swal.fire({
+        title: opciones.titulo,
+        html: '<div style="font-size:13px;color:#64748b;margin-bottom:10px;">' + opciones.subtitulo + '</div>' +
+              '<div style="font-size:36px;font-weight:700;color:#006984;" id="protocolo-cronometro">00:00:00</div>',
+        confirmButtonText: opciones.textoBoton,
+        confirmButtonColor: '#4a9c2e',
+        showCancelButton: false, showCloseButton: false,
+        allowOutsideClick: false, allowEscapeKey: false,
+        didOpen: function() {
+          var el = document.getElementById('protocolo-cronometro');
+          function actualizar() {
+            var seg = Math.max(0, Math.floor((Date.now() - inicio) / 1000));
+            var hh = String(Math.floor(seg / 3600)).padStart(2, '0');
+            var mm = String(Math.floor((seg % 3600) / 60)).padStart(2, '0');
+            var ss = String(seg % 60).padStart(2, '0');
+            el.textContent = hh + ':' + mm + ':' + ss;
+          }
+          actualizar();
+          intervalId = setInterval(actualizar, 1000);
+        },
+        willClose: function() { clearInterval(intervalId); },
+        preConfirm: function() {
+          return protocoloPost('/api/selladora/orden/' + idOrden + '/reanudar', {}).then(function(datos) {
+            if (!datos.ok) { Swal.showValidationMessage(datos.error || 'No se pudo terminar la actividad.'); return false; }
+            return true;
+          });
+        }
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) opciones.alTerminar();
+      });
+    }
+
+    // ---------------- Paso 1: limpieza y desinfeccion ----------------
+    function comenzarProtocoloArranque(idOrden) {
+      Swal.fire({
+        icon: 'info',
+        title: 'Protocolo de arranque',
+        html: '<div style="text-align:left;font-size:15px;line-height:1.7;">' +
+                '<b>1.</b> Limpieza y desinfección<br>' +
+                '<b>2.</b> Chequeo de peligro químico<br>' +
+                '<b>3.</b> Escaneo del rollo<br>' +
+                '<b>4.</b> Chequeo del rollo y de peligro físico<br>' +
+                '<b>5.</b> Alistamiento y temperatura de la perilla' +
+              '</div>' +
+              '<div style="text-align:left;font-size:13px;color:#64748b;margin-top:12px;">' +
+                'Al continuar, la limpieza y desinfección queda registrada como actividad y empieza a contar el tiempo.' +
+              '</div>',
+        showCancelButton: true,
+        confirmButtonText: '🧼 Comenzar limpieza y desinfección', confirmButtonColor: '#71bf44',
+        cancelButtonText: 'Cancelar', cancelButtonColor: '#c0392b'
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        protocoloIntentar(
+          function() { return protocoloPost('/api/selladora/orden/' + idOrden + '/pausar', { tipo: 'limpieza' }); },
+          function(datos) {
+            guardarPasoProtocolo(idOrden, { paso: 'limpieza', respuesta: 'Iniciada' }, function() {
+              Swal.fire({
+                icon: 'success', title: 'Limpieza y desinfección iniciada',
+                text: 'Quedó registrada como actividad. El tiempo ya está corriendo.',
+                timer: 2200, showConfirmButton: false
+              }).then(function() { cronometroLimpieza(idOrden, datos.horaInicio); });
+            });
+          });
+      });
+    }
+
+    function cronometroLimpieza(idOrden, horaInicio) {
+      cronometroProtocolo(idOrden, {
+        titulo: '🧼 Limpieza y desinfección',
+        subtitulo: 'Protocolo de arranque · paso 1 de 5',
+        horaInicio: horaInicio,
+        textoBoton: '■ Terminar limpieza y desinfección',
+        alTerminar: function() { preguntarPeligroQuimico(idOrden); }
+      });
+    }
+
+    // ---------------- Paso 2: peligro quimico ----------------
+    function preguntarPeligroQuimico(idOrden) {
+      Swal.fire({
+        icon: 'question',
+        title: '¿Detecta algún peligro químico?',
+        html: '<div style="font-size:15px;color:#64748b;">Aceites y lubricantes</div>',
+        showCancelButton: true,
+        confirmButtonText: 'Sí, detecto peligro', confirmButtonColor: '#c0392b',
+        cancelButtonText: 'No, no hay peligro', cancelButtonColor: '#4a9c2e',
+        allowOutsideClick: false, allowEscapeKey: false
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) {
+          guardarPasoProtocolo(idOrden, { paso: 'peligro_quimico', respuesta: 'Si' }, function() {
+            Swal.fire({
+              icon: 'error',
+              title: 'Comuníquese con el jefe de planta',
+              text: 'Se detectó un peligro químico (aceites y lubricantes). No se puede continuar con el arranque de la orden hasta que el jefe de planta lo autorice.',
+              showCancelButton: true,
+              confirmButtonText: 'Ya se resolvió', confirmButtonColor: '#71bf44',
+              cancelButtonText: 'Salir', cancelButtonColor: '#c0392b',
+              allowOutsideClick: false, allowEscapeKey: false
+            }).then(function(r2) {
+              if (r2.isConfirmed) preguntarPeligroQuimico(idOrden);
+            });
+          });
+          return;
+        }
+        if (resultado.dismiss === Swal.DismissReason.cancel) {
+          guardarPasoProtocolo(idOrden, { paso: 'peligro_quimico', respuesta: 'No' }, function() {
+            pasoEscanearRolloProtocolo(idOrden);
+          });
+        }
+      });
+    }
+
+    // ---------------- Pasos 3 y 4: escaneo y chequeo del rollo ----------------
+    // El escaneo es el mismo de siempre (abrirEscaneoRollo); el protocolo solo le mete dos ganchos:
+    // uno entre consultar el serial y confirmarlo (las preguntas 4.1/4.2) y otro para lo que sigue
+    // despues de que la ejecucion arranca (el alistamiento del paso 5, en vez de la vieja pregunta
+    // "¿va a realizar alguna actividad antes de producir?").
+    function pasoEscanearRolloProtocolo(idOrden) {
+      abrirEscaneoRollo(idOrden, false, {
+        antesDeConfirmar: preguntarEstadoRollo,
+        alIniciar: pasoAlistamientoProtocolo
+      });
+    }
+
+    function preguntaSiNoProtocolo(nombre, titulo, ayuda) {
+      return '<div style="margin-bottom:14px;">' +
+               '<div style="font-weight:600;font-size:16px;margin-bottom:2px;">' + titulo + '</div>' +
+               (ayuda ? '<div style="font-size:13px;color:#64748b;margin-bottom:8px;">' + ayuda + '</div>' : '') +
+               '<label style="display:inline-flex;align-items:center;gap:8px;font-size:16px;margin-right:22px;">' +
+                 '<input type="radio" name="' + nombre + '" value="si" style="width:22px;height:22px;margin:0;"> Sí</label>' +
+               '<label style="display:inline-flex;align-items:center;gap:8px;font-size:16px;">' +
+                 '<input type="radio" name="' + nombre + '" value="no" style="width:22px;height:22px;margin:0;"> No</label>' +
+             '</div>';
+    }
+
+    // seguir('confirmar') -> se confirma el rollo (arranca la ejecucion, o se añade el rollo)
+    // seguir('reescanear') -> se vuelve a pedir un serial (rollo malo o con peligro fisico)
+    // seguir('salir')      -> se corta aca; el protocolo se retoma despues desde Iniciar
+    //
+    // Se usa en DOS sitios (el segundo a pedido del usuario, 09/09/2026):
+    //   preguntarEstadoRollo     -> paso 4 del protocolo de arranque (lleva la numeracion 4.1/4.2)
+    //   preguntarEstadoRolloNuevo -> "+ Rollo" en una orden ya en curso (mismas dos preguntas, sin
+    //       numerar: ahi no hay pasos 1..5, es un rollo suelto que entra a mitad de la orden)
+    // Las respuestas de los dos casos van a la misma tabla y siempre con el serial del rollo
+    // evaluado, que es lo que las distingue en el reporte.
+    function preguntarEstadoRollo(idOrden, rollo, seguir) {
+      chequeoRollo(idOrden, rollo, seguir, true);
+    }
+
+    function preguntarEstadoRolloNuevo(idOrden, rollo, seguir) {
+      chequeoRollo(idOrden, rollo, seguir, false);
+    }
+
+    function chequeoRollo(idOrden, rollo, seguir, conNumeros) {
+      var html =
+        '<div style="text-align:left;">' +
+          '<div style="font-size:13px;color:#64748b;margin-bottom:14px;">Rollo <b>' + rollo.serial + '</b> · ' + rollo.referencia + '</div>' +
+          preguntaSiNoProtocolo('protocolo-rollo-estado', (conNumeros ? '4.1 ' : '') + '¿El rollo está en buen estado?') +
+          preguntaSiNoProtocolo('protocolo-peligro-fisico', (conNumeros ? '4.2 ' : '') + '¿Identifica algún peligro físico?', 'Cabellos, insectos, material extraño, material particulado') +
+        '</div>';
+      Swal.fire({
+        title: 'Chequeo del rollo',
+        html: html,
+        showCancelButton: true,
+        confirmButtonText: 'Confirmar chequeo', confirmButtonColor: '#71bf44',
+        cancelButtonText: 'Cancelar', cancelButtonColor: '#c0392b',
+        focusConfirm: false,
+        allowOutsideClick: false, allowEscapeKey: false,
+        preConfirm: function() {
+          var contenedor = Swal.getHtmlContainer();
+          var estado = contenedor.querySelector('input[name="protocolo-rollo-estado"]:checked');
+          var peligro = contenedor.querySelector('input[name="protocolo-peligro-fisico"]:checked');
+          if (!estado) { Swal.showValidationMessage('Responda si el rollo está en buen estado.'); return false; }
+          if (!peligro) { Swal.showValidationMessage('Responda si identifica algún peligro físico.'); return false; }
+          return { buenEstado: estado.value, peligroFisico: peligro.value };
+        }
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) { seguir('salir'); return; }
+        var v = resultado.value;
+        guardarPasoProtocolo(idOrden, { paso: 'rollo_estado', respuesta: v.buenEstado === 'si' ? 'Si' : 'No', serial: rollo.serial }, function() {
+          guardarPasoProtocolo(idOrden, { paso: 'peligro_fisico', respuesta: v.peligroFisico === 'si' ? 'Si' : 'No', serial: rollo.serial }, function() {
+            if (v.buenEstado === 'si' && v.peligroFisico === 'no') { seguir('confirmar'); return; }
+            var motivo = v.buenEstado !== 'si'
+              ? 'El rollo no está en buen estado.'
+              : 'Se identificó un peligro físico en el rollo.';
+            Swal.fire({
+              icon: 'warning', title: 'Escanee otro rollo',
+              text: motivo + ' Retire este rollo y escanee otro para continuar.',
+              confirmButtonText: 'Escanear otro rollo', confirmButtonColor: '#71bf44',
+              allowOutsideClick: false, allowEscapeKey: false
+            }).then(function() { seguir('reescanear'); });
+          });
+        });
+      });
+    }
+
+    // ---------------- Paso 5: alistamiento ----------------
+    function pasoAlistamientoProtocolo(idOrden) {
+      protocoloIntentar(
+        function() { return protocoloPost('/api/selladora/orden/' + idOrden + '/pausar', { tipo: 'alistamiento', subtipo: 'arranque' }); },
+        function(datos) {
+          guardarPasoProtocolo(idOrden, { paso: 'alistamiento', respuesta: 'Iniciada' }, function() {
+            Swal.fire({
+              icon: 'success', title: 'Alistamiento iniciado',
+              text: 'Quedó registrado como actividad. El tiempo ya está corriendo.',
+              timer: 2200, showConfirmButton: false
+            }).then(function() { cronometroAlistamiento(idOrden, datos.horaInicio); });
+          });
+        });
+    }
+
+    function cronometroAlistamiento(idOrden, horaInicio) {
+      cronometroProtocolo(idOrden, {
+        titulo: '⚙️ Alistamiento',
+        subtitulo: 'Protocolo de arranque · paso 5 de 5',
+        horaInicio: horaInicio,
+        textoBoton: '■ Terminar alistamiento',
+        alTerminar: function() { pasoTemperaturaProtocolo(idOrden); }
+      });
+    }
+
+    // ---------------- Paso 6: temperatura de la perilla ----------------
+    // Reemplaza al boton "🌡️ Temperatura perilla" que vivia en la pagina de Informacion: la
+    // temperatura se pide una sola vez, al terminar el alistamiento, antes de empezar a producir.
+    function pasoTemperaturaProtocolo(idOrden) {
+      Swal.fire({
+        icon: 'question',
+        title: 'Temperatura de trabajo',
+        input: 'number',
+        inputLabel: '¿A qué porcentaje de la perilla va a trabajar? (0 a 100)',
+        inputAttributes: { min: '0', max: '100', step: '1', inputmode: 'numeric' },
+        confirmButtonText: 'Guardar y empezar a producir', confirmButtonColor: '#71bf44',
+        showCancelButton: false, showCloseButton: false,
+        allowOutsideClick: false, allowEscapeKey: false,
+        inputValidator: function(valor) {
+          if (valor === '' || valor === null) return 'Escriba el porcentaje.';
+          var n = Number(valor);
+          if (!isFinite(n) || n < 0 || n > 100) return 'Debe ser un número entre 0 y 100.';
+          return null;
+        }
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        var valor = Number(resultado.value);
+        // A proposito NO se guarda desde un preConfirm: esta ventana no tiene boton de cancelar (la
+        // temperatura es obligatoria para arrancar), y con preConfirm un error que se repita -- por
+        // ejemplo que falte ejecutar agregar_temperatura_perilla.sql en esta base -- dejaria al
+        // operario encerrado en una ventana que no se puede cerrar. Con protocoloIntentar el error
+        // sale con "Reintentar" y con "Salir"; si sale, el paso queda pendiente y se vuelve a pedir
+        // al entrar de nuevo a la orden (la maquina ya esta produciendo, no hay nada trancado).
+        protocoloIntentar(
+          function() { return protocoloPost('/api/selladora/orden/' + idOrden + '/temperatura', { porcentaje: valor }); },
+          function() {
+            guardarPasoProtocolo(idOrden, { paso: 'temperatura', respuesta: String(valor) }, function() {
+              Swal.fire({
+                icon: 'success', title: 'Protocolo de arranque completo',
+                text: 'Temperatura registrada: ' + valor + ' %. Ya puede producir.',
+                timer: 2200, showConfirmButton: false
+              }).then(function() { window.location.href = protocoloDestino(idOrden); });
+            });
+          });
+      });
+    }
+
+    // ---------------- Entrada y retomada ----------------
+    // El boton "▶ Iniciar" entra siempre por aca: antes de empezar de cero le pregunta al servidor
+    // si esta orden ya tiene un protocolo a medias, para retomarlo en el paso que iba en vez de
+    // volver a cronometrar una limpieza que ya se hizo.
+    function iniciarProtocoloArranque(idOrden) {
+      fetch('/api/selladora/orden/' + idOrden + '/protocolo/estado')
+        .then(function(r) { return r.json(); })
+        .then(function(datos) {
+          if (datos.ok && datos.pendiente) { reanudarProtocoloArranque(datos.pendiente, true); return; }
+          comenzarProtocoloArranque(idOrden);
+        })
+        .catch(function() { comenzarProtocoloArranque(idOrden); });
+    }
+
+    // pedido = true cuando el operario acaba de pulsar Iniciar (se entra derecho al paso); false
+    // cuando lo dispara sola la carga de la pagina, y ahi los pasos que NO tienen cronometro
+    // corriendo avisan primero, para no secuestrar la pantalla sin explicar por que.
+    function reanudarProtocoloArranque(pendiente, pedido) {
+      if (!pendiente || !pendiente.paso) return;
+      var idOrden = pendiente.idOrden;
+      if (pendiente.paso === 'limpieza') { cronometroLimpieza(idOrden, pendiente.horaInicio); return; }
+      if (pendiente.paso === 'alistamiento') { cronometroAlistamiento(idOrden, pendiente.horaInicio); return; }
+      if (pendiente.paso === 'temperatura') { pasoTemperaturaProtocolo(idOrden); return; }
+
+      var textos = {
+        peligro_quimico: 'Falta responder el chequeo de peligro químico para poder seguir.',
+        rollo: 'Falta escanear el rollo y responder su chequeo para poder seguir.'
+      };
+      var continuar = function() {
+        if (pendiente.paso === 'peligro_quimico') preguntarPeligroQuimico(idOrden);
+        else pasoEscanearRolloProtocolo(idOrden);
+      };
+      if (pedido) { continuar(); return; }
+      Swal.fire({
+        icon: 'info', title: 'Protocolo de arranque sin terminar',
+        text: textos[pendiente.paso] || 'El protocolo de arranque de esta orden quedó a medias.',
+        showCancelButton: true,
+        confirmButtonText: 'Continuar protocolo', confirmButtonColor: '#71bf44',
+        cancelButtonText: 'Ahora no', cancelButtonColor: '#64748b'
+      }).then(function(resultado) { if (resultado.isConfirmed) continuar(); });
+    }
+  `;
+}
+
 // Solo la cola de ordenes de la maquina -- el detalle de bultos/pesajes/historial de cada orden
 // vive en /selladora/:codigo/orden/:idOrden (boton "Informacion").
-function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, miOperario, idOrdenPreguntarActividad) {
+function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, miOperario, idOrdenPreguntarActividad, protocoloPendiente) {
   return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -2010,8 +2415,14 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
+  <script>${scriptProtocoloArranque(maquinaCodigo)}</script>
   <script>${scriptActualizarCola(maquinaCodigo)}</script>
   <script>${scriptAvisoSuspension(maquinaCodigo)}</script>
+  ${protocoloPendiente ? `<script>
+    // Protocolo de arranque a medias en esta maquina (la tableta se recargo/apago a mitad): se
+    // retoma en el paso que iba, con el cronometro corriendo desde la hora real de la base.
+    reanudarProtocoloArranque(${JSON.stringify(protocoloPendiente)}, false);
+  </script>` : ''}
   ${idOrdenPreguntarActividad ? `<script>
     // Termine con actividad o directo a produccion, se entra a Informacion de la orden retomada --
     // no se queda en la cola de la maquina (a pedido del usuario, 31/08/2026).
@@ -2116,7 +2527,8 @@ const BOTONES_RESIDUOS = [
 // vivia aca se elimino -- a pedido del usuario, esa accion (MERGE SEL_OperarioActualMaquina) ahora
 // la hacen los botones condicionales de la cola de ordenes de la maquina (renderColaOrdenes,
 // "Tomar control de la ejecución"/"Reanudar ejecución"), asi que ya no hacia falta duplicarla aca.
-function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, proximaCalidad) {
+
+function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, proximaCalidad, protocoloPendiente) {
   const filasHistorial = historial.length
     ? historial.map(h => `
         <div class="hist-fila">
@@ -2132,10 +2544,11 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   let acciones = '';
   const activa = orden.Estado === 'Activa';
   if (orden.Estado === 'Pendiente') {
-    acciones = `<button type="button" class="btn-accion btn-iniciar" onclick="abrirEscaneoRollo(${orden.IdOrden}, false)">▶ Iniciar</button>`;
+    // Mismo protocolo de arranque que el boton Iniciar de la cola, ver renderColaOrdenes.
+    acciones = `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${orden.IdOrden})">▶ Iniciar</button>`;
   } else if (activa) {
     acciones = `
-      <button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${orden.IdOrden}, true)">+ Rollo</button>
+      <button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${orden.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>
       <form method="post" action="/api/selladora/orden/${orden.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
         <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
       </form>
@@ -2192,7 +2605,9 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   // Imprimir etiqueta + Cierre bulto van en la MISMA fila, en dos columnas (a pedido del usuario,
   // 31/08/2026). FIX 01/09/2026: Pausa se movio junto a Finalizar (ver `acciones` mas arriba), y
   // Retal/Troquelado/Salida no conforme al grupo "Residuos" (ver botonesResiduosHTML) -- ya no
-  // quedan aca.
+  // quedan aca. FIX 09/09/2026: tampoco esta ya el boton "🌡️ Temperatura perilla" -- la
+  // temperatura la pide el paso 6 del protocolo de arranque, al terminar el alistamiento y antes
+  // de empezar a producir (a pedido del usuario, ver scriptProtocoloArranque).
   const imprimirYAccionesBox = activa ? `
     <div class="peso-box">
       <div class="imprimir-acciones-grid">
@@ -2296,13 +2711,20 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     </div>` : ''}
     ${pesoBox}
     ${imprimirYAccionesBox}
-    <div class="orden-cola" style="margin-bottom:18px;">
-      <div class="orden-info">
-        <div class="orden-pedido">Bultos producidos</div>
-        <div class="orden-elemento">${totalBultos} bulto(s) en esta orden</div>
+    <div class="islas-fila">
+      <div class="isla">
+        <div class="label">Bultos producidos</div>
+        <div class="isla-detalle">${totalBultos} bulto(s) en esta orden</div>
+        <div class="orden-acciones">
+          <a class="btn-accion btn-isla btn-info" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/bultos">📦 Ver bultos</a>
+        </div>
       </div>
-      <div class="orden-acciones">
-        <a class="btn-accion btn-info" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/bultos">📦 Ver bultos</a>
+      <div class="isla">
+        <div class="label">Reporte de producción</div>
+        <div class="isla-detalle">Bitácora completa de la orden</div>
+        <div class="orden-acciones">
+          <a class="btn-accion btn-isla btn-imprimir" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/reporte" target="_blank" rel="noopener">🖨️ Reporte</a>
+        </div>
       </div>
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Especificaciones</h2>
@@ -2314,9 +2736,17 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
+  <script>${scriptProtocoloArranque(maquinaCodigo)}</script>
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptAvisoSuspension(maquinaCodigo)}</script>
-  ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo, calidadFlags, pausaActiva, proximaCalidad)}</script><script>${scriptPesoEnVivo()}</script><script>${scriptResumenBultoActivo(orden.IdOrden, maquinaCodigo)}</script>` : ''}
+  ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo, calidadFlags, protocoloPendiente ? null : pausaActiva, proximaCalidad)}</script><script>${scriptPesoEnVivo()}</script><script>${scriptResumenBultoActivo(orden.IdOrden, maquinaCodigo)}</script>` : ''}
+  ${protocoloPendiente ? `<script>
+    // Protocolo de arranque a medias en esta orden: se retoma en el paso que iba. Ojo con el
+    // orden -- va DESPUES de scriptComandos, y a ese se le pasa pausaActiva en null cuando hay
+    // protocolo pendiente, para que no se abran dos ventanas bloqueantes encima de la otra (la
+    // pausa del protocolo ya la muestra el cronometro de aca).
+    reanudarProtocoloArranque(${JSON.stringify(protocoloPendiente)}, false);
+  </script>` : ''}
   ${avanceCard ? `<script>${scriptAvanceProduccion(orden.IdOrden, maquinaCodigo)}</script>` : ''}
 </body>
 </html>`;
@@ -2373,8 +2803,8 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto) {
         const grupo = pesajes.slice(i * PAQUETES_POR_PAGINA, (i + 1) * PAQUETES_POR_PAGINA);
         const filasGrupo = grupo.map(pe => `
           <div class="pesaje-fila">
-            <a href="javascript:void(0)" class="link-reimprimir" title="Reimprimir etiqueta de este paquete"
-              onclick="reimprimirPaquete(this, ${JSON.stringify(b.id)}, ${JSON.stringify(pe.ConsecutivoPaquete)}, ${JSON.stringify(Number(pe.PesoPaqueGr))}, ${jsString(b.serialPadre).replace(/"/g, '&quot;')})">🖨️ Paquete ${pe.ConsecutivoPaquete}</a>
+            <a href="javascript:void(0)" class="link-reimprimir" title="Reimprimir etiqueta o volver a pesar este paquete"
+              onclick="abrirAccionesPaquete(this, ${JSON.stringify(pe.id_paquete)}, ${JSON.stringify(b.id)}, ${JSON.stringify(pe.ConsecutivoPaquete)}, ${JSON.stringify(Number(pe.PesoPaqueGr))}, ${jsString(b.serialPadre).replace(/"/g, '&quot;')}, ${jsString(b.estado).replace(/"/g, '&quot;')})">📦 Paquete ${pe.ConsecutivoPaquete}</a>
             <span>${pe.Hora}</span>
             <span>${Number(pe.PesoPaqueGr).toString()}</span>
           </div>`).join('');
@@ -2473,6 +2903,134 @@ function renderSeccionTraslado(bultos, pesajesPorBulto) {
 // el paquete puntual (idBulto/consecutivoPaquete/pesoGr/serialBulto).
 function scriptReimprimir(idOrden, maquinaCodigo) {
   return `
+    // CAMBIO 09/09/2026 (a pedido del usuario): tocar un paquete ya no reimprime de una -- primero
+    // sale este menu, porque ahora hay dos cosas que se pueden hacer con un paquete ya registrado.
+    // "Volver a pesar" es la nueva (ver volverAPesarPaquete); reimprimir es lo que hacia antes.
+    function abrirAccionesPaquete(enlace, idPaquete, idBulto, consecutivoPaquete, pesoGr, serialBulto, estadoBulto) {
+      Swal.fire({
+        title: 'Paquete ' + consecutivoPaquete,
+        html: '<div style="font-size:14px;color:#64748b;">Peso registrado: <b>' + pesoGr + ' kg</b></div>',
+        showCancelButton: true,
+        showDenyButton: true,
+        confirmButtonText: '🖨️ Reimprimir etiqueta', confirmButtonColor: '#71bf44',
+        denyButtonText: '⚖️ Volver a pesar', denyButtonColor: '#006984',
+        cancelButtonText: 'Cancelar', cancelButtonColor: '#c0392b'
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) { reimprimirPaquete(enlace, idBulto, consecutivoPaquete, pesoGr, serialBulto); return; }
+        if (resultado.isDenied) { volverAPesarPaquete(enlace, idPaquete, idBulto, consecutivoPaquete, pesoGr, serialBulto, estadoBulto); }
+      });
+    }
+
+    // Ventana con el peso EN VIVO de la bascula -- el mismo /ws/peso que usa la pagina de
+    // Informacion (scriptPesoEnVivo), solo que aca la conexion se abre y se cierra con la ventana,
+    // no con la pagina. El operario vuelve a poner el paquete en la bascula, mira el numero y
+    // guarda; no se puede guardar sin una lectura real (no hay campo para escribirlo a mano).
+    // Al guardar se reimprime sola la etiqueta con el peso corregido y se recarga la pagina.
+    function volverAPesarPaquete(enlace, idPaquete, idBulto, consecutivoPaquete, pesoGr, serialBulto, estadoBulto) {
+      var ultimoPeso = null;
+      var ws = null;
+      var avisoCerrado = (estadoBulto === 'Cerrado')
+        ? '<div style="text-align:left;font-size:12px;color:#b46200;background:#fff7ed;border-radius:8px;padding:8px 10px;margin-top:12px;">' +
+          '⚠️ Este bulto ya está cerrado. Se corrigen el peso del paquete, el total del bulto y las ' +
+          'cantidades de producción, pero <b>el saldo de inventario de este bulto no se toca</b>: ' +
+          'queda con el peso viejo hasta que alguien lo ajuste.</div>'
+        : '';
+      Swal.fire({
+        title: 'Volver a pesar el paquete ' + consecutivoPaquete,
+        html: '<div style="font-size:13px;color:#64748b;margin-bottom:10px;">Peso registrado hoy: <b>' + pesoGr + ' kg</b>. ' +
+                'Vuelva a poner el paquete en la báscula.</div>' +
+              '<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.03em;color:#64748b;">Báscula en vivo</div>' +
+              '<div style="font-size:40px;font-weight:700;color:#006984;line-height:1.2;">' +
+                '<span id="repesar-peso">—</span><span style="font-size:18px;color:#64748b;"> kg</span></div>' +
+              '<div id="repesar-estado" style="font-size:12px;color:#c0392b;">Conectando con la báscula…</div>' +
+              avisoCerrado,
+        showCancelButton: true,
+        confirmButtonText: '⚖️ Guardar este peso', confirmButtonColor: '#006984',
+        cancelButtonText: 'Cancelar', cancelButtonColor: '#c0392b',
+        allowOutsideClick: function() { return !Swal.isLoading(); },
+        didOpen: function() {
+          var elPeso = document.getElementById('repesar-peso');
+          var elEstado = document.getElementById('repesar-estado');
+          var protocolo = location.protocol === 'https:' ? 'wss:' : 'ws:';
+          ws = new WebSocket(protocolo + '//' + location.host + '/ws/peso');
+          ws.onopen = function() { elEstado.textContent = 'Conectada'; elEstado.style.color = '#4a9c2e'; };
+          ws.onclose = function() { elEstado.textContent = 'Sin conexión con la báscula'; elEstado.style.color = '#c0392b'; };
+          ws.onerror = function() { try { ws.close(); } catch (e) {} };
+          ws.onmessage = function(evento) {
+            try {
+              var json = JSON.parse(evento.data);
+              if (json && typeof json.peso === 'number') {
+                ultimoPeso = json.peso;
+                elPeso.textContent = json.peso.toFixed(2);
+              }
+            } catch (e) { /* mensaje no valido -- se ignora, se queda la ultima lectura buena */ }
+          };
+        },
+        // La ventana se cierra siempre por aca (guardando o cancelando), asi que el socket nunca
+        // queda abierto de fondo consumiendo mensajes de la bascula.
+        willClose: function() { try { if (ws) ws.close(); } catch (e) {} },
+        preConfirm: function() {
+          if (ultimoPeso === null) {
+            Swal.showValidationMessage('Todavía no llega ninguna lectura de la báscula.');
+            return false;
+          }
+          if (!(ultimoPeso > 0)) {
+            Swal.showValidationMessage('La báscula marca ' + ultimoPeso.toFixed(2) + ' kg. Ponga el paquete en la báscula.');
+            return false;
+          }
+          var pesoNuevo = ultimoPeso;
+          return fetch('/api/selladora/paquete/repesar', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ idPaquete: idPaquete, pesoGr: pesoNuevo })
+          })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+              if (!data.ok) { Swal.showValidationMessage(data.error || 'No se pudo guardar el peso.'); return false; }
+              return data;
+            })
+            .catch(function(err) {
+              Swal.showValidationMessage('No se pudo guardar el peso: ' + err.message);
+              return false;
+            });
+        }
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        var datos = resultado.value;
+        // Reimpresion automatica con el peso YA corregido (a pedido del usuario) -- no se vuelve a
+        // preguntar, el operario acaba de confirmar el repesaje un paso antes. Es el mismo comando
+        // 'reimprimir_etiqueta' de reimprimirPaquete, igual que hace el traslado de paquetes.
+        fetch('/api/comando', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            comando: 'reimprimir_etiqueta',
+            idOrden: ${JSON.stringify(idOrden)},
+            maquinaCodigo: ${jsString(maquinaCodigo)},
+            datos: { idBulto: datos.idBulto, consecutivoPaquete: datos.consecutivoPaquete, pesoGr: datos.pesoNuevo, serialBulto: datos.serialBulto }
+          })
+        })
+          .then(function(r) { return r.json(); })
+          .then(function(cmd) {
+            return Swal.fire({
+              icon: cmd.ok ? 'success' : 'warning',
+              title: 'Peso corregido',
+              html: '<div style="font-size:14px;">' + datos.pesoAnterior + ' kg → <b>' + datos.pesoNuevo + ' kg</b></div>' +
+                    '<div style="font-size:13px;color:#64748b;margin-top:6px;">' +
+                      (cmd.ok ? 'Se mandó a reimprimir la etiqueta.' : 'El peso quedó guardado, pero no se pudo reimprimir: ' + (cmd.error || '')) +
+                    '</div>',
+              confirmButtonText: 'Entendido', confirmButtonColor: '#71bf44'
+            });
+          })
+          .catch(function(err) {
+            return Swal.fire({
+              icon: 'warning', title: 'Peso corregido',
+              text: 'El peso quedó guardado, pero no se pudo reimprimir: ' + err.message,
+              confirmButtonText: 'Entendido', confirmButtonColor: '#71bf44'
+            });
+          })
+          .then(function() { location.reload(); });
+      });
+    }
+
     function reimprimirPaquete(enlace, idBulto, consecutivoPaquete, pesoGr, serialBulto) {
       Swal.fire({
         icon: 'warning',
@@ -2828,9 +3386,13 @@ app.get('/selladora/:codigo', requireLogin, async (req, res) => {
     // carga la pagina. Se valida que sea un entero positivo antes de pasarlo al HTML.
     const idOrdenPreguntarActividad = /^\d+$/.test(req.query.preguntarActividad || '') ? Number(req.query.preguntarActividad) : null;
 
-    res.send(renderPage(null, req.session.usuario.nombre, nombre, codigo, ordenes, req.session.usuario.codigoOperarioPRD, idOrdenPreguntarActividad));
+    // Protocolo de arranque a medias en alguna orden de esta maquina (la tableta se recargo o se
+    // apago a mitad) -- ver obtenerProtocoloPendienteMaquina/reanudarProtocoloArranque.
+    const protocoloPendiente = await obtenerProtocoloPendienteMaquina(p, codigo);
+
+    res.send(renderPage(null, req.session.usuario.nombre, nombre, codigo, ordenes, req.session.usuario.codigoOperarioPRD, idOrdenPreguntarActividad, protocoloPendiente));
   } catch (err) {
-    res.status(500).send(renderPage(err.message, req.session.usuario.nombre, 'Selladora', codigo, [], req.session.usuario.codigoOperarioPRD, null));
+    res.status(500).send(renderPage(err.message, req.session.usuario.nombre, 'Selladora', codigo, [], req.session.usuario.codigoOperarioPRD, null, null));
   }
 });
 
@@ -3054,7 +3616,11 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
 
     const avance = await obtenerAvanceProduccion(p, idOrden);
 
-    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, proximaCalidad));
+    // Protocolo de arranque a medias en ESTA orden -- se retoma solo al abrir la pagina, y ademas
+    // apaga el modal de pausa normal (ver renderOrdenDetalle) para no encimar dos ventanas.
+    const protocoloPendiente = await obtenerProtocoloPendiente(p, Number(idOrden));
+
+    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, proximaCalidad, protocoloPendiente));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
@@ -3285,6 +3851,132 @@ app.post('/api/selladora/paquete/trasladar', requireLogin, async (req, res) => {
   }
 });
 
+// "Volver a pesar" un paquete ya registrado (09/09/2026, a pedido del usuario) -- el operario lo
+// vuelve a poner en la bascula desde la pagina de Bultos y el peso en vivo reemplaza al que quedo
+// guardado. Ver agregar_repesaje_paquete.sql para el detalle de que se toca y que no.
+//
+// Todo va en una transaccion: o queda corregido el paquete, recalculado el total del bulto y
+// escrito el rastro, o no queda nada. El UPDATE de SEL_Bultos NO dispara nada raro: los dos
+// triggers de esa tabla que reaccionan a UPDATE arrancan con IF UPDATE(estado) / se saltan cuando
+// no hubo INSERT, y aca solo se toca CantidadTotal.
+app.post('/api/selladora/paquete/repesar', requireLogin, async (req, res) => {
+  const idPaquete = Number(req.body && req.body.idPaquete);
+  const pesoGr = Number(req.body && req.body.pesoGr);
+  if (!Number.isFinite(idPaquete) || idPaquete <= 0) {
+    return res.json({ ok: false, error: 'Falta idPaquete.' });
+  }
+  if (!Number.isFinite(pesoGr) || pesoGr <= 0) {
+    return res.json({ ok: false, error: 'El peso debe ser un número mayor que cero.' });
+  }
+  try {
+    const p = await getPool();
+    const dtPaquete = await p.request().input('idPaquete', idPaquete).query(`
+      SELECT TOP 1 pe.id_paquete, pe.id_bulto, pe.ConsecutivoPaquete, pe.PesoPaqueGr,
+             b.estado AS EstadoBulto, b.serialPadre, b.CantidadTotal, ord.Estado AS EstadoOrden
+      FROM SEL_PesajeElemento pe
+      LEFT JOIN SEL_Bultos b ON b.id = pe.id_bulto
+      LEFT JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+      LEFT JOIN SEL_OrdenProduccion ord ON ord.IdOrden = ej.IdOrden
+      WHERE pe.id_paquete = @idPaquete
+    `);
+    if (dtPaquete.recordset.length === 0) {
+      return res.json({ ok: false, error: 'No se encontró ese paquete.' });
+    }
+    const paq = dtPaquete.recordset[0];
+    const pesoAnterior = Number(paq.PesoPaqueGr);
+
+    // Tope: 'Finalizada' es el estado que deja "Cerrar Definitivo" del escritorio -- ahi ya se
+    // calculo la Merma del proceso (frmValidacionSelladora.vb) a partir de estos mismos pesos.
+    // Corregir un paquete despues de eso descuadra una merma ya cerrada, y esta pantalla no tiene
+    // como recalcularla: se bloquea y lo ajusta el digitador. Mientras la orden esta Activa o en
+    // PendienteValidacion si se puede corregir (Finalizar desde la tableta no calcula merma).
+    if (paq.EstadoOrden === 'Finalizada') {
+      return res.json({
+        ok: false,
+        error: 'Esta orden ya fue cerrada definitivamente por el digitador y su merma ya está calculada. El peso de este paquete solo se puede corregir desde el escritorio.'
+      });
+    }
+
+    let totalBulto = null;
+    const tx = new sql.Transaction(p);
+    await tx.begin();
+    try {
+      await tx.request()
+        .input('idPaquete', idPaquete).input('idBulto', paq.id_bulto)
+        .input('estadoBulto', paq.EstadoBulto || null)
+        .input('pesoAnterior', pesoAnterior).input('pesoNuevo', pesoGr)
+        .input('operario', req.session.usuario.codigoOperarioPRD || null)
+        .query(`
+          INSERT INTO SEL_RepesajePaquete (id_paquete, id_bulto, EstadoBulto, PesoAnterior, PesoNuevo, Operario)
+          VALUES (@idPaquete, @idBulto, @estadoBulto, @pesoAnterior, @pesoNuevo, @operario)
+        `);
+      await tx.request().input('idPaquete', idPaquete).input('peso', pesoGr)
+        .query(`UPDATE SEL_PesajeElemento SET PesoPaqueGr = @peso WHERE id_paquete = @idPaquete`);
+
+      // Todo lo que sigue aplica SOLO a los bultos que ya tenian total calculado (los que pasaron
+      // por 'Cerrado'). En un bulto todavia abierto no hay nada que rehacer: CantidadTotal la
+      // escribe trg_SEL_Bultos_CierreBulto al cerrar y PRDProduccion tiene una fila reservada en
+      // Cantidad=0 que ese mismo trigger llena -- para ese momento ya suman el valor corregido.
+      if (paq.id_bulto != null && paq.CantidadTotal != null) {
+        const dtTotal = await tx.request().input('idBulto', paq.id_bulto).query(
+          `SELECT ISNULL(SUM(PesoPaqueGr), 0) AS Total FROM SEL_PesajeElemento WHERE id_bulto = @idBulto`
+        );
+        totalBulto = Number(dtTotal.recordset[0].Total);
+
+        await tx.request().input('idBulto', paq.id_bulto).input('total', totalBulto)
+          .query(`UPDATE SEL_Bultos SET CantidadTotal = @total WHERE id = @idBulto`);
+
+        // Cantidades de produccion: se replica exactamente lo que hacen trg_SEL_Bultos_CierreBulto
+        // (al cerrar el bulto) y finalizarControlParcialSellado (al Finalizar la orden) -- las dos
+        // sacan estos dos valores de SEL_Bultos.CantidadTotal, que es la que se acaba de rehacer.
+        // No se toca Unidades ni Duracion/HoraFinal: repesar no cambia ni el numero de paquetes ni
+        // las horas del bulto.
+        await tx.request().input('serialPadre', paq.serialPadre).input('total', totalBulto).query(`
+          UPDATE PRDProduccion SET Cantidad = @total, FechaModificado = GETDATE()
+          WHERE Detalle = @serialPadre
+        `);
+        // Mismo emparejamiento (Elemento/Linea/Fecha/Lote) que usa el trigger de cierre.
+        await tx.request().input('idBulto', paq.id_bulto).input('total', totalBulto).query(`
+          UPDATE er SET er.PesoBrutoKg = @total
+          FROM PRDExtrusionRollos er
+          INNER JOIN SEL_Bultos b
+            ON b.refsalida = er.Elemento AND b.num_bulto = er.Linea
+            AND er.Fecha = DATEFROMPARTS(b.agno, b.mes, b.dia)
+            AND er.Lote = RIGHT('0' + CAST(b.mes AS varchar(2)), 2) + RIGHT('0' + CAST(b.dia AS varchar(2)), 2)
+          WHERE b.id = @idBulto
+        `);
+
+        // INVExistencias y la linea del movimiento Tipo 35 se dejan COMO ESTAN, a pedido expreso
+        // del usuario (09/09/2026: "No toques inventario"). Las escribe
+        // trg_SEL_Bultos_GenerarEntradaInventario en el momento en que el bulto cierra y nadie mas
+        // las reescribe, asi que tras un repesaje el saldo de ese serial queda con el peso viejo.
+        // La ventana de la tableta lo avisa, y SEL_RepesajePaquete guarda el rastro exacto por si
+        // despues se decide ajustarlo.
+      }
+      await tx.commit();
+    } catch (errTx) {
+      await tx.rollback();
+      throw errTx;
+    }
+
+    res.json({
+      ok: true,
+      pesoAnterior,
+      pesoNuevo: pesoGr,
+      idBulto: paq.id_bulto,
+      consecutivoPaquete: paq.ConsecutivoPaquete,
+      serialBulto: paq.serialPadre,
+      // Lo usa la tableta para avisar que el saldo de inventario de un bulto ya cerrado NO se
+      // reajusta (ver agregar_repesaje_paquete.sql).
+      bultoCerrado: paq.CantidadTotal != null,
+      totalBulto
+    });
+  } catch (err) {
+    const falta = /Invalid object name/i.test(err.message);
+    res.json({ ok: false, error: falta ? 'Falta crear la tabla SEL_RepesajePaquete (ejecute agregar_repesaje_paquete.sql).' : err.message });
+  }
+});
+
 // Resumen del bulto Activo (paquetes pesados + peso acumulado) para la pagina de Informacion --
 // a pedido del usuario (27/08/2026), en vivo via polling (ver scriptResumenBultoActivo()). Si la
 // orden no tiene bulto Activo en este momento devuelve ceros, no un error (puede pasar entre que
@@ -3509,6 +4201,630 @@ app.post('/api/selladora/orden/:idOrden/rollo', requireLogin, async (req, res) =
 // antes de enviarse; idBulto es el bulto Activo en ese momento (window.idBultoActivo, lo mantiene
 // scriptResumenBultoActivo -- puede ser null si no hay bulto Activo). Ambos van para que Node-RED
 // sepa a que bulto pertenece e imprima la etiqueta del residuo/salida no conforme.
+// ============================ Reporte de produccion (impresion) ============================
+// Planilla en papel de una orden, con las columnas que pidio el usuario (09/09/2026): pedido,
+// tiquete del rollo, numero de paquete, pistas, unidades, horas, medida de la bolsa, calidad por
+// paquete, golpes x minuto, potencia y % de la perilla de temperatura, mas los bloques de
+// actividades registradas y del registro de calidad tal como lo digito el operario.
+//
+// Equivalencias acordadas con el usuario, porque los nombres de planta no coinciden con los de la
+// base:
+//   - "Pistas" = SEL_EjecucionOrden.BolsasxGolpe (es el mismo dato con otro nombre).
+//   - "Golpes x minuto" = SEL_PesajeElemento.Golpes (ya se muestra asi en la pagina de Bultos).
+//   - Unidades producidas = paquetes x UNIDADES_POR_PAQUETE (100 bolsas por paquete).
+//   - Temperatura: la digita el operario (ver agregar_temperatura_perilla.sql) porque el PLC no la
+//     manda; a cada paquete se le asigna el ultimo valor registrado antes de su hora.
+//
+// El tiquete del rollo va en el ENCABEZADO y no por paquete: hoy la base no ata un rollo a un
+// paquete ni a un bulto -- PRDProduccionMateriaPrima los guarda todos bajo la linea ancla del
+// proceso, y SEL_EjecucionOrden.SerialRolloEntrada se SOBREESCRIBE en cada "Añadir Rollo"
+// (scan-rollo.js). Por eso la columna de la tabla repite el tiquete del proceso, y dice "varios"
+// cuando hubo mas de un rollo, con el detalle completo arriba.
+async function obtenerDatosReporte(p, idOrden) {
+  const dtOrden = await p.request().input('idOrden', idOrden).query(`
+    SELECT ord.IdOrden, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento,
+           ie.Nombre AS NombreElemento, maq.Nombre AS MaquinaNombre, ord.Estado,
+           ord.KilosSolicitados, ord.UnidadesSolicitadas
+    FROM SEL_OrdenProduccion ord
+    INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
+    INNER JOIN PRDMaquinas maq ON maq.Codigo = ord.Maquina
+    WHERE ord.IdOrden = @idOrden
+  `);
+  if (dtOrden.recordset.length === 0) return null;
+
+  const dtEjecucion = await p.request().input('idOrden', idOrden).query(`
+    SELECT TOP 1 ej.IdEjecucion, ej.BolsasxGolpe, ej.SerialRolloEntrada, ej.HoraInicioReal, ej.HoraFinReal,
+           op.Nombre AS OperarioNombre, opf.Nombre AS OperarioFinalNombre
+    FROM SEL_EjecucionOrden ej
+    LEFT JOIN PRDOperarios op ON op.Codigo = ej.Operario
+    LEFT JOIN PRDOperarios opf ON opf.Codigo = ej.OperarioFinal
+    WHERE ej.IdOrden = @idOrden ORDER BY ej.IdEjecucion ASC
+  `);
+
+  const dtPaquetes = await p.request().input('idOrden', idOrden).query(`
+    SELECT pe.id_paquete, pe.ConsecutivoPaquete, pe.PesoPaqueGr, pe.Golpes, pe.Potencia,
+           pe.Temperatura, pe.FechaHora, b.id AS IdBulto, b.num_bulto, b.HoraInicio, b.HoraFin
+    FROM SEL_PesajeElemento pe
+    INNER JOIN SEL_Bultos b ON b.id = pe.id_bulto
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+    WHERE ej.IdOrden = @idOrden AND b.estado <> 'Anulado'
+    ORDER BY b.num_bulto ASC, pe.ConsecutivoPaquete ASC
+  `);
+
+  // Todos los rollos del proceso (incluidos los de "Añadir Rollo"), emparejados por el
+  // Fecha/Lote/Elemento de los bultos de esta orden -- mismo criterio que usa el resto de la app
+  // para hablarle a PRDProduccionMateriaPrima.
+  const dtRollos = await p.request().input('idOrden', idOrden).query(`
+    SELECT DISTINCT mp.Detalle AS Tiquete, mp.Cantidad, mp.LoteMP, mp.Bodega, mp.Fecha
+    FROM PRDProduccionMateriaPrima mp
+    WHERE EXISTS (
+      SELECT 1 FROM SEL_Bultos b
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+      WHERE ej.IdOrden = @idOrden
+        AND mp.Elemento = b.refsalida
+        AND mp.Fecha = DATEFROMPARTS(b.agno, b.mes, b.dia)
+        AND mp.Lote = RIGHT('0' + CAST(b.mes AS VARCHAR(2)), 2) + RIGHT('0' + CAST(b.dia AS VARCHAR(2)), 2)
+    )
+    ORDER BY mp.Fecha ASC, mp.Detalle ASC
+  `);
+
+  // Rollos CON hora (SEL_RolloEjecucion, ver agregar_rollo_ejecucion.sql). Es lo que permite decir
+  // de que rollo salio cada paquete. Solo existe para ordenes posteriores a ese cambio: si no hay
+  // filas, el reporte cae a la lista sin hora de arriba y deja la columna "Rollo" en blanco.
+  let rollosConHora = [];
+  try {
+    const dtRollosHora = await p.request().input('idOrden', idOrden).query(`
+      SELECT re.Serial AS Tiquete, re.Cantidad, re.LoteMP, re.Bodega, re.FechaHora, re.EsInicio,
+             b.num_bulto AS NumBulto
+      FROM SEL_RolloEjecucion re
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = re.id_ejecucion
+      LEFT JOIN SEL_Bultos b ON b.id = re.id_bulto
+      WHERE ej.IdOrden = @idOrden ORDER BY re.FechaHora ASC
+    `);
+    rollosConHora = dtRollosHora.recordset;
+  } catch (err) {
+    console.error('Reporte: no se pudo leer SEL_RolloEjecucion (¿falta ejecutar agregar_rollo_ejecucion.sql?):', err.message);
+  }
+
+  // Los bultos completos (no solo los que tienen paquetes): sus aperturas y cierres son eventos de
+  // la bitacora por si solos.
+  const dtBultos = await p.request().input('idOrden', idOrden).query(`
+    SELECT b.id, b.num_bulto, b.estado, b.HoraInicio, b.HoraFin, ISNULL(b.number_paqu,0) AS Paquetes,
+           b.CantidadTotal
+    FROM SEL_Bultos b
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+    WHERE ej.IdOrden = @idOrden AND b.estado <> 'Anulado'
+    ORDER BY b.num_bulto ASC
+  `);
+
+  // DuracionMinutos viene NULL en todas las filas registradas hasta hoy (el POST de pausar no la
+  // calcula al reanudar), asi que el reporte la deriva con DATEDIFF en vez de imprimir un guion.
+  const dtActividades = await p.request().input('idOrden', idOrden).query(`
+    SELECT tm.Tipo, tm.Subtipo, tm.HoraInicio, tm.HoraFin, tm.Observaciones,
+           ISNULL(tm.DuracionMinutos, DATEDIFF(MINUTE, tm.HoraInicio, tm.HoraFin)) AS Minutos,
+           op.Nombre AS OperarioNombre
+    FROM SEL_TiempoMuerto tm
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = tm.id_ejecucion
+    LEFT JOIN PRDOperarios op ON op.Codigo = tm.Operario
+    WHERE ej.IdOrden = @idOrden ORDER BY tm.HoraInicio ASC
+  `);
+
+  // SEL_ChequeoCalidad existe en la base de produccion pero NO en carlixplastPrueba (comprobado
+  // 09/09/2026) -- igual que con la temperatura, el reporte sale sin ese bloque en vez de reventar
+  // cuando se esta probando contra esa base.
+  let calidad = [];
+  try {
+    const dtCalidad = await p.request().input('idOrden', idOrden).query(`
+      SELECT c.IdChequeo, c.FechaHora, c.id_bulto, op.Nombre AS OperarioNombre,
+             d.Apartado, d.Pregunta, d.Respuesta
+      FROM SEL_ChequeoCalidad c
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = c.id_ejecucion
+      LEFT JOIN SEL_ChequeoCalidadDetalle d ON d.IdChequeo = c.IdChequeo
+      LEFT JOIN PRDOperarios op ON op.Codigo = c.Operario
+      WHERE ej.IdOrden = @idOrden ORDER BY c.FechaHora ASC, d.IdDetalle ASC
+    `);
+    calidad = dtCalidad.recordset;
+  } catch (err) {
+    console.error('Reporte: no se pudo leer SEL_ChequeoCalidad en esta base:', err.message);
+  }
+
+  // La tabla de temperatura puede no existir todavia (el script SQL se ejecuta aparte, a mano):
+  // en ese caso el reporte sale igual con la columna vacia en vez de reventar.
+  let temperaturas = [];
+  try {
+    const dtTemp = await p.request().input('idOrden', idOrden).query(`
+      SELECT t.Porcentaje, t.FechaHora
+      FROM SEL_TemperaturaPerilla t
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = t.id_ejecucion
+      WHERE ej.IdOrden = @idOrden ORDER BY t.FechaHora ASC
+    `);
+    temperaturas = dtTemp.recordset;
+  } catch (err) {
+    console.error('Reporte: no se pudo leer SEL_TemperaturaPerilla (¿falta ejecutar agregar_temperatura_perilla.sql?):', err.message);
+  }
+
+  // Respuestas del protocolo de arranque (peligro quimico, estado del rollo, peligro fisico) --
+  // mismo blindaje que las dos de arriba: si todavia no se corrio agregar_protocolo_arranque.sql
+  // en esta base, el reporte sale sin ese bloque en vez de reventar.
+  let protocolo = [];
+  try {
+    const dtProtocolo = await p.request().input('idOrden', idOrden).query(`
+      SELECT pa.Paso, pa.Respuesta, pa.Serial, pa.Observaciones, pa.FechaHora, op.Nombre AS OperarioNombre
+      FROM SEL_ProtocoloArranque pa
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = pa.id_ejecucion
+      LEFT JOIN PRDOperarios op ON op.Codigo = pa.Operario
+      WHERE ej.IdOrden = @idOrden ORDER BY pa.Id ASC
+    `);
+    protocolo = dtProtocolo.recordset;
+  } catch (err) {
+    console.error('Reporte: no se pudo leer SEL_ProtocoloArranque (¿falta ejecutar agregar_protocolo_arranque.sql?):', err.message);
+  }
+
+  return {
+    orden: dtOrden.recordset[0],
+    ejecucion: dtEjecucion.recordset[0] || null,
+    paquetes: dtPaquetes.recordset,
+    bultos: dtBultos.recordset,
+    // Si ya hay linea de tiempo de rollos se usa esa (trae la hora); si no, la lista plana de
+    // materia prima, que sirve para enumerarlos pero no para ubicarlos en el tiempo.
+    rollos: rollosConHora.length ? rollosConHora : dtRollos.recordset,
+    hayHoraDeRollos: rollosConHora.length > 0,
+    actividades: dtActividades.recordset,
+    calidad,
+    temperaturas,
+    protocolo
+  };
+}
+
+// "Ancho 8 Largo 16 Calibre 4  [PUL]" sale del Nombre del elemento en INVElementos -- no hay
+// columnas numericas de medida en la base, el dato solo vive dentro de ese texto (y codificado en
+// la Referencia, ej. BBDTRSTA8L16C4L0). Se recorta a la parte de la medida para el encabezado.
+function medidaDeBolsa(nombreElemento) {
+  const texto = String(nombreElemento || '');
+  const m = texto.match(/Ancho\s+[\d.]+\s+Largo\s+[\d.]+\s+Calibre\s+[\d.]+\s*(\[[^\]]+\])?/i);
+  return m ? m[0].replace(/\s+/g, ' ').trim() : '—';
+}
+
+// OJO CON LA ZONA HORARIA (comprobado 09/09/2026 contra la base): SQL Server guarda y devuelve
+// hora LOCAL de Colombia (GETDATE() = 14:39 cuando aca son las 14:39), pero el driver mssql la
+// entrega como Date de JS interpretandola como UTC. Si se formatea con toLocaleTimeString a secas,
+// el navegador le vuelve a restar 5 horas y un paquete pesado a las 14:39 se imprime "09:39".
+// Por eso se formatea con timeZone 'UTC': asi se muestran los campos tal como estan guardados, que
+// es justo la hora de pared que vio el operario. Las comparaciones y el orden de la bitacora no se
+// ven afectados -- todos los valores estan corridos por igual.
+// (Lo mismo le pasa a formatearFechaHora(), que usa la cola de ordenes; ahi el error existe desde
+// antes y no se toca en este cambio.)
+function horaCorta(fecha) {
+  if (!fecha) return '—';
+  return new Date(fecha).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' });
+}
+
+// Fecha + hora de un campo de la base, con el mismo cuidado de zona horaria que horaCorta().
+function fechaHoraLocalBD(fecha) {
+  if (!fecha) return '';
+  return new Date(fecha).toLocaleString('es-CO', {
+    day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+    hour12: false, timeZone: 'UTC'
+  });
+}
+
+const ETIQUETA_ACTIVIDAD = {
+  descanso: 'Descanso', mantenimiento: 'Mantenimiento', alistamiento: 'Alistamiento',
+  orden_aseo: 'Orden y aseo', limpieza: 'Limpieza', otro: 'Otro'
+};
+
+function renderReporteProduccion(datos, maquinaCodigo) {
+  const { orden, ejecucion, paquetes, bultos, rollos, hayHoraDeRollos, actividades, calidad, temperaturas, protocolo } = datos;
+  const esc = (t) => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const pistas = ejecucion && ejecucion.BolsasxGolpe ? ejecucion.BolsasxGolpe : '—';
+  const medida = medidaDeBolsa(orden.NombreElemento);
+
+  // Los rollos van numerados (Rollo 1, Rollo 2...): en la tabla no cabe el tiquete completo de 19
+  // digitos por fila, asi que ahi va el numero y el detalle queda en la seccion de arriba.
+  const rollosNumerados = rollos.map((r, i) => ({ ...r, numero: i + 1 }));
+  const rollosEnTiempo = rollosNumerados
+    .filter(r => r.FechaHora)
+    .map(r => ({ numero: r.numero, ms: new Date(r.FechaHora).getTime() }));
+
+  // De que rollo salio un paquete: el ultimo montado ANTES de que se pesara. Sin linea de tiempo
+  // de rollos (ordenes viejas) no se puede saber -- se deja vacio en vez de adivinar, salvo que el
+  // proceso haya consumido un unico rollo, donde no hay ambigüedad posible.
+  function rolloDe(ms) {
+    if (rollosEnTiempo.length === 0) return rollosNumerados.length === 1 ? '1' : '—';
+    let numero = null;
+    for (const r of rollosEnTiempo) { if (r.ms <= ms) numero = r.numero; else break; }
+    return numero == null ? '—' : String(numero);
+  }
+
+  // Un paquete se marca "No conforme" solo si el chequeo de SU bulto trae alguna respuesta
+  // NoConforme; por defecto va Conforme, que es el caso normal. Lo que el operario digito de
+  // verdad, pregunta por pregunta, va completo en el bloque "Registro de calidad" mas abajo.
+  const bultosNoConformes = new Set(
+    calidad.filter(c => c.Respuesta === 'NoConforme' && c.id_bulto != null).map(c => c.id_bulto)
+  );
+
+  // Temperatura vigente a la hora de cada paquete: el ultimo valor digitado ANTES de sellarlo.
+  const tempOrdenadas = temperaturas.map(t => ({ ms: new Date(t.FechaHora).getTime(), valor: Number(t.Porcentaje) }));
+  function temperaturaDe(paquete) {
+    if (paquete.Temperatura != null) return Number(paquete.Temperatura).toFixed(0) + ' %'; // si algun dia la manda el PLC
+    const ms = new Date(paquete.FechaHora).getTime();
+    let valor = null;
+    for (const t of tempOrdenadas) { if (t.ms <= ms) valor = t.valor; else break; }
+    return valor == null ? '—' : valor.toFixed(0) + ' %';
+  }
+
+  // ---- Bitacora: un solo hilo cronologico del proceso, de principio a fin ----
+  // Todo lo que paso queda en la misma linea de tiempo (montaje de rollos, apertura y cierre de
+  // bultos, cada paquete, los chequeos de calidad y las paradas), ordenado por hora. La prioridad
+  // desempata los eventos que caen en el mismo instante -- el cierre de un bulto y la apertura del
+  // siguiente comparten marca de tiempo exacta (el trigger abre el nuevo con la hora del cierre),
+  // y el cierre debe leerse primero.
+  const COLUMNAS_BITACORA = 11;
+  const eventos = [];
+  const ms = (f) => new Date(f).getTime();
+
+  if (ejecucion && ejecucion.HoraInicioReal) {
+    eventos.push({ ms: ms(ejecucion.HoraInicioReal), prioridad: 0, tipo: 'hito',
+      texto: `Inicio de la orden · operario ${ejecucion.OperarioNombre || '—'}`, inicio: ejecucion.HoraInicioReal });
+  }
+  for (const r of rollosNumerados) {
+    if (!r.FechaHora) continue;
+    const kg = r.Cantidad != null ? Number(r.Cantidad).toFixed(2) + ' kg' : '';
+    eventos.push({ ms: ms(r.FechaHora), prioridad: 1, tipo: 'rollo',
+      texto: `Rollo ${r.numero} montado · tiquete ${r.Tiquete}${kg ? ' · ' + kg : ''}${r.LoteMP ? ' · lote ' + r.LoteMP : ''}`,
+      inicio: r.FechaHora });
+  }
+  for (const b of bultos) {
+    if (b.HoraFin) {
+      const kg = b.CantidadTotal != null ? Number(b.CantidadTotal).toFixed(2) + ' kg' : '';
+      eventos.push({ ms: ms(b.HoraFin), prioridad: 2, tipo: 'bulto-fin',
+        texto: `Cierre del bulto ${b.num_bulto} · ${b.Paquetes} paquete(s)${kg ? ' · ' + kg : ''}`, inicio: b.HoraFin });
+    }
+    if (b.HoraInicio) {
+      eventos.push({ ms: ms(b.HoraInicio), prioridad: 3, tipo: 'bulto-ini',
+        texto: `Apertura del bulto ${b.num_bulto}`, inicio: b.HoraInicio });
+    }
+  }
+
+  // Hora inicio/final POR PAQUETE: el paquete se estuvo sellando desde que se cerro el anterior
+  // (o desde que se abrio el bulto, si es el primero) hasta que se peso, que es la unica marca de
+  // tiempo que registra la bascula.
+  const finPrevioPorBulto = new Map();
+  for (const b of bultos) finPrevioPorBulto.set(b.id, b.HoraInicio);
+  for (const pq of paquetes) {
+    const inicio = finPrevioPorBulto.get(pq.IdBulto) || pq.HoraInicio;
+    finPrevioPorBulto.set(pq.IdBulto, pq.FechaHora);
+    eventos.push({ ms: ms(pq.FechaHora), prioridad: 4, tipo: 'paquete', paquete: pq, inicio, fin: pq.FechaHora });
+  }
+
+  for (const c of [...new Map(calidad.map(c => [c.IdChequeo, c])).values()]) {
+    const respuestas = calidad.filter(x => x.IdChequeo === c.IdChequeo && x.Pregunta);
+    const noConformes = respuestas.filter(x => x.Respuesta === 'NoConforme').length;
+    eventos.push({ ms: ms(c.FechaHora), prioridad: 5, tipo: noConformes ? 'calidad-mala' : 'calidad',
+      texto: `Chequeo de calidad · ${respuestas.length} pregunta(s) · ${noConformes ? noConformes + ' NO CONFORME(S)' : 'todo conforme'} · ${c.OperarioNombre || '—'}`,
+      inicio: c.FechaHora });
+  }
+
+  for (const a of actividades) {
+    eventos.push({ ms: ms(a.HoraInicio), prioridad: 6, tipo: 'parada',
+      texto: `${ETIQUETA_ACTIVIDAD[a.Tipo] || a.Tipo}${a.Subtipo ? ' · ' + a.Subtipo : ''} · ${a.Minutos != null ? a.Minutos + ' min' : 'en curso'}${a.Observaciones ? ' · ' + a.Observaciones : ''}`,
+      inicio: a.HoraInicio, fin: a.HoraFin });
+  }
+
+  if (ejecucion && ejecucion.HoraFinReal) {
+    eventos.push({ ms: ms(ejecucion.HoraFinReal), prioridad: 9, tipo: 'hito',
+      texto: `Fin de la orden · operario ${ejecucion.OperarioFinalNombre || '—'}`, inicio: ejecucion.HoraFinReal });
+  }
+
+  eventos.sort((a, b) => a.ms - b.ms || a.prioridad - b.prioridad);
+
+  const filas = eventos.map(ev => {
+    if (ev.tipo !== 'paquete') {
+      return `
+      <tr class="ev ev-${ev.tipo}">
+        <td>${horaCorta(ev.inicio)}</td>
+        <td>${ev.fin ? horaCorta(ev.fin) : ''}</td>
+        <td colspan="${COLUMNAS_BITACORA - 2}">${esc(ev.texto)}</td>
+      </tr>`;
+    }
+    const pq = ev.paquete;
+    const calidadPaquete = bultosNoConformes.has(pq.IdBulto) ? 'No conforme' : 'Conforme';
+    return `
+      <tr>
+        <td>${horaCorta(ev.inicio)}</td>
+        <td>${horaCorta(ev.fin)}</td>
+        <td class="num">${rolloDe(ev.ms)}</td>
+        <td class="num">${pq.num_bulto}</td>
+        <td class="num">${pq.ConsecutivoPaquete}</td>
+        <td class="num">${UNIDADES_POR_PAQUETE}</td>
+        <td class="num">${pq.PesoPaqueGr != null ? Number(pq.PesoPaqueGr).toFixed(3) : '—'}</td>
+        <td class="num">${pq.Golpes != null ? pq.Golpes : '—'}</td>
+        <td class="num">${pq.Potencia != null ? Number(pq.Potencia).toFixed(0) : '—'}</td>
+        <td class="num">${temperaturaDe(pq)}</td>
+        <td class="${calidadPaquete === 'Conforme' ? 'ok' : 'malo'}">${calidadPaquete}</td>
+      </tr>`;
+  }).join('');
+
+  // Nombre con el que el navegador propone guardar el PDF (ver el <title> mas abajo).
+  const hoy = new Date();
+  const fechaArchivo = String(hoy.getDate()).padStart(2, '0') + '-' +
+                       String(hoy.getMonth() + 1).padStart(2, '0') + '-' + hoy.getFullYear();
+  const nombreArchivo = `Reporte pedido ${(orden.NumeroPedido || 'sin pedido')} - orden ${orden.IdOrden} - ${fechaArchivo}`
+    .replace(/[\\/:*?"<>|]/g, '-');
+
+  const totalUnidades = paquetes.length * UNIDADES_POR_PAQUETE;
+  const totalKg = paquetes.reduce((s, p) => s + (p.PesoPaqueGr != null ? Number(p.PesoPaqueGr) : 0), 0);
+
+  const filasRollos = rollosNumerados.length
+    ? rollosNumerados.map(r => `<li><b>Rollo ${r.numero}</b> · <span class="mono">${esc(r.Tiquete)}</span>${r.Cantidad != null ? ' · ' + Number(r.Cantidad).toFixed(2) + ' kg' : ''}${r.LoteMP ? ' · lote ' + esc(r.LoteMP) : ''}${r.Bodega ? ' · bodega ' + esc(r.Bodega) : ''}${r.FechaHora ? ' · montado ' + horaCorta(r.FechaHora) : ''}</li>`).join('')
+    : '<li>Sin rollos registrados</li>';
+
+  // Resumen de paradas por tipo: el detalle de cada una ya va en su lugar dentro de la bitacora,
+  // aca solo interesa el total del turno.
+  const minutosPorTipo = new Map();
+  for (const a of actividades) {
+    const clave = ETIQUETA_ACTIVIDAD[a.Tipo] || a.Tipo;
+    minutosPorTipo.set(clave, (minutosPorTipo.get(clave) || 0) + (a.Minutos || 0));
+  }
+  const totalParadas = [...minutosPorTipo.values()].reduce((s, m) => s + m, 0);
+  const resumenParadas = minutosPorTipo.size
+    ? [...minutosPorTipo.entries()].map(([tipo, min]) => `<span>${esc(tipo)}: <b>${min} min</b></span>`).join('')
+      + `<span>Total: <b>${totalParadas} min</b> en ${actividades.length} parada(s)</span>`
+    : '<span>Sin paradas registradas en esta orden.</span>';
+
+  // Registro de calidad: exactamente lo que el operario respondio, chequeo por chequeo.
+  const porChequeo = new Map();
+  for (const c of calidad) {
+    if (!porChequeo.has(c.IdChequeo)) {
+      porChequeo.set(c.IdChequeo, { hora: c.FechaHora, operario: c.OperarioNombre, bulto: c.id_bulto, respuestas: [] });
+    }
+    if (c.Pregunta) porChequeo.get(c.IdChequeo).respuestas.push(c);
+  }
+  const bloquesCalidad = porChequeo.size
+    ? [...porChequeo.values()].map(ch => `
+        <div class="chequeo">
+          <div class="chequeo-cab">
+            <strong>${horaCorta(ch.hora)}</strong> · ${esc(ch.operario || 'sin operario')}
+            ${ch.bulto != null ? ' · bulto ' + ch.bulto : ' · sin bulto activo'}
+          </div>
+          <ul>${ch.respuestas.map(r => `<li><span>${esc(r.Apartado || '')} — ${esc(r.Pregunta)}</span><b class="${r.Respuesta === 'NoConforme' ? 'malo' : 'ok'}">${r.Respuesta === 'NoConforme' ? 'No conforme' : 'Conforme'}</b></li>`).join('')}</ul>
+        </div>`).join('')
+    : '<p class="vacio">Sin chequeos de calidad registrados en esta orden.</p>';
+
+  // Protocolo de arranque (09/09/2026): las respuestas del operario antes de empezar a producir.
+  // Se reusa el marcado de "Registro de calidad" (.chequeo) porque es exactamente el mismo tipo de
+  // lista pregunta/respuesta. Las dos actividades cronometradas del protocolo (limpieza y
+  // alistamiento) NO se repiten aca: ya salen en la bitacora y en "Paradas del turno", como
+  // cualquier otra parada.
+  const TEXTO_PASO_PROTOCOLO = {
+    limpieza: 'Limpieza y desinfección',
+    peligro_quimico: '¿Detecta algún peligro químico (aceites y lubricantes)?',
+    rollo_estado: '¿El rollo está en buen estado?',
+    peligro_fisico: '¿Identifica algún peligro físico (cabellos, insectos, material extraño, material particulado)?',
+    alistamiento: 'Alistamiento',
+    temperatura: 'Temperatura de trabajo de la perilla (%)'
+  };
+  // Un "Sí" solo es malo en las preguntas de peligro; en "¿el rollo está en buen estado?" es lo
+  // esperado. Por eso el color no sale del texto de la respuesta sino de que pregunta es.
+  const respuestaMalaProtocolo = (paso, respuesta) =>
+    (paso === 'peligro_quimico' || paso === 'peligro_fisico') ? respuesta === 'Si'
+    : (paso === 'rollo_estado' ? respuesta === 'No' : false);
+  const preguntasProtocolo = protocolo.filter(x => ['peligro_quimico', 'rollo_estado', 'peligro_fisico', 'temperatura'].includes(x.Paso));
+  const bloqueProtocolo = preguntasProtocolo.length
+    ? `<div class="chequeo">
+         <div class="chequeo-cab"><strong>${horaCorta(preguntasProtocolo[0].FechaHora)}</strong> · ${esc(preguntasProtocolo[0].OperarioNombre || 'sin operario')}</div>
+         <ul>${preguntasProtocolo.map(r => `<li><span>${horaCorta(r.FechaHora)} — ${esc(TEXTO_PASO_PROTOCOLO[r.Paso] || r.Paso)}${r.Serial ? ' <span class="mono">(' + esc(r.Serial) + ')</span>' : ''}</span><b class="${respuestaMalaProtocolo(r.Paso, r.Respuesta) ? 'malo' : 'ok'}">${esc(r.Respuesta == null ? '—' : r.Respuesta)}</b></li>`).join('')}</ul>
+       </div>`
+    : '<p class="vacio">Sin protocolo de arranque registrado en esta orden.</p>';
+
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- El titulo es tambien el NOMBRE DEL ARCHIVO que propone el navegador al guardar como PDF, por
+eso lleva pedido/orden/fecha y no un titulo bonito: asi el digitador no termina con veinte
+"documento.pdf". Se evitan / \\ : * ? " < > | porque Windows no los admite en un nombre. -->
+<title>${esc(nombreArchivo)}</title>
+<style>
+  /* Hoja carta, pensada para salir por una impresora normal desde el navegador. Todo el color se
+  reduce a negro sobre blanco al imprimir: en pantalla se ve igual, para poder revisarlo antes. */
+  @page { size: letter; margin: 12mm 10mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    margin: 0; padding: 16px; background: #f4f6f8; color: #1c2733; font-size: 13px;
+  }
+  .hoja { max-width: 1100px; margin: 0 auto; background: #fff; padding: 22px 24px 28px; }
+  .barra { display: flex; gap: 10px; justify-content: flex-end; margin: 0 auto 12px; max-width: 1100px; }
+  .btn {
+    appearance: none; border: none; border-radius: 8px; padding: 11px 18px; font-size: 14px;
+    font-weight: 600; font-family: inherit; color: #fff; background: #71bf44; cursor: pointer;
+  }
+  .btn.gris { background: #64748b; text-decoration: none; display: inline-block; }
+  .btn.azul { background: #006984; }
+  .ayuda-pdf {
+    max-width: 1100px; margin: 0 auto 12px; background: #e2eff3; border-left: 4px solid #006984;
+    padding: 10px 14px; font-size: 13px; color: #1c2733; border-radius: 6px;
+  }
+  h1 { font-size: 19px; margin: 0 0 2px; }
+  .sub { color: #64748b; font-size: 13px; margin-bottom: 14px; }
+  .cab { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 22px; margin-bottom: 14px; }
+  .cab div { border-bottom: 1px solid #eef0f2; padding-bottom: 4px; }
+  .cab .et { color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; display: block; }
+  .cab .va { font-weight: 600; }
+  h2 { font-size: 14px; margin: 18px 0 8px; border-bottom: 1px solid #1c2733; padding-bottom: 4px; }
+  table { border-collapse: collapse; width: 100%; font-size: 11.5px; }
+  th { text-align: left; background: #eef0f2; border: 1px solid #cfd8dc; padding: 5px 6px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.03em; }
+  td { border: 1px solid #dde4e7; padding: 4px 6px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.mono { font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+  /* Filas de evento de la bitacora: no son paquetes, son lo que paso entre paquete y paquete. Se
+  distinguen por un fondo tenue y el texto en cursiva, para que al hojear el papel se vea de una
+  donde se monto un rollo o donde se paro la maquina. En impresion los fondos claros se conservan
+  con print-color-adjust; si la impresora los ignora, el borde izquierdo grueso los mantiene
+  distinguibles igual. */
+  tr.ev td { font-style: italic; background: #f4f6f8; }
+  tr.ev td:nth-child(3) { border-left: 3px solid #9fb2b9; font-style: italic; }
+  tr.ev-rollo td { background: #e2eff3; }
+  tr.ev-rollo td:nth-child(3) { border-left-color: #006984; }
+  tr.ev-hito td { background: #e9f6e3; font-weight: 700; font-style: normal; }
+  tr.ev-hito td:nth-child(3) { border-left-color: #3f8c26; }
+  tr.ev-parada td { background: #fbf1de; }
+  tr.ev-parada td:nth-child(3) { border-left-color: #9a6205; }
+  tr.ev-calidad-mala td { background: #fbe9e9; color: #b31414; font-weight: 700; }
+  tr.ev-calidad-mala td:nth-child(3) { border-left-color: #b31414; }
+  .ok { color: #2f7a17; }
+  .malo { color: #c00000; font-weight: 700; }
+  .totales { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px 26px; font-size: 12.5px; }
+  .resumen-paradas span { background: #f4f6f8; padding: 3px 9px; border-radius: 4px; }
+  .totales b { font-variant-numeric: tabular-nums; }
+  ul.rollos { margin: 0; padding-left: 18px; }
+  ul.rollos li { margin-bottom: 3px; }
+  .chequeo { border: 1px solid #dde4e7; padding: 8px 10px; margin-bottom: 8px; break-inside: avoid; }
+  .chequeo-cab { font-size: 12px; margin-bottom: 5px; }
+  .chequeo ul { margin: 0; padding: 0; list-style: none; font-size: 12px; }
+  .chequeo li { display: flex; justify-content: space-between; gap: 14px; border-top: 1px solid #f1f4f5; padding: 2px 0; }
+  .vacio { color: #64748b; }
+  .firmas { margin-top: 26px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 30px; }
+  .firma { border-top: 1px solid #1c2733; padding-top: 5px; font-size: 11px; color: #64748b; }
+
+  @media print {
+    body { background: #fff; padding: 0; font-size: 11px; }
+    .hoja { max-width: none; padding: 0; }
+    .barra, .ayuda-pdf { display: none !important; }
+    thead { display: table-header-group; }
+    tr, .chequeo { break-inside: avoid; }
+    h2 { break-after: avoid; }
+    /* Que los fondos de las filas de evento sobrevivan a la impresion (por defecto el navegador
+    descarta los fondos para ahorrar tinta). */
+    tr.ev td { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+</style>
+</head>
+<body>
+  <div class="barra">
+    <a class="btn gris" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}">← Volver</a>
+    <button type="button" class="btn azul" onclick="guardarPdf()">📄 Guardar PDF</button>
+    <button type="button" class="btn" onclick="window.print()">🖨️ Imprimir</button>
+  </div>
+  <div class="ayuda-pdf" id="ayuda-pdf" hidden>
+    En la ventana que se abre, elija <strong>“Guardar como PDF”</strong> en <em>Destino</em>
+    (en la tableta: <strong>“Guardar como PDF”</strong> en la lista de impresoras) y confirme.
+    El archivo se propone como <strong>${esc(nombreArchivo)}</strong>.
+  </div>
+  <div class="hoja">
+    <h1>Reporte de producción — Selladora</h1>
+    <div class="sub">${esc(orden.MaquinaNombre)} · Orden ${orden.IdOrden} · Impreso el ${new Date().toLocaleString('es-CO', { hour12: false })}</div>
+
+    <div class="cab">
+      <div><span class="et">Pedido</span><span class="va">${esc(orden.NumeroPedido || '—')}</span></div>
+      <div><span class="et">Referencia</span><span class="va">${esc(orden.Elemento)}</span></div>
+      <div><span class="et">Medida de la bolsa</span><span class="va">${esc(medida)}</span></div>
+      <div><span class="et">Pistas (bolsas x golpe)</span><span class="va">${pistas}</span></div>
+      <div><span class="et">Operario que inició</span><span class="va">${esc(ejecucion && ejecucion.OperarioNombre || '—')}</span></div>
+      <div><span class="et">Operario que finalizó</span><span class="va">${esc(ejecucion && ejecucion.OperarioFinalNombre || '—')}</span></div>
+      <div><span class="et">Hora inicio</span><span class="va">${ejecucion ? fechaHoraLocalBD(ejecucion.HoraInicioReal) || '—' : '—'}</span></div>
+      <div><span class="et">Hora final</span><span class="va">${ejecucion ? fechaHoraLocalBD(ejecucion.HoraFinReal) || 'en curso' : '—'}</span></div>
+      <div><span class="et">Estado</span><span class="va">${esc(orden.Estado)}</span></div>
+    </div>
+
+    <h2>Rollos de entrada (tiquetes)</h2>
+    <ul class="rollos">${filasRollos}</ul>
+
+    <h2>Bitácora de producción</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Hora inicio</th><th>Hora final</th><th>Rollo</th><th>Bulto</th><th>Paquete</th>
+          <th>Unidades</th><th>Peso kg</th><th>Golpes x min</th><th>Potencia</th>
+          <th>Temp. perilla</th><th>Calidad</th>
+        </tr>
+      </thead>
+      <tbody>${filas || `<tr><td colspan="${COLUMNAS_BITACORA}">Esta orden todavía no tiene movimientos registrados.</td></tr>`}</tbody>
+    </table>
+    <div class="totales">
+      <span>Paquetes: <b>${paquetes.length}</b></span>
+      <span>Unidades producidas: <b>${totalUnidades.toLocaleString('es-CO')}</b></span>
+      <span>Peso total: <b>${totalKg.toFixed(2)} kg</b></span>
+      <span>Pistas: <b>${pistas}</b></span>
+    </div>
+
+    <h2>Paradas del turno</h2>
+    <div class="totales resumen-paradas">${resumenParadas}</div>
+
+    <h2>Protocolo de arranque</h2>
+    ${bloqueProtocolo}
+
+    <h2>Registro de calidad</h2>
+    ${bloquesCalidad}
+
+    <div class="firmas">
+      <div class="firma">Operario</div>
+      <div class="firma">Supervisor</div>
+      <div class="firma">Calidad</div>
+    </div>
+  </div>
+<script>
+  // Guardar como PDF sale del MISMO dialogo de impresion (destino "Guardar como PDF"), no de una
+  // libreria: el servidor de planta corre en una red local sin salida a internet y sin Chrome
+  // headless instalado, asi que meter puppeteer/jsPDF seria cargarle al proyecto cientos de MB (o
+  // una imagen rasterizada, con el texto de la tabla ilegible) para hacer lo que el navegador ya
+  // hace nativo y con texto seleccionable. Lo unico que aporta este boton sobre "Imprimir" es
+  // recordar donde esta la opcion -- el nombre del archivo ya lo resuelve el <title>.
+  function guardarPdf() {
+    var ayuda = document.getElementById('ayuda-pdf');
+    if (ayuda) ayuda.hidden = false;
+    // Un respiro para que el aviso alcance a pintarse antes de que el dialogo bloquee la pagina.
+    setTimeout(function() { window.print(); }, 60);
+  }
+</script>
+</body>
+</html>`;
+}
+
+app.get('/selladora/:codigo/orden/:idOrden/reporte', requireLogin, async (req, res) => {
+  const { codigo, idOrden } = req.params;
+  try {
+    const p = await getPool();
+    const datos = await obtenerDatosReporte(p, idOrden);
+    if (!datos) return res.status(404).send(renderErrorSimple('Orden no encontrada.', `/selladora/${codigo}`));
+    res.send(renderReporteProduccion(datos, codigo));
+  } catch (err) {
+    res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}/orden/${idOrden}`));
+  }
+});
+
+// Temperatura de la perilla que digita el operario (ver agregar_temperatura_perilla.sql). Se
+// guarda con la hora para que el reporte pueda decir que valor estaba puesto en cada paquete.
+app.post('/api/selladora/orden/:idOrden/temperatura', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  const porcentaje = Number(req.body && req.body.porcentaje);
+  if (!Number.isFinite(porcentaje) || porcentaje < 0 || porcentaje > 100) {
+    return res.json({ ok: false, error: 'La temperatura debe ser un porcentaje entre 0 y 100.' });
+  }
+  try {
+    const p = await getPool();
+    const dtEj = await p.request().input('idOrden', idOrden).query(
+      `SELECT TOP 1 IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden ORDER BY IdEjecucion ASC`
+    );
+    if (dtEj.recordset.length === 0) {
+      return res.json({ ok: false, error: 'No se encontró la ejecución de esta orden.' });
+    }
+    await p.request()
+      .input('idEjecucion', dtEj.recordset[0].IdEjecucion)
+      .input('operario', req.session.usuario.codigoOperarioPRD || null)
+      .input('porcentaje', porcentaje)
+      .query(`INSERT INTO SEL_TemperaturaPerilla (id_ejecucion, Operario, Porcentaje) VALUES (@idEjecucion, @operario, @porcentaje)`);
+    res.json({ ok: true });
+  } catch (err) {
+    // Mensaje util si todavia no se ejecuto el script SQL en esta base.
+    const falta = /Invalid object name/i.test(err.message);
+    res.json({ ok: false, error: falta ? 'Falta crear la tabla SEL_TemperaturaPerilla (ejecute agregar_temperatura_perilla.sql).' : err.message });
+  }
+});
+
 const COMANDOS_VALIDOS = new Set([
   'imprimir_etiqueta', 'reimprimir_etiqueta', 'cierre_bulto', 'retal', 'troquelado', 'refilado', 'calidad', 'no_conforme'
 ]);
@@ -3519,7 +4835,11 @@ const COMANDOS_VALIDOS = new Set([
 // debe quedar UN solo registro por orden" (mismo criterio que scan-rollo.js) -- se busca por
 // IdOrden, no hay que resolver bulto activo para esto.
 const MOTIVOS_PAUSA_VALIDOS = new Set(['descanso', 'mantenimiento', 'alistamiento', 'orden_aseo', 'limpieza', 'otro']);
-const SUBMOTIVOS_ALISTAMIENTO_VALIDOS = new Set(['materiales', 'mecanico', 'espacio_trabajo']);
+// 'arranque' (09/09/2026) es el submotivo del alistamiento del paso 5 del protocolo de arranque
+// (ver scriptProtocoloArranque): no lo elige el operario -- arranca solo apenas se acepta el rollo,
+// por eso no aparece en la lista de SUBMOTIVOS_ALISTAMIENTO del boton de Pausa, solo aca en la
+// validacion. Requiere el ALTER de CK_SEL_TiempoMuerto_Subtipo de agregar_protocolo_arranque.sql.
+const SUBMOTIVOS_ALISTAMIENTO_VALIDOS = new Set(['materiales', 'mecanico', 'espacio_trabajo', 'arranque']);
 
 app.post('/api/selladora/orden/:idOrden/pausar', requireLogin, async (req, res) => {
   const idOrden = Number(req.params.idOrden);
@@ -3577,12 +4897,15 @@ app.post('/api/selladora/orden/:idOrden/reanudar', requireLogin, async (req, res
   try {
     const p = await getPool();
     const dtEj = await p.request().input('idOrden', idOrden).query(
-      `SELECT TOP 1 IdEjecucion, Estado FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden`
+      `SELECT TOP 1 ej.IdEjecucion, ej.Estado, ord.Estado AS EstadoOrden
+       FROM SEL_EjecucionOrden ej
+       INNER JOIN SEL_OrdenProduccion ord ON ord.IdOrden = ej.IdOrden
+       WHERE ej.IdOrden = @idOrden`
     );
     if (dtEj.recordset.length === 0) {
       return res.json({ ok: false, error: 'No se encontró la ejecución de esta orden.' });
     }
-    const { IdEjecucion, Estado } = dtEj.recordset[0];
+    const { IdEjecucion, Estado, EstadoOrden } = dtEj.recordset[0];
     if (Estado !== 'En pausa') {
       return res.json({ ok: false, error: 'Esta orden no está en pausa.' });
     }
@@ -3594,15 +4917,172 @@ app.post('/api/selladora/orden/:idOrden/reanudar', requireLogin, async (req, res
       UPDATE SEL_TiempoMuerto SET HoraFin = GETDATE()
       WHERE id_ejecucion = @idEjecucion AND HoraFin IS NULL
     `);
-    await p.request().input('idEjecucion', IdEjecucion).query(
-      `UPDATE SEL_EjecucionOrden SET Estado = 'Activa' WHERE IdEjecucion = @idEjecucion`
-    );
+    // FIX 09/09/2026: al reanudar ya no se pone 'Activa' a ciegas. El paso 1 del protocolo de
+    // arranque (limpieza y desinfeccion) pausa la ejecucion cuando la orden TODAVIA esta Pendiente
+    // -- su registro en SEL_EjecucionOrden sigue siendo el placeholder que creo Programacion.vb, y
+    // dejarlo en 'Activa' sin que se haya escaneado ningun rollo lo hacia aparecer como una
+    // ejecucion en curso (el /logout, por ejemplo, lo marcaba 'PendienteOperador'). La ejecucion
+    // vuelve al estado que le corresponde segun la ORDEN: solo es 'Activa' si la orden ya arranco.
+    await p.request().input('idEjecucion', IdEjecucion)
+      .input('estado', EstadoOrden === 'Activa' ? 'Activa' : 'Pendiente')
+      .query(`UPDATE SEL_EjecucionOrden SET Estado = @estado WHERE IdEjecucion = @idEjecucion`);
 
     res.json({ ok: true });
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
 });
+
+// ======================= Protocolo de arranque de una orden (09/09/2026) =======================
+//
+// Secuencia obligatoria que reemplaza al viejo "Iniciar -> escanear rollo -> ¿va a hacer alguna
+// actividad?" (a pedido del usuario). El guion completo vive en el cliente
+// (scriptProtocoloArranque), aca solo estan las dos piezas que necesitan la base:
+//
+//   - POST .../protocolo/respuesta : deja constancia de cada respuesta en SEL_ProtocoloArranque.
+//   - obtenerProtocoloPendiente()  : deduce en que paso iba un protocolo a medias, para retomarlo
+//                                    si la tableta se recargo/apago (el tiempo sigue corriendo en
+//                                    la base, no en el navegador).
+//
+// Las dos actividades cronometradas del protocolo (limpieza del paso 1, alistamiento del paso 5)
+// NO tienen endpoint propio: usan los mismos /pausar y /reanudar del boton de Pausa, para que
+// queden en SEL_TiempoMuerto exactamente igual que cualquier otra actividad -- que era justo lo
+// pedido ("queda registrado de la misma manera como actividad").
+const PASOS_PROTOCOLO_VALIDOS = new Set([
+  'limpieza', 'peligro_quimico', 'rollo_estado', 'peligro_fisico', 'alistamiento', 'temperatura'
+]);
+
+app.post('/api/selladora/orden/:idOrden/protocolo/respuesta', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  const { paso, respuesta, serial, observaciones } = req.body || {};
+  if (!PASOS_PROTOCOLO_VALIDOS.has(paso)) {
+    return res.json({ ok: false, error: 'Paso de protocolo inválido.' });
+  }
+  const recorte = (valor, largo) => (valor == null || String(valor).trim() === '') ? null : String(valor).trim().slice(0, largo);
+  try {
+    const p = await getPool();
+    const dtEj = await p.request().input('idOrden', idOrden).query(
+      `SELECT TOP 1 IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden ORDER BY IdEjecucion ASC`
+    );
+    if (dtEj.recordset.length === 0) {
+      return res.json({ ok: false, error: 'No se encontró la ejecución de esta orden.' });
+    }
+    await p.request()
+      .input('idEjecucion', dtEj.recordset[0].IdEjecucion)
+      .input('idOrden', idOrden)
+      .input('operario', req.session.usuario.codigoOperarioPRD || null)
+      .input('paso', paso)
+      .input('respuesta', recorte(respuesta, 20))
+      .input('serial', recorte(serial, 30))
+      .input('observaciones', recorte(observaciones, 255))
+      .query(`
+        INSERT INTO SEL_ProtocoloArranque (id_ejecucion, IdOrden, Operario, Paso, Respuesta, Serial, Observaciones)
+        VALUES (@idEjecucion, @idOrden, @operario, @paso, @respuesta, @serial, @observaciones)
+      `);
+    res.json({ ok: true });
+  } catch (err) {
+    // Mismo criterio que /temperatura: si todavia no se corrio el script SQL en esta base, el
+    // mensaje dice exactamente que falta en vez de un "Invalid object name" crudo.
+    const falta = /Invalid object name/i.test(err.message);
+    res.json({ ok: false, error: falta ? 'Falta crear la tabla SEL_ProtocoloArranque (ejecute agregar_protocolo_arranque.sql).' : err.message });
+  }
+});
+
+// En que paso quedo un protocolo a medias, o null si no hay ninguno pendiente para esta orden.
+// Se deduce de lo que hay en la BASE (no de nada guardado en el navegador), para que el protocolo
+// se retome igual aunque la tableta se haya recargado, apagado o cambiado de manos:
+//   - Hay una actividad del protocolo SIN HoraFin -> el cronometro de ese paso sigue corriendo.
+//   - La orden sigue Pendiente y ya hay respuestas guardadas -> falta el peligro quimico (si la
+//     ultima respuesta no fue 'No') o el escaneo del rollo.
+//   - La orden ya esta Activa y el alistamiento del protocolo quedo registrado pero la temperatura
+//     no -> falta el paso 6.
+// Nunca revienta la pagina: ante cualquier error (tipico: falta ejecutar el script SQL) devuelve
+// null y la orden se comporta como antes -- el protocolo vuelve a empezar desde el boton Iniciar.
+async function obtenerProtocoloPendiente(p, idOrden) {
+  try {
+    const dtEj = await p.request().input('idOrden', idOrden).query(`
+      SELECT TOP 1 ej.IdEjecucion, ord.Estado AS EstadoOrden
+      FROM SEL_EjecucionOrden ej
+      INNER JOIN SEL_OrdenProduccion ord ON ord.IdOrden = ej.IdOrden
+      WHERE ej.IdOrden = @idOrden ORDER BY ej.IdEjecucion ASC
+    `);
+    if (dtEj.recordset.length === 0) return null;
+    const { IdEjecucion, EstadoOrden } = dtEj.recordset[0];
+    if (EstadoOrden !== 'Pendiente' && EstadoOrden !== 'Activa') return null;
+
+    const dtAbierta = await p.request().input('idEjecucion', IdEjecucion).query(`
+      SELECT TOP 1 Tipo, Subtipo, HoraInicio FROM SEL_TiempoMuerto
+      WHERE id_ejecucion = @idEjecucion AND HoraFin IS NULL ORDER BY id DESC
+    `);
+    const abierta = dtAbierta.recordset[0];
+    const tipoAbierto = abierta ? String(abierta.Tipo || '').toLowerCase() : '';
+    const subtipoAbierto = abierta ? String(abierta.Subtipo || '').toLowerCase() : '';
+    if (tipoAbierto === 'limpieza' && EstadoOrden === 'Pendiente') {
+      return { idOrden: Number(idOrden), paso: 'limpieza', horaInicio: abierta.HoraInicio };
+    }
+    if (tipoAbierto === 'alistamiento' && subtipoAbierto === 'arranque') {
+      return { idOrden: Number(idOrden), paso: 'alistamiento', horaInicio: abierta.HoraInicio };
+    }
+
+    const dtPasos = await p.request().input('idEjecucion', IdEjecucion).query(
+      `SELECT Paso, Respuesta FROM SEL_ProtocoloArranque WHERE id_ejecucion = @idEjecucion ORDER BY Id ASC`
+    );
+    const pasos = dtPasos.recordset;
+    if (pasos.length === 0) return null; // este protocolo nunca arranco -- boton Iniciar normal
+
+    if (EstadoOrden === 'Pendiente') {
+      const quimico = [...pasos].reverse().find(x => x.Paso === 'peligro_quimico');
+      if (!quimico || quimico.Respuesta !== 'No') return { idOrden: Number(idOrden), paso: 'peligro_quimico' };
+      return { idOrden: Number(idOrden), paso: 'rollo' };
+    }
+
+    if (pasos.some(x => x.Paso === 'alistamiento') && !pasos.some(x => x.Paso === 'temperatura')) {
+      return { idOrden: Number(idOrden), paso: 'temperatura' };
+    }
+    return null;
+  } catch (err) {
+    console.error('No se pudo leer el protocolo de arranque (¿falta ejecutar agregar_protocolo_arranque.sql?):', err.message);
+    return null;
+  }
+}
+
+// Lo consulta el boton "▶ Iniciar" antes de arrancar el protocolo desde cero (ver
+// iniciarProtocoloArranque): si esta orden ya lo tiene a medias, la tableta lo retoma en el paso
+// que iba en vez de volver a cronometrar una limpieza que ya se hizo.
+app.get('/api/selladora/orden/:idOrden/protocolo/estado', requireLogin, async (req, res) => {
+  try {
+    const p = await getPool();
+    res.json({ ok: true, pendiente: await obtenerProtocoloPendiente(p, Number(req.params.idOrden)) });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// Igual que la anterior pero para la pagina de la cola, donde no hay una orden fija: busca cual de
+// las ordenes de esta maquina (si alguna) tiene el protocolo a medias. Primero acota con una sola
+// consulta a las que tienen rastro de protocolo, y solo sobre esa resuelve el paso exacto.
+async function obtenerProtocoloPendienteMaquina(p, codigo) {
+  try {
+    const dt = await p.request().input('codigo', codigo).query(`
+      SELECT TOP 1 ord.IdOrden
+      FROM SEL_OrdenProduccion ord
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
+      WHERE ord.Maquina = @codigo AND ord.Estado IN ('Pendiente','Activa')
+        AND (
+          EXISTS (SELECT 1 FROM SEL_TiempoMuerto tm
+                  WHERE tm.id_ejecucion = ej.IdEjecucion AND tm.HoraFin IS NULL
+                    AND (tm.Tipo = 'limpieza' OR (tm.Tipo = 'alistamiento' AND tm.Subtipo = 'arranque')))
+          OR EXISTS (SELECT 1 FROM SEL_ProtocoloArranque pa WHERE pa.id_ejecucion = ej.IdEjecucion)
+        )
+      ORDER BY CASE ord.Estado WHEN 'Activa' THEN 0 ELSE 1 END, ord.IdOrden ASC
+    `);
+    if (dt.recordset.length === 0) return null;
+    return await obtenerProtocoloPendiente(p, dt.recordset[0].IdOrden);
+  } catch (err) {
+    console.error('No se pudo buscar el protocolo de arranque de la máquina:', err.message);
+    return null;
+  }
+}
 
 // GET: para el sondeo de scriptAvisoSuspension -- por MÁQUINA (no por orden), así sirve tanto en la
 // página de la cola (renderPage) como en el detalle de la orden (renderOrdenDetalle) sin que el

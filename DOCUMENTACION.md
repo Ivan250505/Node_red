@@ -134,3 +134,87 @@ se registra un evento `Entrada` en `SISAccesos` con `Origen = 'Manual'`; al pres
 
 - `SISAccesos` queda como bitácora independiente de la sesión: aunque la cookie dure 8h y se cierre sola, el par Entrada/Salida real solo se registra cuando de verdad se usa `/login` o "Cerrar sesión".
 - `/logout` hace algo más que cerrar la sesión: si el operario tenía una ejecución `Activa` a su nombre, la deja en `PendienteOperador` para que otro pueda retomarla (ver `server.js`).
+
+## 10. Protocolo de arranque de una orden (09/09/2026)
+
+Al pulsar **"▶ Iniciar"** una orden ya no se abre directo el escaneo del rollo: la tableta guía una
+secuencia fija de pasos que no se pueden saltar ni reordenar.
+
+| Paso | Qué pasa | Dónde queda registrado |
+|---|---|---|
+| 1 | Limpieza y desinfección: se avisa y arranca el cronómetro | `SEL_TiempoMuerto` (`Tipo='limpieza'`), igual que el botón de Pausa |
+| 2 | Al terminarla: *¿Detecta algún peligro químico (aceites y lubricantes)?* — si **Sí**, sale el aviso de comunicarse con el jefe de planta y no se puede seguir | `SEL_ProtocoloArranque` (`Paso='peligro_quimico'`) |
+| 3 | Se abre el escaneo del rollo de siempre | igual que antes (`scan-rollo.js`) |
+| 4 | Con el rollo consultado y **antes** de confirmarlo: *¿El rollo está en buen estado?* y *¿Identifica algún peligro físico?* — si el rollo está mal o hay peligro, se pide escanear otro | `SEL_ProtocoloArranque` (`rollo_estado` / `peligro_fisico`, con el serial) |
+| 5 | Confirmado el rollo arranca la ejecución y empieza el cronómetro del alistamiento | `SEL_TiempoMuerto` (`Tipo='alistamiento'`, `Subtipo='arranque'`) |
+| 6 | Al terminar el alistamiento se pide la temperatura de trabajo de la perilla | `SEL_TemperaturaPerilla` + `SEL_ProtocoloArranque` |
+
+Notas:
+
+- **El botón "🌡️ Temperatura perilla" de la página de Información se eliminó**: la temperatura se
+  pide una sola vez, en el paso 6. Si se necesita volver a registrarla cuando el operario mueve la
+  perilla a mitad de la orden, hay que reponer ese botón.
+- **Nada del protocolo vive en el navegador.** Cada paso queda en la base apenas se responde, así que
+  si la tableta se recarga, se apaga o se bloquea a mitad, al volver a entrar se retoma en el mismo
+  paso y el cronómetro sigue con la hora real (ver `obtenerProtocoloPendiente` en `server.js`).
+- El protocolo completo aplica **solo a Iniciar**. De "+ Rollo" (añadir un rollo a una orden ya en
+  curso) sí se pide el chequeo del paso 4 — *¿está en buen estado?* y *¿algún peligro físico?*, sin
+  la numeración 4.1/4.2 — antes de confirmar el rollo (a pedido del usuario, 09/09/2026): un rollo
+  que entra a mitad de la orden se revisa igual que el primero. Los otros pasos no se repiten.
+- Los dos cronómetros usan los mismos `POST /pausar` y `POST /reanudar` del botón de Pausa, para que
+  queden en `SEL_TiempoMuerto` como cualquier otra actividad.
+- Requiere ejecutar **`agregar_protocolo_arranque.sql`** una sola vez contra la base: crea
+  `SEL_ProtocoloArranque` y agrega `'ARRANQUE'` a `CK_SEL_TiempoMuerto_Subtipo`. El paso 6 además
+  necesita `agregar_temperatura_perilla.sql`.
+- El reporte de producción trae un bloque nuevo, **"Protocolo de arranque"**, con las respuestas tal
+  como las dio el operario. Las dos actividades cronometradas no se repiten ahí: ya salen en la
+  bitácora y en "Paradas del turno".
+
+## 11. Volver a pesar un paquete (09/09/2026)
+
+En la página de **Bultos**, tocar un paquete ya no reimprime de una: sale un menú con dos opciones.
+
+- **🖨️ Reimprimir etiqueta** — lo de siempre.
+- **⚖️ Volver a pesar** — abre una ventana con el peso **en vivo de la báscula** (el mismo `/ws/peso`
+  de la página de Información). El operario vuelve a poner el paquete, pulsa "Guardar este peso" y
+  la etiqueta se reimprime sola con el peso corregido. No se puede guardar sin una lectura real de
+  la báscula: no hay campo para escribirlo a mano.
+
+Qué toca al guardar (`POST /api/selladora/paquete/repesar`, todo en una transacción):
+
+| Tabla | Qué pasa |
+|---|---|
+| `SEL_PesajeElemento.PesoPaqueGr` | queda el peso corregido |
+| `SEL_Bultos.CantidadTotal` | se recalcula (`SUM` de sus paquetes) |
+| `PRDProduccion.Cantidad` | se pone en ese total nuevo |
+| `PRDExtrusionRollos.PesoBrutoKg` | se pone en ese total nuevo |
+| `SEL_RepesajePaquete` | rastro: qué paquete, cuándo, de cuánto a cuánto, quién y en qué estado estaba el bulto |
+| `INVExistencias` / movimiento Tipo 35 | **no se tocan** (ver abajo) |
+
+Las tres columnas de producción se corrigen con la **misma fórmula que ya usaba el sistema**:
+`trg_SEL_Bultos_CierreBulto` (al cerrar el bulto) y `finalizarControlParcialSellado` (al dar
+Finalizar) sacan las dos de `SEL_Bultos.CantidadTotal`. `Unidades`, `Duracion` y `HoraFinal` no se
+tocan: repesar no cambia ni el número de paquetes ni las horas.
+
+Todo esto aplica **solo si el bulto ya estaba cerrado**. En un bulto todavía abierto no hay nada que
+rehacer: `CantidadTotal` y la fila de `PRDProduccion` las llena el trigger al cerrar, y para ese
+momento ya suman el valor corregido.
+
+Ojo con los decimales: `SEL_Bultos.CantidadTotal` y `SEL_PesajeElemento.PesoPaqueGr` tienen 3
+decimales, pero `PRDProduccion.Cantidad`, `PRDExtrusionRollos.PesoBrutoKg` e `INVExistencias.Cantidad`
+tienen 2. Un total de 18.949 se guarda como 18.95 en esas tres — igual que hace el trigger hoy.
+
+### Dónde se corta
+
+- **Inventario no se toca**, por decisión expresa del usuario (09/09/2026). `INVExistencias.Cantidad`
+  y la línea del movimiento Tipo 35 las escribe `trg_SEL_Bultos_GenerarEntradaInventario` en el
+  momento en que el bulto cierra y nadie más las reescribe, así que tras un repesaje ese saldo queda
+  con el peso viejo. La ventana de la tableta se lo avisa al operario, y `SEL_RepesajePaquete` guarda
+  el rastro exacto por si después se decide ajustarlo.
+- **Orden ya cerrada definitivamente** (`SEL_OrdenProduccion.Estado = 'Finalizada'`, lo que deja
+  "Cerrar Definitivo" del escritorio): se bloquea el repesaje. Ahí ya se calculó la Merma a partir de
+  estos mismos pesos y esta pantalla no tiene cómo recalcularla — lo ajusta el digitador. Mientras la
+  orden está `Activa` o en `PendienteValidacion` sí se puede corregir: Finalizar desde la tableta no
+  calcula merma.
+
+Requiere ejecutar **`agregar_repesaje_paquete.sql`** una sola vez contra la base.

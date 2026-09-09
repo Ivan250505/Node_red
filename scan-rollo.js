@@ -274,6 +274,10 @@ async function confirmarRollo(pool, { idOrden, idEjecucionActivo, serial, esNuev
   const datosOrden = await obtenerDatosOrden(pool, idOrden);
   if (!datosOrden) throw new Error('Orden no encontrada.');
 
+  // Ejecucion sobre la que se registra este rollo en la linea de tiempo (ver mas abajo): al Añadir
+  // Rollo es la que ya venia en curso; al Iniciar, la que se abre en este mismo momento.
+  let idEjecucionDelRollo = idEjecucionActivo;
+
   const tx = new sql.Transaction(pool);
   await tx.begin();
   try {
@@ -330,7 +334,31 @@ async function confirmarRollo(pool, { idOrden, idEjecucionActivo, serial, esNuev
       });
 
       await tx.request().input('idOrden', idOrden).query(`UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden = @idOrden`);
+      idEjecucionDelRollo = nuevaIdEjecucion;
     }
+
+    // Linea de tiempo del rollo (ver agregar_rollo_ejecucion.sql): es el UNICO punto donde se sabe
+    // que serial se monto y a que hora -- PRDProduccionMateriaPrima guarda el serial sin hora y
+    // PRDExtrusionRollos la hora sin serial. El reporte de produccion lo usa para poner al lado de
+    // cada paquete el rollo del que salio. El IF OBJECT_ID evita que un despliegue donde todavia no
+    // se corrio el script SQL haga fallar el escaneo entero: si la tabla no existe, no se registra
+    // y el rollo se procesa igual.
+    const tBodegaTimeline = await obtenerBodegaDeRollo(tx, consulta.serial);
+    await tx.request()
+      .input('idEjecucion', idEjecucionDelRollo)
+      .input('serial', consulta.serial)
+      .input('cantidad', consulta.cantidad)
+      .input('loteMP', consulta.lote || null)
+      .input('bodega', tBodegaTimeline || null)
+      .input('operario', codOperario > 0 ? codOperario : null)
+      .input('esInicio', esNuevoRollo ? 0 : 1)
+      .query(`
+        IF OBJECT_ID('SEL_RolloEjecucion', 'U') IS NOT NULL
+        INSERT INTO SEL_RolloEjecucion (id_ejecucion, id_bulto, Serial, Cantidad, LoteMP, Bodega, Operario, EsInicio)
+        SELECT @idEjecucion,
+               (SELECT TOP 1 id FROM SEL_Bultos WHERE id_ejecucion = @idEjecucion AND estado = 'Activo' ORDER BY id DESC),
+               @serial, @cantidad, @loteMP, @bodega, @operario, @esInicio
+      `);
 
     await tx.commit();
     return { ok: true };
