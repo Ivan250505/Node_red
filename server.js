@@ -1129,33 +1129,93 @@ function scriptAvisoPedidoNuevo(maquinaCodigo) {
         } catch (e) {}
       }
 
+      // CAMBIO 09/09/2026 (a pedido del usuario): el aviso dejo de ser un modal de SweetAlert2 y
+      // pasa a ser una notificacion emergente tipo la del sistema -- baja desde arriba, se lee
+      // sola y se esconde a los 7s. Dos motivos: el modal obligaba a tocar "Entendido" para poder
+      // seguir trabajando (con las manos ocupadas en la maquina eso estorba), y ademas tenia que
+      // esperar a que la pantalla estuviera libre para no pisar Calidad/pausa/escaneo. Al no
+      // bloquear nada, esta version aparece siempre y de una: se dibuja por encima del backdrop de
+      // SweetAlert2 (z-index 1060), asi que se ve incluso durante el chequeo de Calidad sin
+      // robarle el toque al operario. Por eso ya no hay reintentos ni dependencia de Swal.
+      var SEGUNDOS_VISIBLE = 7;
+      var MAX_LINEAS = 3;
+      var contenedorAvisos = null;
+
+      function obtenerContenedor() {
+        if (contenedorAvisos && document.body.contains(contenedorAvisos)) return contenedorAvisos;
+        if (!document.getElementById('estilo-aviso-pedido')) {
+          var estilo = document.createElement('style');
+          estilo.id = 'estilo-aviso-pedido';
+          estilo.textContent =
+            '.avisos-pedido{position:fixed;top:0;left:0;right:0;z-index:2000;display:flex;' +
+              'flex-direction:column;align-items:center;gap:8px;padding:10px 10px 0;pointer-events:none;}' +
+            '.aviso-pedido{pointer-events:auto;width:min(520px,100%);background:#fff;border-radius:14px;' +
+              'box-shadow:0 8px 26px rgba(28,39,51,0.30);border-left:5px solid #71bf44;padding:12px 14px;' +
+              'display:flex;gap:12px;align-items:flex-start;cursor:pointer;opacity:0;transform:translateY(-140%);' +
+              'transition:transform .38s cubic-bezier(.16,.84,.44,1),opacity .30s ease;}' +
+            '.aviso-pedido.visible{opacity:1;transform:translateY(0);}' +
+            '.aviso-pedido-icono{flex:0 0 auto;width:38px;height:38px;border-radius:11px;color:#fff;' +
+              'background:linear-gradient(135deg,#00a2cb,#006984);display:flex;align-items:center;' +
+              'justify-content:center;font-size:19px;}' +
+            '.aviso-pedido-cuerpo{flex:1;min-width:0;}' +
+            '.aviso-pedido-titulo{display:flex;justify-content:space-between;gap:10px;align-items:baseline;' +
+              'font-weight:700;font-size:14.5px;color:#1c2733;}' +
+            '.aviso-pedido-hora{font-weight:500;font-size:12px;color:#64748b;white-space:nowrap;}' +
+            '.aviso-pedido-linea{font-size:13.5px;color:#1c2733;margin-top:4px;line-height:1.35;}' +
+            '.aviso-pedido-linea .ref{color:#64748b;}' +
+            '.aviso-pedido-mas{font-size:12.5px;color:#64748b;margin-top:5px;}' +
+            '@media (prefers-reduced-motion: reduce){.aviso-pedido{transform:none;transition:opacity .2s ease;}}';
+          document.head.appendChild(estilo);
+        }
+        contenedorAvisos = document.createElement('div');
+        contenedorAvisos.className = 'avisos-pedido';
+        document.body.appendChild(contenedorAvisos);
+        return contenedorAvisos;
+      }
+
+      function esconder(tarjeta) {
+        if (!tarjeta.parentNode) return;
+        tarjeta.classList.remove('visible');
+        setTimeout(function() { if (tarjeta.parentNode) tarjeta.parentNode.removeChild(tarjeta); }, 420);
+      }
+
       function mostrar() {
         if (pendientes.length === 0) return;
-        if (typeof Swal === 'undefined') { setTimeout(mostrar, 2000); return; }
-        // Nunca pisar un modal abierto: el chequeo de Calidad, el motivo de pausa, el cronometro o
-        // el escaneo del rollo se perderian a media captura. Se reintenta hasta que la pantalla
-        // este libre (mismo criterio que intentarAbrirCalidad).
-        if (Swal.isVisible()) { setTimeout(mostrar, 5000); return; }
+        if (!document.body) { setTimeout(mostrar, 500); return; }
 
         var lote = pendientes;
         pendientes = [];
         var titulo = lote.length === 1 ? 'Nuevo pedido en la cola' : lote.length + ' pedidos nuevos en la cola';
-        var filas = lote.map(function(o) {
-          var maquina = MAQUINA ? '' : ' <span style="color:#64748b;">· ' + escapar(o.maquinaNombre) + '</span>';
-          return '<div style="text-align:left;padding:8px 0;border-top:1px solid #eef0f2;">' +
-                 '<strong>Pedido ' + escapar(o.numeroPedido || '—') + '</strong>' + maquina +
-                 '<br><span style="color:#64748b;font-size:14px;">' + escapar(o.elemento) + '</span></div>';
+        // Con muchos pedidos de golpe la tarjeta no crece sin fin: se listan los primeros y el
+        // resto se resume en una linea ("y 2 más"). La cola completa siempre esta a un toque.
+        var visibles = lote.slice(0, MAX_LINEAS);
+        var lineas = visibles.map(function(o) {
+          var maquina = MAQUINA ? '' : ' <span class="ref">· ' + escapar(o.maquinaNombre) + '</span>';
+          return '<div class="aviso-pedido-linea"><strong>Pedido ' + escapar(o.numeroPedido || '—') + '</strong>' +
+                 maquina + '<br><span class="ref">' + escapar(o.elemento) + '</span></div>';
         }).join('');
+        if (lote.length > visibles.length) {
+          lineas += '<div class="aviso-pedido-mas">y ' + (lote.length - visibles.length) + ' más</div>';
+        }
+        var hora = new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', hour12: false });
+
+        var tarjeta = document.createElement('div');
+        tarjeta.className = 'aviso-pedido';
+        tarjeta.setAttribute('role', 'status');
+        tarjeta.innerHTML =
+          '<div class="aviso-pedido-icono">📦</div>' +
+          '<div class="aviso-pedido-cuerpo">' +
+            '<div class="aviso-pedido-titulo">' + escapar(titulo) + '<span class="aviso-pedido-hora">' + hora + '</span></div>' +
+            lineas +
+          '</div>';
+        // Un toque la cierra de una -- el operario no tiene que esperar los 7s si ya la leyo.
+        tarjeta.addEventListener('click', function() { esconder(tarjeta); });
+        obtenerContenedor().appendChild(tarjeta);
+        requestAnimationFrame(function() { tarjeta.classList.add('visible'); });
+        setTimeout(function() { esconder(tarjeta); }, SEGUNDOS_VISIBLE * 1000);
 
         pitar();
         if (navigator.vibrate) { try { navigator.vibrate([200, 100, 200]); } catch (e) {} }
-        Swal.fire({
-          icon: 'info',
-          title: titulo,
-          html: filas,
-          confirmButtonText: 'Entendido',
-          confirmButtonColor: '#71bf44'
-        });
       }
 
       async function revisar() {
