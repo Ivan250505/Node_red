@@ -387,7 +387,55 @@ async function resolverDestinoOrden(db, idOrden, numeroPedido) {
   return codDestino;
 }
 
+// FIX 08/09/2026 (a pedido del usuario -- antes TipoPedido quedaba fijo en 4 "por defecto", que es
+// incorrecto): PRDProduccion.TipoPedido = código de SISListas (Categoria='PRDPedidos') --
+// 4=AR-Trazabilidad NTC, 1=RF-Requisición Almacén, 2=PC-Pedido Cliente. Regla:
+//   1) Si la referencia de salida es AR/BR (posiciones 2-3, mismo criterio que ConstruirFiltroMP
+//      en frmLiberacionProduccion.vb y EsTipoPedidoAR en Produccion.vb) -> 4.
+//   2) Si no es AR/BR pero el cliente del pedido es CARLIXPLAST mismo (Tercero=0 en VISTerceros,
+//      confirmado con el usuario) -> 1 (Requisición Almacén).
+//   3) Si no es AR/BR y el cliente es un tercero real (no Carlixplast) -> 2 (Pedido Cliente).
+// codCliente ya viene resuelto por el llamador (resolverClienteDestino) -- no se toca esa función,
+// a pedido del usuario, aunque 0 también puede significar "no se resolvió ningún cliente" (mismo
+// valor que Carlixplast) -- caso conocido, aceptado tal cual.
+async function resolverTipoPedido(db, elemento, codCliente) {
+  const dtRef = await db.request().input('elemento', elemento)
+    .query(`SELECT Referencia FROM INVElementos WHERE Codigo = @elemento`);
+  const tReferencia = dtRef.recordset.length > 0 ? (dtRef.recordset[0].Referencia || '') : '';
+  const tPrefijo = tReferencia.length >= 3 ? tReferencia.substring(1, 3).toUpperCase() : '';
+  const bEsArBr = tPrefijo === 'AR' || tPrefijo === 'BR';
+
+  if (bEsArBr) return 4;
+  if (!codCliente || codCliente === 0) return 1;
+  return 2;
+}
+
 // SEL_InventarioMP.vb:800-841
+// FIX 09/09/2026 (bug real reportado por el usuario -- Pedido 11408 terminó con DOS
+// OrdenProduccion/OP distintas, una por cada referencia del grupo, cuando debería ser UNA sola
+// para todo el proceso compartido). obtenerOCrearOrdenProduccion busca/crea la OP por
+// (Fecha, Lote, Elemento, LineaAncla) -- como cada referencia de un grupo Sellado en paralelo
+// tiene su propio Elemento Y su propio LineaAncla (cada una lleva su propia numeración de bultos
+// independiente), esa llave nunca coincide entre hermanas, así que cada una terminaba creando su
+// propia OP. Esta función resuelve la ANCLA del grupo (la referencia de menor IdOrden, la que
+// arrancó con "Iniciar") para que TODOS los miembros usen el Elemento+LineaAncla de la ANCLA al
+// pedir la OP -- así conviven bajo la misma OP, sin tocar el esquema de PRDOrdenesProduccion.
+// Devuelve null si idOrden no pertenece a ningún grupo SELLADORA (caso normal, sin cambios).
+async function obtenerAnclaGrupoSellado(db, idOrden) {
+  const dt = await db.request().input('idOrden', idOrden).query(`
+    SELECT TOP 1 ord2.IdOrden, ord2.Elemento
+    FROM SEL_OrdenProduccion ord1
+    INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Elemento = ord1.Elemento
+    INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl1.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
+      AND g.Numero = ord1.NumeroPedido
+    INNER JOIN PRDGrupoEtapasCompartidasLineas gl2 ON gl2.IdGrupo = g.IdGrupo
+    INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Elemento = gl2.Elemento AND ord2.NumeroPedido = g.Numero
+    WHERE ord1.IdOrden = @idOrden
+    ORDER BY ord2.IdOrden ASC
+  `);
+  return dt.recordset.length > 0 ? dt.recordset[0] : null;
+}
+
 async function obtenerOCrearOrdenProduccion(db, { elemento, fecha, lineaAncla, lote, codigoDestino, generadoPor }) {
   try {
     const dtExiste = await db.request()
@@ -622,6 +670,8 @@ module.exports = {
   resolverTurnoPorHora,
   resolverClienteDestino,
   resolverDestinoOrden,
+  resolverTipoPedido,
+  obtenerAnclaGrupoSellado,
   obtenerOCrearOrdenProduccion,
   finalizarControlParcialSellado,
   valNumerico
