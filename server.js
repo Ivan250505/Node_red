@@ -241,6 +241,18 @@ function badgeEstado(estado) {
   return `<span class="badge ${clase}">${estado}</span>`;
 }
 
+// Estado del bulto TAL COMO SE MUESTRA en pantalla. Un bulto solo puede VERSE como Activo,
+// Temporal o Cerrado (a pedido del usuario, 10/09/2026): 'EnEspera' es un detalle interno del
+// sellado en paralelo -- el bulto parqueado de una referencia que no esta recibiendo paquetes
+// ahora mismo, ver alternarReferenciaGrupo -- y al operario no le dice nada. Se muestra como lo
+// que en realidad es: Activo si ya tiene paquetes pesados, Temporal si esta vacio (misma
+// distincion que usa el resto del sistema para 'Temporal'). El estado REAL no se toca: la BD
+// sigue guardando 'EnEspera', que es lo que hace que el PLC nunca vea dos bultos a la vez.
+function estadoVisibleBulto(estado, tienePaquetes) {
+  if (estado !== 'EnEspera') return estado;
+  return tienePaquetes ? 'Activo' : 'Temporal';
+}
+
 // CSS y encabezado compartidos entre el dashboard de selladoras y el detalle de bultos.
 function estilosBase() {
   return `
@@ -3118,7 +3130,7 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto, opcione
     <div class="card"${modoGrupo ? ` data-ref="${opciones.referencia}" style="--color-ref:${opciones.color};"` : ''}>
       <div class="card-top">
         ${encabezadoBulto}
-        ${badgeEstado(b.estado)}
+        ${badgeEstado(estadoVisibleBulto(b.estado, pesajes.length > 0))}
       </div>
       <div class="card-grid">
         <div><span class="label">Cant. Total (KG)</span><span class="valor">${b.CantidadTotal ?? '—'}</span></div>
@@ -4014,9 +4026,9 @@ function scriptTarjetasReferencia(maquinaCodigo) {
       async function actualizarAvance(tarjeta) {
         try {
           const resp = await fetch('/selladora/' + ${jsString(maquinaCodigo)} + '/orden/' + tarjeta.dataset.orden + '/avance-produccion');
-          if (!resp.ok) return;
+          if (!resp.ok) return null;
           const datos = await resp.json();
-          if (!datos.ok || !datos.tipo) return;
+          if (!datos.ok || !datos.tipo) return null;
           var color = datos.porcentaje >= 100 ? '#4a9c2e' : '#006984';
           var elPorcentaje = tarjeta.querySelector('.ref-avance-porcentaje');
           var elRelleno = tarjeta.querySelector('.ref-avance-relleno');
@@ -4030,7 +4042,42 @@ function scriptTarjetasReferencia(maquinaCodigo) {
           }
           fijar(tarjeta, '.ref-avance-producido', 'Producido: ' + formatearCantidad(datos.producido, datos.tipo));
           fijar(tarjeta, '.ref-avance-programado', 'Programado: ' + formatearCantidad(datos.programado, datos.tipo));
-        } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
+          return datos;
+        } catch (e) { return null; /* red intermitente -- se reintenta en el proximo tick */ }
+      }
+
+      // Avance TOTAL del pedido (tarjeta del encabezado): se arma sumando lo que ya se pidio por
+      // referencia, no con un endpoint aparte. Misma regla que calcularAvanceTotalGrupo en el
+      // servidor: se suma solo si todas las referencias miden en la misma unidad; si el pedido
+      // mezcla kg con unidades, se muestra el promedio de los porcentajes y no hay cantidades.
+      function actualizarAvanceTotal(avances) {
+        var elPorcentaje = document.getElementById('avance-porcentaje');
+        var elRelleno = document.getElementById('avance-relleno');
+        if (!elPorcentaje || !elRelleno) return;
+
+        var conMeta = avances.filter(function(a) { return a && a.tipo; });
+        if (conMeta.length === 0) return;
+
+        var mismaUnidad = conMeta.every(function(a) { return a.tipo === conMeta[0].tipo; });
+        var producido = 0, programado = 0, porcentaje;
+        if (mismaUnidad) {
+          conMeta.forEach(function(a) { producido += a.producido; programado += a.programado; });
+          porcentaje = programado > 0 ? (producido / programado) * 100 : 0;
+        } else {
+          porcentaje = conMeta.reduce(function(suma, a) { return suma + a.porcentaje; }, 0) / conMeta.length;
+        }
+
+        var color = porcentaje >= 100 ? '#4a9c2e' : '#006984';
+        elPorcentaje.textContent = porcentaje.toLocaleString('es-CO', { maximumFractionDigits: 1 }) + '%';
+        elPorcentaje.style.color = color;
+        elRelleno.style.width = Math.min(porcentaje, 100) + '%';
+        elRelleno.style.background = color;
+
+        if (!mismaUnidad) return; // el encabezado ya dice "metas en unidades distintas"
+        var elProducido = document.getElementById('avance-producido');
+        var elProgramado = document.getElementById('avance-programado');
+        if (elProducido) elProducido.textContent = 'Producido: ' + formatearCantidad(producido, conMeta[0].tipo);
+        if (elProgramado) elProgramado.textContent = 'Programado: ' + formatearCantidad(programado, conMeta[0].tipo);
       }
 
       async function actualizarResumen(tarjeta) {
@@ -4057,10 +4104,10 @@ function scriptTarjetasReferencia(maquinaCodigo) {
       };
 
       function actualizar() {
-        tarjetas.forEach(function(t) {
-          actualizarAvance(t);
+        Promise.all(tarjetas.map(function(t) {
           if (t.open) actualizarResumen(t);
-        });
+          return actualizarAvance(t);
+        })).then(actualizarAvanceTotal);
       }
 
       // Al abrir una tarjeta se pide su resumen de una, sin esperar al proximo tick de 4s (si no,
@@ -4254,6 +4301,33 @@ function scriptFiltroReferencias() {
   `;
 }
 
+// Avance TOTAL de un pedido con varias referencias de salida -- la tarjeta del encabezado que la
+// variante de UNA sola referencia siempre tuvo y esta no (a pedido del usuario, 10/09/2026).
+//
+// Regla: la meta de cada referencia sale de SU orden y puede estar en kg o en unidades
+// (KilosSolicitados manda sobre UnidadesSolicitadas, ver obtenerAvanceProduccion). Mientras todas
+// midan en la MISMA unidad se suma lo producido y lo programado, y el total es esa division. Si el
+// pedido mezcla kg con unidades no se puede sumar (serian peras con manzanas): en ese caso no se
+// muestran cantidades, solo el porcentaje, y es el promedio de los de cada referencia -- cada meta
+// pesa igual. Las referencias sin meta configurada no entran en la cuenta.
+function calcularAvanceTotalGrupo(miembros) {
+  const conMeta = miembros.map(m => m.avance).filter(a => a && a.tipo);
+  if (conMeta.length === 0) return { tipo: null };
+
+  const tipos = new Set(conMeta.map(a => a.tipo));
+  if (tipos.size > 1) {
+    const porcentaje = conMeta.reduce((suma, a) => suma + a.porcentaje, 0) / conMeta.length;
+    return { tipo: 'mixto', producido: null, programado: null, porcentaje };
+  }
+
+  const producido = conMeta.reduce((suma, a) => suma + a.producido, 0);
+  const programado = conMeta.reduce((suma, a) => suma + a.programado, 0);
+  return {
+    tipo: conMeta[0].tipo, producido, programado,
+    porcentaje: programado > 0 ? (producido / programado) * 100 : 0
+  };
+}
+
 // Tarjeta interactiva de UNA referencia de salida dentro de un pedido agrupado (a pedido del
 // usuario, 10/09/2026). Encabezado: la referencia, su nombre en gris y su avance individual, con
 // el subrayado del color propio de esa referencia. Adentro (colapsada al entrar, tambien a pedido
@@ -4387,6 +4461,32 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
 
   const tarjetasReferencia = miembros.map((m, i) => renderTarjetaReferenciaGrupo(m, i)).join('');
 
+  // Tarjeta de avance TOTAL del pedido en el encabezado -- los mismos ids que usa la pagina de una
+  // sola referencia (avance-porcentaje/relleno/producido/programado), porque quien la refresca cada
+  // 4s es scriptTarjetasReferencia con la suma de lo que ya pide por referencia: no hace falta un
+  // endpoint aparte para el total.
+  const avanceTotal = calcularAvanceTotalGrupo(miembros);
+  const avanceCard = avanceTotal.tipo ? (() => {
+    const color = avanceTotal.porcentaje >= 100 ? '#4a9c2e' : '#006984';
+    const stats = avanceTotal.tipo === 'mixto'
+      ? `<div class="avance-header-stats"><span id="avance-producido">${miembros.length} referencias</span><span id="avance-programado">metas en unidades distintas</span></div>`
+      : `<div class="avance-header-stats">
+            <span id="avance-producido">Producido: ${formatearCantidadAvance(avanceTotal.producido, avanceTotal.tipo)}</span>
+            <span id="avance-programado">Programado: ${formatearCantidadAvance(avanceTotal.programado, avanceTotal.tipo)}</span>
+          </div>`;
+    return `
+        <div class="avance-header-card">
+          <div class="avance-header-top">
+            <span class="avance-header-label">Avance del pedido</span>
+            <span class="avance-header-porcentaje" id="avance-porcentaje" style="color:${color};">${avanceTotal.porcentaje.toLocaleString('es-CO', { maximumFractionDigits: 1 })}%</span>
+          </div>
+          <div class="avance-header-barra">
+            <div class="avance-header-relleno" id="avance-relleno" style="width:${Math.min(avanceTotal.porcentaje, 100)}%;background:${color};"></div>
+          </div>
+          ${stats}
+        </div>`;
+  })() : '';
+
   return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -4407,6 +4507,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
           <div class="sub">Sellado en paralelo -- un solo proceso, ${miembros.length} referencias de salida</div>
           <a class="volver" href="/selladora/${maquinaCodigo}">‹ ${maquinaNombre}</a>
         </div>
+        ${avanceCard}
         <div class="header-salir-grupo">
           <div class="header-usuario">👤 ${usuario}</div>
           <a class="salir" href="/logout">Cerrar sesión</a>
