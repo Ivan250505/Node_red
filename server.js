@@ -514,6 +514,15 @@ function estilosBase() {
       font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--texto-suave);
       cursor: pointer; list-style: none;
     }
+    /* La tarjeta ENTERA abre/cierra sus paquetes, no solo el renglon "Paquetes pesados" (a pedido
+       del usuario, 09/09/2026) -- ver scriptTarjetaBultoInteractiva. Dos precisiones del selector:
+         - va acotado a #contenedor-bultos porque la seccion "Trasladar paquete" (renderSeccionTraslado)
+           tambien es un .card con .card-top, pero vive FUERA de ese contenedor y el clic ahi no
+           pliega nada -- sin acotar, esa cabecera mostraria un cursor que promete algo que no pasa;
+         - el cursor va en las dos zonas de cabecera (numero/estado y rejilla de datos) y no en
+           .card entero, para no prometerlo tampoco sobre el desplegable ya abierto. */
+    #contenedor-bultos .card-top, #contenedor-bultos .card-grid { cursor: pointer; }
+    #contenedor-bultos .card:hover { box-shadow: 0 2px 10px rgba(0,0,0,0.13); }
     .pesajes-box summary::-webkit-details-marker { display: none; }
     .pesajes-box summary::before { content: '▸ '; }
     .pesajes-box[open] summary::before { content: '▾ '; }
@@ -2868,17 +2877,17 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     <div class="islas-fila">
       <div class="isla isla-con-boton">
         <div class="isla-texto">
-          <div class="label">Bultos producidos</div>
-          <div class="isla-detalle">${totalBultos} bulto(s) en esta orden</div>
-        </div>
-        <a class="btn-accion btn-isla btn-info" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/bultos">📦 Ver bultos</a>
-      </div>
-      <div class="isla isla-con-boton">
-        <div class="isla-texto">
           <div class="label">Reporte de producción</div>
           <div class="isla-detalle">Bitácora completa de la orden</div>
         </div>
         <a class="btn-accion btn-isla btn-imprimir" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/reporte" target="_blank" rel="noopener">🖨️ Reporte</a>
+      </div>
+      <div class="isla isla-con-boton">
+        <div class="isla-texto">
+          <div class="label">Bultos producidos</div>
+          <div class="isla-detalle">${totalBultos} bulto(s) en esta orden</div>
+        </div>
+        <a class="btn-accion btn-isla btn-info" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/bultos">📦 Ver bultos</a>
       </div>
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Especificaciones</h2>
@@ -3335,6 +3344,46 @@ function scriptPaginadorPesajes() {
 // operario se habia movido a una pagina vieja (no la ultima); si estaba viendo la mas reciente, se
 // deja que el nuevo render siga mostrando la mas reciente de verdad (puede haber una pagina nueva
 // si llego un paquete), no la que antes era la ultima.
+// Abrir/cerrar los paquetes de un bulto tocando la TARJETA entera, no solo el renglon "Paquetes
+// pesados" (a pedido del usuario, 09/09/2026) -- en la tableta, con las manos ocupadas, acertarle a
+// ese renglon de 11px era innecesariamente fino. El <details>/<summary> se conserva tal cual: sigue
+// funcionando por su cuenta y es lo que guarda el estado abierto/cerrado que respeta el polling.
+function scriptTarjetaBultoInteractiva() {
+  return `
+    (function() {
+      var contenedor = document.getElementById('contenedor-bultos');
+      if (!contenedor) return;
+
+      // Delegado en el contenedor y NO en cada tarjeta: scriptActualizarBultos reemplaza el
+      // innerHTML entero cada 4s, asi que cualquier listener puesto sobre una tarjeta concreta se
+      // perderia en el primer refresco.
+      contenedor.addEventListener('click', function(evento) {
+        var origen = evento.target;
+
+        // Cosas que ya tienen dueño: el enlace de cada paquete (menu reimprimir / volver a pesar),
+        // las flechas del paginador y el propio summary. Si no se sale aca, un toque en "Paquete 3"
+        // abriria su menu Y ademas plegaria la tarjeta debajo.
+        if (origen.closest('a, button, summary, input, select, label')) return;
+
+        // Dentro del desplegable ya abierto tampoco se pliega: ahi el operario esta leyendo la
+        // lista de paquetes, no queriendo cerrarla.
+        if (origen.closest('.pesajes-box')) return;
+
+        var tarjeta = origen.closest('.card');
+        if (!tarjeta) return;
+
+        // Si el toque venia de seleccionar texto (tipico: copiar el serial del bulto), no cuenta
+        // como clic -- si no, seleccionar el serial cerraria la tarjeta.
+        var seleccion = window.getSelection && window.getSelection();
+        if (seleccion && String(seleccion).length > 0) return;
+
+        var desplegable = tarjeta.querySelector('details.pesajes-box');
+        if (desplegable) desplegable.open = !desplegable.open;
+      });
+    })();
+  `;
+}
+
 function scriptActualizarBultos() {
   return `
     (function() {
@@ -3414,6 +3463,7 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, usu
   <script>${scriptReimprimir(orden.IdOrden, maquinaCodigo)}</script>
   <script>${scriptTraslado(orden.IdOrden, maquinaCodigo)}</script>
   <script>${scriptPaginadorPesajes()}</script>
+  <script>${scriptTarjetaBultoInteractiva()}</script>
   <script>${scriptActualizarBultos()}</script>
 </body>
 </html>`;
@@ -4676,16 +4726,35 @@ app.post('/api/selladora/orden/:idOrden/alternar-referencia', requireLogin, asyn
 // (scan-rollo.js). Por eso la columna de la tabla repite el tiquete del proceso, y dice "varios"
 // cuando hubo mas de un rollo, con el detalle completo arriba.
 async function obtenerDatosReporte(p, idOrden) {
+  // Las columnas de caracteristicas (C/NC) de la planilla salen de las MISMAS banderas que arman el
+  // modal de Calidad (construirApartadosCalidad), no de los chequeos ya respondidos: asi una orden
+  // sin chequeos todavia se imprime con sus casillas en blanco, listas para diligenciar a mano.
   const dtOrden = await p.request().input('idOrden', idOrden).query(`
     SELECT ord.IdOrden, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento,
-           ie.Nombre AS NombreElemento, maq.Nombre AS MaquinaNombre, ord.Estado,
-           ord.KilosSolicitados, ord.UnidadesSolicitadas
+           ie.Nombre AS NombreElemento, maq.Nombre AS MaquinaNombre, maq.Codigo AS MaquinaCodigo,
+           ord.Estado, ord.KilosSolicitados, ord.UnidadesSolicitadas, ord.Turno, ord.FechaProgramada,
+           ord.Troquelado, ord.Perforaciones, ord.Manija, ord.Tula, ord.Parche,
+           ord.CierreDeslizador, ord.CierreHermetico, ord.CintaAdhesiva,
+           CASE WHEN er12.Valor IS NOT NULL THEN 1 ELSE 0 END AS TieneImpresion
     FROM SEL_OrdenProduccion ord
     INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
     INNER JOIN PRDMaquinas maq ON maq.Codigo = ord.Maquina
+    LEFT JOIN INVElementosReferencia er12 ON er12.Elemento = ord.Elemento AND er12.Categoria = 12
     WHERE ord.IdOrden = @idOrden
   `);
   if (dtOrden.recordset.length === 0) return null;
+
+  // Numero de planilla: se usa el codigo de orden de produccion de Mirane (OP09070001SEL...) que ya
+  // quedo estampado en PRDProduccion al crear el primer bulto. Es el consecutivo que la planta ya
+  // reconoce; si por lo que sea no existe, el reporte cae al IdOrden.
+  const dtOP = await p.request().input('idOrden', idOrden).query(`
+    SELECT TOP 1 pp.OrdenProduccion
+    FROM PRDProduccion pp
+    INNER JOIN SEL_Bultos b ON b.serialPadre = pp.Detalle
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+    WHERE ej.IdOrden = @idOrden AND pp.OrdenProduccion IS NOT NULL
+    ORDER BY b.num_bulto ASC
+  `);
 
   const dtEjecucion = await p.request().input('idOrden', idOrden).query(`
     SELECT TOP 1 ej.IdEjecucion, ej.BolsasxGolpe, ej.SerialRolloEntrada, ej.HoraInicioReal, ej.HoraFinReal,
@@ -4817,6 +4886,7 @@ async function obtenerDatosReporte(p, idOrden) {
 
   return {
     orden: dtOrden.recordset[0],
+    numeroPlanilla: dtOP.recordset.length ? String(dtOP.recordset[0].OrdenProduccion).trim() : String(idOrden),
     ejecucion: dtEjecucion.recordset[0] || null,
     paquetes: dtPaquetes.recordset,
     bultos: dtBultos.recordset,
@@ -4868,210 +4938,191 @@ const ETIQUETA_ACTIVIDAD = {
   orden_aseo: 'Orden y aseo', limpieza: 'Limpieza', otro: 'Otro'
 };
 
+// Planilla horizontal de produccion y seguimiento -- Sellado. Reproduce el formato en papel que ya
+// se usa en planta (foto del formato diligenciado, 10/09/2026): mismos bloques, mismas columnas y
+// el mismo orden, para que quien la lea no tenga que reaprender nada y se pueda archivar junto a
+// las que estan llenas a mano.
+//
+// Decisiones que vienen del papel, no del sistema:
+//   - UNA FILA POR BULTO, no por paquete, y los tiempos muertos ocupan una fila propia con un punto
+//     en "No. BULTOS" y la descripcion en "MEDIDA PROGRAMADA" -- igual que "Limpieza y desinfeccion"
+//     o "Cambio de rollo" escritos a mano en el formato original.
+//   - Las columnas de caracteristicas son FIJAS (las 11 preguntas, 22 casillas C/NC), no dependen de
+//     si la referencia lleva impresion o troquelado. En el papel siempre estan las mismas columnas y
+//     el operario tacha con "/" las que no aplican; una planilla con columnas variables no se podria
+//     archivar junto a las demas.
+//   - Lo que el sistema NO registra se deja en blanco para diligenciar a mano: medida verificada,
+//     retales, temperaturas en °C y los cuadros de recibo/entrega de turno.
 function renderReporteProduccion(datos, maquinaCodigo) {
-  const { orden, ejecucion, paquetes, bultos, rollos, hayHoraDeRollos, actividades, calidad, temperaturas, protocolo } = datos;
+  const {
+    orden, numeroPlanilla, ejecucion, paquetes, bultos, rollos,
+    actividades, calidad, temperaturas, protocolo
+  } = datos;
   const esc = (t) => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-  const pistas = ejecucion && ejecucion.BolsasxGolpe ? ejecucion.BolsasxGolpe : '—';
+  const pistas = ejecucion && ejecucion.BolsasxGolpe ? ejecucion.BolsasxGolpe : '';
   const medida = medidaDeBolsa(orden.NombreElemento);
 
-  // Los rollos van numerados (Rollo 1, Rollo 2...): en la tabla no cabe el tiquete completo de 19
-  // digitos por fila, asi que ahi va el numero y el detalle queda en la seccion de arriba.
-  const rollosNumerados = rollos.map((r, i) => ({ ...r, numero: i + 1 }));
-  const rollosEnTiempo = rollosNumerados
-    .filter(r => r.FechaHora)
-    .map(r => ({ numero: r.numero, ms: new Date(r.FechaHora).getTime() }));
+  // Bloque de caracteristicas: SIEMPRE las mismas columnas (ver comentario de arriba), por eso se
+  // pide construirApartadosCalidad con todas las banderas en true.
+  const apartados = construirApartadosCalidad({
+    tieneImpresion: true, tieneAccesorios: true, tieneTroquelado: true, tienePerforaciones: true
+  });
+  const preguntasTodas = apartados.flatMap(ap => ap.preguntas.map(pr => ({ ...pr, apartado: ap.titulo })));
 
-  // De que rollo salio un paquete: el ultimo montado ANTES de que se pesara. Sin linea de tiempo
-  // de rollos (ordenes viejas) no se puede saber -- se deja vacio en vez de adivinar, salvo que el
-  // proceso haya consumido un unico rollo, donde no hay ambigüedad posible.
-  function rolloDe(ms) {
-    if (rollosEnTiempo.length === 0) return rollosNumerados.length === 1 ? '1' : '—';
-    let numero = null;
-    for (const r of rollosEnTiempo) { if (r.ms <= ms) numero = r.numero; else break; }
-    return numero == null ? '—' : String(numero);
+  // Resultado por bulto y pregunta: C / NC / vacio. Se marca por PREGUNTA (no por apartado) porque
+  // el formato tiene una pareja de casillas por cada pregunta.
+  const respuestaPorBultoPregunta = new Map();
+  for (const c of calidad) {
+    if (c.id_bulto == null || !c.Pregunta) continue;
+    respuestaPorBultoPregunta.set(c.id_bulto + '|' + c.Pregunta, c.Respuesta);
   }
-
-  // Un paquete se marca "No conforme" solo si el chequeo de SU bulto trae alguna respuesta
-  // NoConforme; por defecto va Conforme, que es el caso normal. Lo que el operario digito de
-  // verdad, pregunta por pregunta, va completo en el bloque "Registro de calidad" mas abajo.
-  const bultosNoConformes = new Set(
-    calidad.filter(c => c.Respuesta === 'NoConforme' && c.id_bulto != null).map(c => c.id_bulto)
-  );
-
-  // Temperatura vigente a la hora de cada paquete: el ultimo valor digitado ANTES de sellarlo.
-  const tempOrdenadas = temperaturas.map(t => ({ ms: new Date(t.FechaHora).getTime(), valor: Number(t.Porcentaje) }));
-  function temperaturaDe(paquete) {
-    if (paquete.Temperatura != null) return Number(paquete.Temperatura).toFixed(0) + ' %'; // si algun dia la manda el PLC
-    const ms = new Date(paquete.FechaHora).getTime();
-    let valor = null;
-    for (const t of tempOrdenadas) { if (t.ms <= ms) valor = t.valor; else break; }
-    return valor == null ? '—' : valor.toFixed(0) + ' %';
+  function celdasCNC(idBulto) {
+    return preguntasTodas.map(pr => {
+      const r = respuestaPorBultoPregunta.get(idBulto + '|' + pr.clave);
+      return `<td class="cnc">${r != null && r !== 'NoConforme' ? 'X' : ''}</td>` +
+             `<td class="cnc ${r === 'NoConforme' ? 'malo' : ''}">${r === 'NoConforme' ? 'X' : ''}</td>`;
+    }).join('');
   }
+  const CELDAS_CNC_VACIAS = preguntasTodas.map(() => '<td class="cnc"></td><td class="cnc"></td>').join('');
 
-  // ---- Bitacora: un solo hilo cronologico del proceso, de principio a fin ----
-  // Todo lo que paso queda en la misma linea de tiempo (montaje de rollos, apertura y cierre de
-  // bultos, cada paquete, los chequeos de calidad y las paradas), ordenado por hora. La prioridad
-  // desempata los eventos que caen en el mismo instante -- el cierre de un bulto y la apertura del
-  // siguiente comparten marca de tiempo exacta (el trigger abre el nuevo con la hora del cierre),
-  // y el cierre debe leerse primero.
-  const COLUMNAS_BITACORA = 11;
-  const eventos = [];
-  const ms = (f) => new Date(f).getTime();
+  // Rollos: en el papel el tiquete se escribe en la fila donde ese rollo entra a la maquina, no en
+  // todas. Sin SEL_RolloEjecucion (ordenes anteriores a ese registro) no se sabe en que momento
+  // entro cada uno: en ese caso se listan todos en la primera fila de produccion, que es donde el
+  // operario los habria anotado.
+  const rollosConHora = rollos.filter(r => r.FechaHora);
+  const rollosSinHora = rollos.filter(r => !r.FechaHora);
 
-  if (ejecucion && ejecucion.HoraInicioReal) {
-    eventos.push({ ms: ms(ejecucion.HoraInicioReal), prioridad: 0, tipo: 'hito',
-      texto: `Inicio de la orden · operario ${ejecucion.OperarioNombre || '—'}`, inicio: ejecucion.HoraInicioReal });
-  }
-  for (const r of rollosNumerados) {
-    if (!r.FechaHora) continue;
-    const kg = r.Cantidad != null ? Number(r.Cantidad).toFixed(2) + ' kg' : '';
-    eventos.push({ ms: ms(r.FechaHora), prioridad: 1, tipo: 'rollo',
-      texto: `Rollo ${r.numero} montado · tiquete ${r.Tiquete}${kg ? ' · ' + kg : ''}${r.LoteMP ? ' · lote ' + r.LoteMP : ''}`,
-      inicio: r.FechaHora });
-  }
-  for (const b of bultos) {
-    if (b.HoraFin) {
-      const kg = b.CantidadTotal != null ? Number(b.CantidadTotal).toFixed(2) + ' kg' : '';
-      eventos.push({ ms: ms(b.HoraFin), prioridad: 2, tipo: 'bulto-fin',
-        texto: `Cierre del bulto ${b.num_bulto} · ${b.Paquetes} paquete(s)${kg ? ' · ' + kg : ''}`, inicio: b.HoraFin });
-    }
-    if (b.HoraInicio) {
-      eventos.push({ ms: ms(b.HoraInicio), prioridad: 3, tipo: 'bulto-ini',
-        texto: `Apertura del bulto ${b.num_bulto}`, inicio: b.HoraInicio });
-    }
-  }
-
-  // Hora inicio/final POR PAQUETE: el paquete se estuvo sellando desde que se cerro el anterior
-  // (o desde que se abrio el bulto, si es el primero) hasta que se peso, que es la unica marca de
-  // tiempo que registra la bascula.
-  const finPrevioPorBulto = new Map();
-  for (const b of bultos) finPrevioPorBulto.set(b.id, b.HoraInicio);
+  const paquetesPorBulto = new Map();
+  const kilosPorBulto = new Map();
   for (const pq of paquetes) {
-    const inicio = finPrevioPorBulto.get(pq.IdBulto) || pq.HoraInicio;
-    finPrevioPorBulto.set(pq.IdBulto, pq.FechaHora);
-    eventos.push({ ms: ms(pq.FechaHora), prioridad: 4, tipo: 'paquete', paquete: pq, inicio, fin: pq.FechaHora });
+    paquetesPorBulto.set(pq.IdBulto, (paquetesPorBulto.get(pq.IdBulto) || 0) + 1);
+    kilosPorBulto.set(pq.IdBulto, (kilosPorBulto.get(pq.IdBulto) || 0) + (pq.PesoPaqueGr != null ? Number(pq.PesoPaqueGr) : 0));
   }
 
-  for (const c of [...new Map(calidad.map(c => [c.IdChequeo, c])).values()]) {
-    const respuestas = calidad.filter(x => x.IdChequeo === c.IdChequeo && x.Pregunta);
-    const noConformes = respuestas.filter(x => x.Respuesta === 'NoConforme').length;
-    eventos.push({ ms: ms(c.FechaHora), prioridad: 5, tipo: noConformes ? 'calidad-mala' : 'calidad',
-      texto: `Chequeo de calidad · ${respuestas.length} pregunta(s) · ${noConformes ? noConformes + ' NO CONFORME(S)' : 'todo conforme'} · ${c.OperarioNombre || '—'}`,
-      inicio: c.FechaHora });
-  }
+  // Filas: bultos, tiempos muertos y montajes de rollo, todo en una sola secuencia cronologica.
+  const filasCronologicas = [
+    ...bultos.map(b => ({ ms: new Date(b.HoraInicio).getTime(), orden: 1, tipo: 'bulto', b })),
+    ...actividades.map(a => ({ ms: new Date(a.HoraInicio).getTime(), orden: 2, tipo: 'parada', a })),
+    ...rollosConHora.map(r => ({ ms: new Date(r.FechaHora).getTime(), orden: 0, tipo: 'rollo', r }))
+  ].sort((x, y) => x.ms - y.ms || x.orden - y.orden);
 
-  for (const a of actividades) {
-    eventos.push({ ms: ms(a.HoraInicio), prioridad: 6, tipo: 'parada',
-      texto: `${ETIQUETA_ACTIVIDAD[a.Tipo] || a.Tipo}${a.Subtipo ? ' · ' + a.Subtipo : ''} · ${a.Minutos != null ? a.Minutos + ' min' : 'en curso'}${a.Observaciones ? ' · ' + a.Observaciones : ''}`,
-      inicio: a.HoraInicio, fin: a.HoraFin });
-  }
-
-  if (ejecucion && ejecucion.HoraFinReal) {
-    eventos.push({ ms: ms(ejecucion.HoraFinReal), prioridad: 9, tipo: 'hito',
-      texto: `Fin de la orden · operario ${ejecucion.OperarioFinalNombre || '—'}`, inicio: ejecucion.HoraFinReal });
-  }
-
-  eventos.sort((a, b) => a.ms - b.ms || a.prioridad - b.prioridad);
-
-  const filas = eventos.map(ev => {
-    if (ev.tipo !== 'paquete') {
+  let primeraProduccion = true;
+  const filas = filasCronologicas.map(f => {
+    if (f.tipo === 'rollo') {
+      // Montaje de rollo: en el papel es la fila donde se anota el tiquete y se repite la medida.
       return `
-      <tr class="ev ev-${ev.tipo}">
-        <td>${horaCorta(ev.inicio)}</td>
-        <td>${ev.fin ? horaCorta(ev.fin) : ''}</td>
-        <td colspan="${COLUMNAS_BITACORA - 2}">${esc(ev.texto)}</td>
+      <tr class="fila-rollo">
+        <td class="tiquete">${esc(f.r.Tiquete)}</td>
+        <td class="medida-prog">${esc(medida)}${f.r.Cantidad != null ? ' · ' + Number(f.r.Cantidad).toFixed(2) + ' kg' : ''}</td>
+        <td class="cen">•</td>
+        <td></td><td></td>
+        <td class="cen">${horaCorta(f.r.FechaHora)}</td>
+        <td></td><td></td>
+        ${CELDAS_CNC_VACIAS}
+        <td></td><td></td><td></td><td></td><td></td><td></td>
       </tr>`;
     }
-    const pq = ev.paquete;
-    const calidadPaquete = bultosNoConformes.has(pq.IdBulto) ? 'No conforme' : 'Conforme';
+    if (f.tipo === 'parada') {
+      const a = f.a;
+      const etiqueta = ETIQUETA_ACTIVIDAD[a.Tipo] || a.Tipo;
+      return `
+      <tr class="parada">
+        <td></td>
+        <td class="medida-prog">${esc(etiqueta)}${a.Subtipo ? ' · ' + esc(a.Subtipo) : ''}${a.Observaciones ? ' · ' + esc(a.Observaciones) : ''}${a.Minutos != null ? ' (' + a.Minutos + ' min)' : ''}</td>
+        <td class="cen">•</td>
+        <td></td><td></td>
+        <td class="cen">${horaCorta(a.HoraInicio)}</td>
+        <td class="cen">${a.HoraFin ? horaCorta(a.HoraFin) : ''}</td>
+        <td></td>
+        ${CELDAS_CNC_VACIAS}
+        <td></td><td></td><td></td><td></td><td></td><td></td>
+      </tr>`;
+    }
+    const b = f.b;
+    const nPaquetes = paquetesPorBulto.get(b.id) || b.Paquetes || 0;
+    // El tiquete y la medida se escriben una sola vez, al empezar la referencia (igual que en el
+    // papel); si no hay linea de tiempo de rollos, ahi mismo van todos los que se consumieron.
+    const tiquete = primeraProduccion && rollosConHora.length === 0
+      ? rollosSinHora.map(r => esc(r.Tiquete)).join('<br>') : '';
+    const medidaCelda = primeraProduccion ? esc(medida) : '';
+    primeraProduccion = false;
     return `
       <tr>
-        <td>${horaCorta(ev.inicio)}</td>
-        <td>${horaCorta(ev.fin)}</td>
-        <td class="num">${rolloDe(ev.ms)}</td>
-        <td class="num">${pq.num_bulto}</td>
-        <td class="num">${pq.ConsecutivoPaquete}</td>
-        <td class="num">${UNIDADES_POR_PAQUETE}</td>
-        <td class="num">${pq.PesoPaqueGr != null ? Number(pq.PesoPaqueGr).toFixed(3) : '—'}</td>
-        <td class="num">${pq.Golpes != null ? pq.Golpes : '—'}</td>
-        <td class="num">${pq.Potencia != null ? Number(pq.Potencia).toFixed(0) : '—'}</td>
-        <td class="num">${temperaturaDe(pq)}</td>
-        <td class="${calidadPaquete === 'Conforme' ? 'ok' : 'malo'}">${calidadPaquete}</td>
+        <td class="tiquete">${tiquete}</td>
+        <td class="medida-prog">${medidaCelda}</td>
+        <td class="cen">${b.num_bulto}</td>
+        <td class="cen">${pistas}</td>
+        <td class="num">${(nPaquetes * UNIDADES_POR_PAQUETE).toLocaleString('es-CO')}</td>
+        <td class="cen">${horaCorta(b.HoraInicio)}</td>
+        <td class="cen">${b.HoraFin ? horaCorta(b.HoraFin) : ''}</td>
+        <td></td>
+        ${celdasCNC(b.id)}
+        <td class="cen">${nPaquetes ? UNIDADES_POR_PAQUETE : ''}</td>
+        <td></td><td></td>
+        <td></td><td></td><td></td>
       </tr>`;
   }).join('');
+
+  // Renglones libres: una planilla siempre sale con espacio para seguir escribiendo, aunque se
+  // imprima a mitad del turno.
+  const FILAS_EN_BLANCO = 8;
+  const filasVacias = Array.from({ length: FILAS_EN_BLANCO }, () => `
+      <tr class="vacia">
+        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
+        ${CELDAS_CNC_VACIAS}
+        <td></td><td></td><td></td><td></td><td></td><td></td>
+      </tr>`).join('');
+
+  const totalPaquetes = paquetes.length;
+  const totalUnidades = totalPaquetes * UNIDADES_POR_PAQUETE;
+  const totalKg = paquetes.reduce((s, p) => s + (p.PesoPaqueGr != null ? Number(p.PesoPaqueGr) : 0), 0);
+
+  // ---- Controles de inocuidad: los cinco items del formato, en el mismo orden del papel ----
+  // Cada uno se cruza con el paso del protocolo de arranque que lo registra (ver
+  // agregar_protocolo_arranque.sql). Ojo con el sentido de la respuesta: en las preguntas de
+  // peligro el hallazgo malo es "Si"; en "¿el rollo esta en buen estado?" el bueno es "Si".
+  const ITEMS_INOCUIDAD = [
+    { texto: 'Verificación del estado de los rollos', paso: 'rollo_estado', malaSi: 'No' },
+    { texto: 'Verificación de temperatura', paso: 'temperatura' },
+    { texto: 'Limpieza y desinfección de superficies en contacto directo (Rodillos, Cuerdas, Mesa de Recepción, Tapete, Utensilios)', paso: 'limpieza' },
+    { texto: 'Inspección de peligros físicos (Cabellos, Insectos, Material Extraño, Material Particulado)', paso: 'peligro_fisico', malaSi: 'Si' },
+    { texto: 'Inspección de peligros químicos (Aceites y Lubricantes)', paso: 'peligro_quimico', malaSi: 'Si' }
+  ];
+  const filasInocuidad = ITEMS_INOCUIDAD.map(item => {
+    // Un paso puede repetirse (ej. se rechazo un rollo y se escaneo otro): manda el ultimo.
+    const registros = protocolo.filter(x => x.Paso === item.paso);
+    const r = registros.length ? registros[registros.length - 1] : null;
+    const cumple = r == null ? null : (item.malaSi ? r.Respuesta !== item.malaSi : true);
+    const detalle = r == null ? ''
+      : (item.paso === 'temperatura' ? esc(String(r.Respuesta || '')) + ' %' : horaCorta(r.FechaHora));
+    return `
+      <tr>
+        <td class="item-inoc">${esc(item.texto)}</td>
+        <td class="cnc">${cumple === true ? '✓' : ''}</td>
+        <td class="cnc ${cumple === false ? 'malo' : ''}">${cumple === false ? 'X' : ''}</td>
+        <td class="cen chico">${detalle}</td>
+      </tr>`;
+  }).join('');
+
+  // Turno: el formato marca con X una de las cinco casillas (D V M T N). La orden guarda el turno
+  // como numero (SEL_OrdenProduccion.Turno), asi que se marca la que corresponda a ese numero.
+  const TURNOS = [['D', 1], ['V', 2], ['M', 3], ['T', 4], ['N', 5]];
+  const turnoOrden = orden.Turno != null ? Number(orden.Turno) : null;
+
+  // Fecha del formato, partida en DD / MM / AA como las casillas del papel.
+  const fechaBase = ejecucion && ejecucion.HoraInicioReal ? new Date(ejecucion.HoraInicioReal)
+    : (orden.FechaProgramada ? new Date(orden.FechaProgramada) : null);
+  const dd = fechaBase ? String(fechaBase.getUTCDate()).padStart(2, '0') : '';
+  const mm = fechaBase ? String(fechaBase.getUTCMonth() + 1).padStart(2, '0') : '';
+  const aa = fechaBase ? String(fechaBase.getUTCFullYear()) : '';
 
   // Nombre con el que el navegador propone guardar el PDF (ver el <title> mas abajo).
   const hoy = new Date();
   const fechaArchivo = String(hoy.getDate()).padStart(2, '0') + '-' +
                        String(hoy.getMonth() + 1).padStart(2, '0') + '-' + hoy.getFullYear();
-  const nombreArchivo = `Reporte pedido ${(orden.NumeroPedido || 'sin pedido')} - orden ${orden.IdOrden} - ${fechaArchivo}`
+  const nombreArchivo = `Planilla ${numeroPlanilla} - pedido ${(orden.NumeroPedido || 'sin pedido')} - ${fechaArchivo}`
     .replace(/[\\/:*?"<>|]/g, '-');
-
-  const totalUnidades = paquetes.length * UNIDADES_POR_PAQUETE;
-  const totalKg = paquetes.reduce((s, p) => s + (p.PesoPaqueGr != null ? Number(p.PesoPaqueGr) : 0), 0);
-
-  const filasRollos = rollosNumerados.length
-    ? rollosNumerados.map(r => `<li><b>Rollo ${r.numero}</b> · <span class="mono">${esc(r.Tiquete)}</span>${r.Cantidad != null ? ' · ' + Number(r.Cantidad).toFixed(2) + ' kg' : ''}${r.LoteMP ? ' · lote ' + esc(r.LoteMP) : ''}${r.Bodega ? ' · bodega ' + esc(r.Bodega) : ''}${r.FechaHora ? ' · montado ' + horaCorta(r.FechaHora) : ''}</li>`).join('')
-    : '<li>Sin rollos registrados</li>';
-
-  // Resumen de paradas por tipo: el detalle de cada una ya va en su lugar dentro de la bitacora,
-  // aca solo interesa el total del turno.
-  const minutosPorTipo = new Map();
-  for (const a of actividades) {
-    const clave = ETIQUETA_ACTIVIDAD[a.Tipo] || a.Tipo;
-    minutosPorTipo.set(clave, (minutosPorTipo.get(clave) || 0) + (a.Minutos || 0));
-  }
-  const totalParadas = [...minutosPorTipo.values()].reduce((s, m) => s + m, 0);
-  const resumenParadas = minutosPorTipo.size
-    ? [...minutosPorTipo.entries()].map(([tipo, min]) => `<span>${esc(tipo)}: <b>${min} min</b></span>`).join('')
-      + `<span>Total: <b>${totalParadas} min</b> en ${actividades.length} parada(s)</span>`
-    : '<span>Sin paradas registradas en esta orden.</span>';
-
-  // Registro de calidad: exactamente lo que el operario respondio, chequeo por chequeo.
-  const porChequeo = new Map();
-  for (const c of calidad) {
-    if (!porChequeo.has(c.IdChequeo)) {
-      porChequeo.set(c.IdChequeo, { hora: c.FechaHora, operario: c.OperarioNombre, bulto: c.id_bulto, respuestas: [] });
-    }
-    if (c.Pregunta) porChequeo.get(c.IdChequeo).respuestas.push(c);
-  }
-  const bloquesCalidad = porChequeo.size
-    ? [...porChequeo.values()].map(ch => `
-        <div class="chequeo">
-          <div class="chequeo-cab">
-            <strong>${horaCorta(ch.hora)}</strong> · ${esc(ch.operario || 'sin operario')}
-            ${ch.bulto != null ? ' · bulto ' + ch.bulto : ' · sin bulto activo'}
-          </div>
-          <ul>${ch.respuestas.map(r => `<li><span>${esc(r.Apartado || '')} — ${esc(r.Pregunta)}</span><b class="${r.Respuesta === 'NoConforme' ? 'malo' : 'ok'}">${r.Respuesta === 'NoConforme' ? 'No conforme' : 'Conforme'}</b></li>`).join('')}</ul>
-        </div>`).join('')
-    : '<p class="vacio">Sin chequeos de calidad registrados en esta orden.</p>';
-
-  // Protocolo de arranque (09/09/2026): las respuestas del operario antes de empezar a producir.
-  // Se reusa el marcado de "Registro de calidad" (.chequeo) porque es exactamente el mismo tipo de
-  // lista pregunta/respuesta. Las dos actividades cronometradas del protocolo (limpieza y
-  // alistamiento) NO se repiten aca: ya salen en la bitacora y en "Paradas del turno", como
-  // cualquier otra parada.
-  const TEXTO_PASO_PROTOCOLO = {
-    limpieza: 'Limpieza y desinfección',
-    peligro_quimico: '¿Detecta algún peligro químico (aceites y lubricantes)?',
-    rollo_estado: '¿El rollo está en buen estado?',
-    peligro_fisico: '¿Identifica algún peligro físico (cabellos, insectos, material extraño, material particulado)?',
-    alistamiento: 'Alistamiento',
-    temperatura: 'Temperatura de trabajo de la perilla (%)'
-  };
-  // Un "Sí" solo es malo en las preguntas de peligro; en "¿el rollo está en buen estado?" es lo
-  // esperado. Por eso el color no sale del texto de la respuesta sino de que pregunta es.
-  const respuestaMalaProtocolo = (paso, respuesta) =>
-    (paso === 'peligro_quimico' || paso === 'peligro_fisico') ? respuesta === 'Si'
-    : (paso === 'rollo_estado' ? respuesta === 'No' : false);
-  const preguntasProtocolo = protocolo.filter(x => ['peligro_quimico', 'rollo_estado', 'peligro_fisico', 'temperatura'].includes(x.Paso));
-  const bloqueProtocolo = preguntasProtocolo.length
-    ? `<div class="chequeo">
-         <div class="chequeo-cab"><strong>${horaCorta(preguntasProtocolo[0].FechaHora)}</strong> · ${esc(preguntasProtocolo[0].OperarioNombre || 'sin operario')}</div>
-         <ul>${preguntasProtocolo.map(r => `<li><span>${horaCorta(r.FechaHora)} — ${esc(TEXTO_PASO_PROTOCOLO[r.Paso] || r.Paso)}${r.Serial ? ' <span class="mono">(' + esc(r.Serial) + ')</span>' : ''}</span><b class="${respuestaMalaProtocolo(r.Paso, r.Respuesta) ? 'malo' : 'ok'}">${esc(r.Respuesta == null ? '—' : r.Respuesta)}</b></li>`).join('')}</ul>
-       </div>`
-    : '<p class="vacio">Sin protocolo de arranque registrado en esta orden.</p>';
 
   return `<!DOCTYPE html>
 <html lang="es">
@@ -5079,20 +5130,20 @@ function renderReporteProduccion(datos, maquinaCodigo) {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- El titulo es tambien el NOMBRE DEL ARCHIVO que propone el navegador al guardar como PDF, por
-eso lleva pedido/orden/fecha y no un titulo bonito: asi el digitador no termina con veinte
+eso lleva planilla/pedido/fecha y no un titulo bonito: asi el digitador no termina con veinte
 "documento.pdf". Se evitan / \\ : * ? " < > | porque Windows no los admite en un nombre. -->
 <title>${esc(nombreArchivo)}</title>
 <style>
-  /* Hoja carta, pensada para salir por una impresora normal desde el navegador. Todo el color se
-  reduce a negro sobre blanco al imprimir: en pantalla se ve igual, para poder revisarlo antes. */
-  @page { size: letter; margin: 12mm 10mm; }
+  /* Hoja carta HORIZONTAL, como el formato en papel: solo el bloque de caracteristicas ya son 22
+  casillas C/NC, imposible de pie. */
+  @page { size: letter landscape; margin: 6mm; }
   * { box-sizing: border-box; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    margin: 0; padding: 16px; background: #f4f6f8; color: #1c2733; font-size: 13px;
+    font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
+    margin: 0; padding: 12px; background: #eceff1; color: #000; font-size: 11px;
   }
-  .hoja { max-width: 1100px; margin: 0 auto; background: #fff; padding: 22px 24px 28px; }
-  .barra { display: flex; gap: 10px; justify-content: flex-end; margin: 0 auto 12px; max-width: 1100px; }
+  .hoja { max-width: 1500px; margin: 0 auto; background: #fff; padding: 8px; }
+  .barra { display: flex; gap: 10px; justify-content: flex-end; margin: 0 auto 12px; max-width: 1500px; }
   .btn {
     appearance: none; border: none; border-radius: 8px; padding: 11px 18px; font-size: 14px;
     font-weight: 600; font-family: inherit; color: #fff; background: #71bf44; cursor: pointer;
@@ -5100,61 +5151,72 @@ eso lleva pedido/orden/fecha y no un titulo bonito: asi el digitador no termina 
   .btn.gris { background: #64748b; text-decoration: none; display: inline-block; }
   .btn.azul { background: #006984; }
   .ayuda-pdf {
-    max-width: 1100px; margin: 0 auto 12px; background: #e2eff3; border-left: 4px solid #006984;
-    padding: 10px 14px; font-size: 13px; color: #1c2733; border-radius: 6px;
+    max-width: 1500px; margin: 0 auto 12px; background: #e2eff3; border-left: 4px solid #006984;
+    padding: 10px 14px; font-size: 13px; border-radius: 6px;
   }
-  h1 { font-size: 19px; margin: 0 0 2px; }
-  .sub { color: #64748b; font-size: 13px; margin-bottom: 14px; }
-  .cab { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 22px; margin-bottom: 14px; }
-  .cab div { border-bottom: 1px solid #eef0f2; padding-bottom: 4px; }
-  .cab .et { color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; display: block; }
-  .cab .va { font-weight: 600; }
-  h2 { font-size: 14px; margin: 18px 0 8px; border-bottom: 1px solid #1c2733; padding-bottom: 4px; }
-  table { border-collapse: collapse; width: 100%; font-size: 11.5px; }
-  th { text-align: left; background: #eef0f2; border: 1px solid #cfd8dc; padding: 5px 6px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.03em; }
-  td { border: 1px solid #dde4e7; padding: 4px 6px; }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  td.mono { font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
-  /* Filas de evento de la bitacora: no son paquetes, son lo que paso entre paquete y paquete. Se
-  distinguen por un fondo tenue y el texto en cursiva, para que al hojear el papel se vea de una
-  donde se monto un rollo o donde se paro la maquina. En impresion los fondos claros se conservan
-  con print-color-adjust; si la impresora los ignora, el borde izquierdo grueso los mantiene
-  distinguibles igual. */
-  tr.ev td { font-style: italic; background: #f4f6f8; }
-  tr.ev td:nth-child(3) { border-left: 3px solid #9fb2b9; font-style: italic; }
-  tr.ev-rollo td { background: #e2eff3; }
-  tr.ev-rollo td:nth-child(3) { border-left-color: #006984; }
-  tr.ev-hito td { background: #e9f6e3; font-weight: 700; font-style: normal; }
-  tr.ev-hito td:nth-child(3) { border-left-color: #3f8c26; }
-  tr.ev-parada td { background: #fbf1de; }
-  tr.ev-parada td:nth-child(3) { border-left-color: #9a6205; }
-  tr.ev-calidad-mala td { background: #fbe9e9; color: #b31414; font-weight: 700; }
-  tr.ev-calidad-mala td:nth-child(3) { border-left-color: #b31414; }
-  .ok { color: #2f7a17; }
-  .malo { color: #c00000; font-weight: 700; }
-  .totales { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px 26px; font-size: 12.5px; }
-  .resumen-paradas span { background: #f4f6f8; padding: 3px 9px; border-radius: 4px; }
-  .totales b { font-variant-numeric: tabular-nums; }
-  ul.rollos { margin: 0; padding-left: 18px; }
-  ul.rollos li { margin-bottom: 3px; }
-  .chequeo { border: 1px solid #dde4e7; padding: 8px 10px; margin-bottom: 8px; break-inside: avoid; }
-  .chequeo-cab { font-size: 12px; margin-bottom: 5px; }
-  .chequeo ul { margin: 0; padding: 0; list-style: none; font-size: 12px; }
-  .chequeo li { display: flex; justify-content: space-between; gap: 14px; border-top: 1px solid #f1f4f5; padding: 2px 0; }
-  .vacio { color: #64748b; }
-  .firmas { margin-top: 26px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 30px; }
-  .firma { border-top: 1px solid #1c2733; padding-top: 5px; font-size: 11px; color: #64748b; }
+
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border: 1px solid #000; padding: 1px 3px; vertical-align: middle; }
+  th { font-size: 7.5px; text-transform: uppercase; text-align: center; font-weight: 700; line-height: 1.1; }
+  .cen { text-align: center; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .chico { font-size: 8px; }
+  .cnc { text-align: center; width: 15px; font-weight: 700; font-size: 9px; }
+  .malo { background: #f0d2d2; }
+
+  /* --- Encabezado --- */
+  .cab-sup td { vertical-align: middle; }
+  .marca { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; line-height: 1; }
+  .marca .azul { color: #29a3d4; }
+  .marca .verde { color: #7ac143; }
+  .marca .lema { display: block; font-size: 8px; font-weight: 400; color: #555; letter-spacing: 0.02em; }
+  .logo { height: 38px; display: block; }
+  .titulo-form { text-align: center; font-size: 17px; font-weight: 700; letter-spacing: 0.01em; }
+  .n-planilla { text-align: center; font-size: 15px; font-weight: 700; color: #1b4f8a; }
+  .et { font-size: 7.5px; text-transform: uppercase; letter-spacing: 0.02em; }
+  .va { font-weight: 700; }
+  .campo-linea { font-size: 11px; }
+  .tabla-fecha td, .tabla-fecha th { padding: 0 3px; font-size: 9px; text-align: center; }
+
+  /* --- Tabla principal --- */
+  .principal th { padding: 1px 2px; }
+  .principal td { height: 15px; font-size: 9.5px; }
+  .principal tr.vacia td { height: 17px; }
+  .principal tr.parada td, .principal tr.fila-rollo td { background: #f1f1f1; }
+  .principal tr.parada .medida-prog { font-style: italic; }
+  .tiquete { font-size: 8px; font-family: ui-monospace, Consolas, monospace; }
+  .medida-prog { font-size: 9px; }
+  .vert {
+    writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap;
+    font-size: 7px; font-weight: 700; height: 118px; padding: 2px 0; letter-spacing: 0;
+  }
+  .grupo { font-size: 8px; }
+
+  /* --- Bloques inferiores --- */
+  .inferior { display: grid; grid-template-columns: 1fr 1fr 1.5fr 2.1fr; gap: 0; margin-top: 4px; }
+  .inferior > div { border: 1px solid #000; border-left: none; }
+  .inferior > div:first-child { border-left: 1px solid #000; }
+  .titulo-bloque {
+    background: #e8eaec; text-align: center; font-size: 9px; font-weight: 700; text-transform: uppercase;
+    border-bottom: 1px solid #000; padding: 2px;
+  }
+  .bloque-turno table { border: none; }
+  .bloque-turno td { border: none; border-bottom: 1px solid #bbb; font-size: 9px; height: 17px; }
+  .sub-bloque { text-align: center; font-size: 8.5px; font-weight: 700; background: #f3f4f5; border-top: 1px solid #000; border-bottom: 1px solid #000; padding: 1px; }
+  .item-inoc { font-size: 8px; line-height: 1.15; }
+  .area-libre { height: 100%; min-height: 96px; }
+  .notas { display: flex; justify-content: space-between; gap: 12px; font-size: 7.5px; margin-top: 3px; }
+  .notas b { font-weight: 700; }
 
   @media print {
-    body { background: #fff; padding: 0; font-size: 11px; }
+    body { background: #fff; padding: 0; font-size: 10px; }
     .hoja { max-width: none; padding: 0; }
     .barra, .ayuda-pdf { display: none !important; }
     thead { display: table-header-group; }
-    tr, .chequeo { break-inside: avoid; }
-    h2 { break-after: avoid; }
-    /* Que los fondos de las filas de evento sobrevivan a la impresion (por defecto el navegador
-    descarta los fondos para ahorrar tinta). */
-    tr.ev td { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    tr { break-inside: avoid; }
+    th, .titulo-bloque, .sub-bloque, .principal tr.parada td, .principal tr.fila-rollo td, .malo {
+      -webkit-print-color-adjust: exact; print-color-adjust: exact;
+    }
   }
 </style>
 </head>
@@ -5166,59 +5228,149 @@ eso lleva pedido/orden/fecha y no un titulo bonito: asi el digitador no termina 
   </div>
   <div class="ayuda-pdf" id="ayuda-pdf" hidden>
     En la ventana que se abre, elija <strong>“Guardar como PDF”</strong> en <em>Destino</em>
-    (en la tableta: <strong>“Guardar como PDF”</strong> en la lista de impresoras) y confirme.
+    (en la tableta: <strong>“Guardar como PDF”</strong> en la lista de impresoras), confirme que la
+    orientación sea <strong>horizontal</strong> y acepte.
     El archivo se propone como <strong>${esc(nombreArchivo)}</strong>.
   </div>
+
   <div class="hoja">
-    <h1>Reporte de producción — Selladora</h1>
-    <div class="sub">${esc(orden.MaquinaNombre)} · Orden ${orden.IdOrden} · Impreso el ${new Date().toLocaleString('es-CO', { hour12: false })}</div>
+    <!-- ==================== Encabezado de identificacion ==================== -->
+    <table class="cab-sup">
+      <tr>
+        <td style="width:190px" rowspan="2">
+          <img class="logo" src="/logo-carlixplast.png" alt=""
+               onerror="this.style.display='none';document.getElementById('marca-texto').style.display='block'">
+          <span class="marca" id="marca-texto" style="display:none">
+            <span class="azul">Carlix</span><span class="verde">plast</span>
+            <span class="lema">Soluciones Amigables</span>
+          </span>
+        </td>
+        <td class="titulo-form" rowspan="2">PLANILLA PRODUCCIÓN Y SEGUIMIENTO - SELLADO</td>
+        <td style="width:110px" class="cen"><span class="et">N.º</span><div class="n-planilla">${esc(numeroPlanilla)}</div></td>
+        <td style="width:150px" class="cen">
+          <span class="et">Fecha</span>
+          <table class="tabla-fecha">
+            <tr><th>DD</th><th>MM</th><th>AA</th></tr>
+            <tr><td>${esc(dd)}</td><td>${esc(mm)}</td><td>${esc(aa)}</td></tr>
+          </table>
+        </td>
+      </tr>
+      <tr>
+        <td class="cen" colspan="2">
+          <span class="et">Turno</span>
+          <table class="tabla-fecha">
+            <tr>${TURNOS.map(([letra]) => `<th>${letra}</th>`).join('')}</tr>
+            <tr>${TURNOS.map(([, num]) => `<td>${turnoOrden === num ? 'X' : num}</td>`).join('')}</tr>
+          </table>
+        </td>
+      </tr>
+      <tr>
+        <td class="campo-linea"><span class="et">Máquina No.</span> <span class="va">${esc(orden.MaquinaNombre)}</span></td>
+        <td class="campo-linea"><span class="et">Operario</span> <span class="va">${esc(ejecucion && ejecucion.OperarioNombre || '')}</span></td>
+        <td class="campo-linea"><span class="et">Letra</span></td>
+        <td class="campo-linea"><span class="et">Pedido</span> <span class="va">${esc(orden.NumeroPedido || '')}</span></td>
+      </tr>
+    </table>
 
-    <div class="cab">
-      <div><span class="et">Pedido</span><span class="va">${esc(orden.NumeroPedido || '—')}</span></div>
-      <div><span class="et">Referencia</span><span class="va">${esc(orden.Elemento)}</span></div>
-      <div><span class="et">Medida de la bolsa</span><span class="va">${esc(medida)}</span></div>
-      <div><span class="et">Pistas (bolsas x golpe)</span><span class="va">${pistas}</span></div>
-      <div><span class="et">Operario que inició</span><span class="va">${esc(ejecucion && ejecucion.OperarioNombre || '—')}</span></div>
-      <div><span class="et">Operario que finalizó</span><span class="va">${esc(ejecucion && ejecucion.OperarioFinalNombre || '—')}</span></div>
-      <div><span class="et">Hora inicio</span><span class="va">${ejecucion ? fechaHoraLocalBD(ejecucion.HoraInicioReal) || '—' : '—'}</span></div>
-      <div><span class="et">Hora final</span><span class="va">${ejecucion ? fechaHoraLocalBD(ejecucion.HoraFinReal) || 'en curso' : '—'}</span></div>
-      <div><span class="et">Estado</span><span class="va">${esc(orden.Estado)}</span></div>
-    </div>
-
-    <h2>Rollos de entrada (tiquetes)</h2>
-    <ul class="rollos">${filasRollos}</ul>
-
-    <h2>Bitácora de producción</h2>
-    <table>
+    <!-- ==================== Tabla principal ==================== -->
+    <table class="principal">
       <thead>
         <tr>
-          <th>Hora inicio</th><th>Hora final</th><th>Rollo</th><th>Bulto</th><th>Paquete</th>
-          <th>Unidades</th><th>Peso kg</th><th>Golpes x min</th><th>Potencia</th>
-          <th>Temp. perilla</th><th>Calidad</th>
+          <th colspan="8" class="grupo">Listado de producción</th>
+          <th colspan="${preguntasTodas.length * 2}" class="grupo">Seguimiento y medición al producto · Características - parámetros de aceptación</th>
+          <th colspan="6" class="grupo">Registro final</th>
+        </tr>
+        <tr>
+          <th rowspan="2" style="width:74px">No. tiquete rollo</th>
+          <th rowspan="2" style="width:130px">Medida programada</th>
+          <th rowspan="2" style="width:26px">No. bultos</th>
+          <th rowspan="2" style="width:26px">No. pistas</th>
+          <th rowspan="2" style="width:48px">Cantidad unds x bulto</th>
+          <th colspan="2">Hora</th>
+          <th rowspan="2" style="width:74px">Medida verificada (ancho/largo/#pliegues/calibre)</th>
+          ${apartados.map(ap => `<th colspan="${ap.preguntas.length * 2}" class="grupo">${esc(ap.titulo)}</th>`).join('')}
+          <th rowspan="2" style="width:40px">Cantidad unidades por paquete</th>
+          <th colspan="2">Retales</th>
+          <th colspan="3">Temperatura (°C)</th>
+        </tr>
+        <tr>
+          <th style="width:34px">Inicio</th>
+          <th style="width:34px">Final</th>
+          ${preguntasTodas.map(pr => `<th class="vert" colspan="2">${esc(pr.titulo)}</th>`).join('')}
+          <th class="vert" style="height:60px">Retal</th>
+          <th class="vert" style="height:60px">Salida no conforme</th>
+          <th class="vert" style="height:60px">Mordaza superior</th>
+          <th class="vert" style="height:60px">Mordaza inferior</th>
+          <th class="vert" style="height:60px">Sello longitudinal</th>
+        </tr>
+        <tr>
+          <th colspan="8"></th>
+          ${preguntasTodas.map(() => '<th>C</th><th>NC</th>').join('')}
+          <th colspan="6"></th>
         </tr>
       </thead>
-      <tbody>${filas || `<tr><td colspan="${COLUMNAS_BITACORA}">Esta orden todavía no tiene movimientos registrados.</td></tr>`}</tbody>
+      <tbody>
+        ${filas}
+        ${filasVacias}
+      </tbody>
     </table>
-    <div class="totales">
-      <span>Paquetes: <b>${paquetes.length}</b></span>
-      <span>Unidades producidas: <b>${totalUnidades.toLocaleString('es-CO')}</b></span>
-      <span>Peso total: <b>${totalKg.toFixed(2)} kg</b></span>
-      <span>Pistas: <b>${pistas}</b></span>
+
+    <!-- ==================== Bloques inferiores ==================== -->
+    <div class="inferior">
+      <div class="bloque-turno">
+        <div class="titulo-bloque">Recibo turno</div>
+        <table>
+          <tr><td>BOLSAS:</td></tr>
+          <tr><td>KILOS:</td></tr>
+          <tr><td>MEDIDA:</td></tr>
+          <tr><td>No. DE PEDIDO:</td></tr>
+        </table>
+        <div class="sub-bloque">Sin planillar</div>
+        <table>
+          <tr><td>BOLSAS:</td></tr>
+          <tr><td>MEDIDA:</td></tr>
+          <tr><td>No. DE PEDIDO:</td></tr>
+        </table>
+      </div>
+      <div class="bloque-turno">
+        <div class="titulo-bloque">Entrego turno</div>
+        <table>
+          <tr><td>BOLSAS:</td></tr>
+          <tr><td>KILOS:</td></tr>
+          <tr><td>MEDIDA:</td></tr>
+          <tr><td>No. DE PEDIDO:</td></tr>
+        </table>
+        <div class="sub-bloque">Sin planillar</div>
+        <table>
+          <tr><td>BOLSAS:</td></tr>
+          <tr><td>MEDIDA:</td></tr>
+          <tr><td>No. DE PEDIDO:</td></tr>
+        </table>
+      </div>
+      <div>
+        <div class="titulo-bloque">Controles de calidad</div>
+        <div class="area-libre"></div>
+      </div>
+      <div>
+        <div class="titulo-bloque">Controles de inocuidad</div>
+        <table>
+          <thead>
+            <tr>
+              <th>Ítem verificado</th>
+              <th style="width:16px">C</th>
+              <th style="width:16px">NC</th>
+              <th style="width:52px">Verificado por</th>
+            </tr>
+          </thead>
+          <tbody>${filasInocuidad}</tbody>
+        </table>
+      </div>
     </div>
 
-    <h2>Paradas del turno</h2>
-    <div class="totales resumen-paradas">${resumenParadas}</div>
-
-    <h2>Protocolo de arranque</h2>
-    ${bloqueProtocolo}
-
-    <h2>Registro de calidad</h2>
-    ${bloquesCalidad}
-
-    <div class="firmas">
-      <div class="firma">Operario</div>
-      <div class="firma">Supervisor</div>
-      <div class="firma">Calidad</div>
+    <div class="notas">
+      <span><b>NOTA:</b> AL FINALIZAR CADA REFERENCIA ANOTAR EL RETAL Y/O SALIDA NO CONFORME.</span>
+      <span><b>NOTA:</b> TU-TULA, MN-MANIJA, RF-REFUERZO, CA-CINTA ADHESIVA, CH-CIERRE HERMÉTICO, C-CUMPLE, NC-NO CUMPLE.</span>
+      <span>Producido: <b>${totalPaquetes}</b> paq · <b>${totalUnidades.toLocaleString('es-CO')}</b> bolsas · <b>${totalKg.toFixed(2)}</b> kg · Impreso ${new Date().toLocaleString('es-CO', { hour12: false })}</span>
     </div>
   </div>
 <script>
