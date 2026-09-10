@@ -477,10 +477,17 @@ function estilosBase() {
     .isla-con-boton .isla-texto { min-width: 0; }
     .isla-con-boton .label { margin-bottom: 4px; }
     .isla-con-boton .isla-detalle { margin: 0; }
-    /* Los dos botones tienen que verse IGUAL de grandes (el de reporte salia mas ancho solo porque
-       su texto era mas largo). width fijo -- no min-width -- para que queden identicos pase lo que
-       pase con el largo de la etiqueta; flex-shrink:0 evita que la fila los apriete. */
-    .isla .btn-isla { width: 140px; text-align: center; flex-shrink: 0; }
+    /* Los dos botones tienen que verse IGUAL de grandes. Ojo con .btn-imprimir: esa clase existe
+       para el boton grande de "Imprimir etiqueta" del recuadro de peso (min-height 110px, width
+       100%, blanco de toque grande para la tableta), y el de "Reporte" la usa solo por el color
+       azul -- sin neutralizar esas dos cosas quedaba con 110px de alto contra los ~40px de "Ver
+       bultos". Por eso aca se fijan alto, ancho y display de forma explicita: asi los dos salen
+       identicos pase lo que pase con el largo de la etiqueta o con la clase de color que lleven.
+       flex-shrink:0 evita ademas que la fila de la isla los apriete. */
+    .isla .btn-isla {
+      width: 140px; min-height: 0; padding: 10px 16px; flex-shrink: 0;
+      display: inline-flex; align-items: center; justify-content: center; text-align: center;
+    }
     .isla .orden-acciones { display: flex; gap: 8px; flex-wrap: wrap; }
     .isla .orden-acciones form { width: auto; }
     .btn-accion {
