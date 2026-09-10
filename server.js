@@ -8,7 +8,7 @@ const sql = require('mssql');
 const { desencriptar } = require('./crypto-mirane');
 const { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO } = require('./auth');
 const { registrarEvento } = require('./accesos');
-const { consultarSerial, confirmarRollo } = require('./scan-rollo');
+const { consultarSerial, confirmarRollo, alternarReferenciaGrupo } = require('./scan-rollo');
 const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
 const { obtenerLineaOriginalControlSellado } = require('./sel-inventario-mp');
 
@@ -486,6 +486,9 @@ function estilosBase() {
     .seccion-traslado { margin-top: 16px; }
     .seccion-traslado .traslado-campo { margin-bottom: 12px; }
     .seccion-traslado .traslado-campo:last-of-type { margin-bottom: 16px; }
+    .btn-alternar-referencia { background: #8e44ad; width: 100%; margin-top: 8px; }
+    .grupo-sellado-box { margin-bottom: 16px; background: #f3e9f9; border: 1px solid #d9bfe8; }
+    .grupo-sellado-actual { font-size: 13px; color: var(--texto-suave); margin-bottom: 4px; }
     .btn-finalizar { background: #c00000; }
     .btn-info { background: var(--verde); }
     .btn-accion:active { transform: translateY(1px); }
@@ -679,8 +682,89 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
 // PendienteValidacion -> sin accion (Residuos/Verificar/Cerrar Definitivo quedan en el escritorio).
 function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
   if (ordenes.length === 0) return '';
+
+  // Sellado en paralelo (08/09/2026, ampliado 09/09/2026 -- ver DISENO_SELLADO_PARALELO_08092026.md):
+  // las órdenes de un mismo grupo (IdGrupoSellado) que TODAS comparten el mismo Estado -- ya sea
+  // 'Pendiente' (nadie las ha iniciado) o 'Activa' (todas en curso, tras el Iniciar que las arranca
+  // de una vez) -- se fusionan en UNA sola tarjeta -- es un solo proceso físico, no tiene sentido
+  // mostrar 3 tarjetas sueltas ni para arrancarlo ni mientras corre. FIX 09/09/2026 (a pedido del
+  // usuario, reportando el Pedido 11408 listado en 2 tarjetas Activa sueltas): antes solo se
+  // fusionaba en 'Pendiente' -- al pasar a Activa se "desfusionaba" y volvían a verse sueltas. Ahora
+  // la tarjeta Activa fusionada trae UN "Información" (a la página de grupo, con Alternar/Finalizar
+  // por referencia) y UN "Finalizar" (finaliza TODO el grupo junto, da igual desde cuál se llame).
+  // FIX 09/09/2026 (a pedido del usuario, screenshot de las 2 tarjetas "Pend. validación" sueltas
+  // del Pedido 11408): también se fusiona en 'PendienteValidacion' -- las 3 referencias siempre
+  // terminan el Finalizar juntas (finalizarOrden las pasa a las 3 a la vez), así que mostrarlas
+  // sueltas ahí no aporta nada y rompe la uniformidad con las tarjetas Pendiente/Activa. Si algún
+  // miembro necesita "tomar control" de su ejecución (ver necesitaTomarControlMiembro más abajo),
+  // NO se fusiona -- se muestra cada una individual, para no esconder esa acción puntual.
+  const gruposFusionables = new Map(); // IdGrupoSellado -> [ordenes]
+  ordenes.forEach(o => {
+    if (o.IdGrupoSellado == null) return;
+    if (!gruposFusionables.has(o.IdGrupoSellado)) gruposFusionables.set(o.IdGrupoSellado, []);
+    gruposFusionables.get(o.IdGrupoSellado).push(o);
+  });
+  const necesitaTomarControlMiembro = (m) => {
+    const flag = m.Estado === 'Activa' && m.EstadoEjecucion === 'PendienteOperador';
+    const distinto = m.Estado === 'Activa' && m.EstadoEjecucion != null && !!miOperario && m.OperarioEjecucionCodigo !== miOperario;
+    return flag || distinto;
+  };
+  for (const [idGrupo, miembros] of gruposFusionables) {
+    const estadoComun = miembros[0].Estado;
+    const todosMismoEstado = miembros.every(m => m.Estado === estadoComun);
+    const estadoFusionable = estadoComun === 'Pendiente' || estadoComun === 'Activa' || estadoComun === 'PendienteValidacion';
+    const algunoNecesitaControl = estadoComun === 'Activa' && miembros.some(necesitaTomarControlMiembro);
+    if (!todosMismoEstado || !estadoFusionable || algunoNecesitaControl) gruposFusionables.delete(idGrupo);
+  }
+
+  const idsYaFusionados = new Set();
   const filas = ordenes.map(o => {
-    let acciones = `<a class="btn-accion btn-info" href="/selladora/${maquinaCodigo}/orden/${o.IdOrden}">ℹ Información</a>`;
+    if (o.IdGrupoSellado != null && gruposFusionables.has(o.IdGrupoSellado)) {
+      if (idsYaFusionados.has(o.IdGrupoSellado)) return ''; // ya se pintó la tarjeta fusionada de este grupo
+      idsYaFusionados.add(o.IdGrupoSellado);
+      const miembros = gruposFusionables.get(o.IdGrupoSellado).sort((a, b) => a.IdOrden - b.IdOrden);
+      const ancla = miembros[0];
+      const referencias = miembros.map(m => m.Elemento).join(' + ');
+      let accionesGrupo, infoFinalizadaGrupo = '';
+      if (ancla.Estado === 'Pendiente') {
+        // Iniciar un grupo entra por el mismo protocolo de arranque que una orden suelta (ver
+        // scriptProtocoloArranque): es un solo proceso fisico -- una sola limpieza, un solo
+        // chequeo de peligro quimico, un solo rollo y un solo alistamiento para las 3 referencias.
+        // El protocolo corre sobre la ANCLA, que es la orden que confirmarRollo usa para arrancar
+        // a los hermanos del grupo.
+        accionesGrupo = `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${ancla.IdOrden})">▶ Iniciar</button>`;
+      } else if (ancla.Estado === 'PendienteValidacion') {
+        accionesGrupo = `<span class="label">Esperando validación del digitador</span>`;
+        const horaFinGrupo = formatearFechaHora(ancla.HoraFinReal);
+        if (horaFinGrupo) infoFinalizadaGrupo = `<div class="orden-elemento">Finalizada: ${horaFinGrupo}</div>`;
+      } else {
+        accionesGrupo = `<form method="post" action="/api/selladora/orden/${ancla.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
+             <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
+           </form>`;
+      }
+      return `
+        <div class="orden-cola">
+          <div class="orden-info">
+            <div class="orden-pedido">🔗 Pedido ${ancla.NumeroPedido || '—'} ${badgeEstadoOrden(ancla.Estado)}</div>
+            <div class="orden-elemento">${referencias}</div>
+            <div class="orden-elemento" style="color:var(--texto-suave);">Un solo proceso -- ${miembros.length} referencias de salida</div>
+            ${infoFinalizadaGrupo}
+          </div>
+          <div class="orden-acciones">
+            <a class="btn-accion btn-info" href="/selladora/${maquinaCodigo}/grupo/${o.IdGrupoSellado}">ℹ Información</a>
+            ${accionesGrupo}
+          </div>
+        </div>`;
+    }
+    // FIX 09/09/2026 (a pedido del usuario): para una orden que pertenece a un grupo SELLADORA,
+    // "Información" ya no lleva directo a la página tradicional de una sola referencia -- lleva
+    // primero a /selladora/:codigo/grupo/:idGrupo (ver renderGrupoSelladoDetalle), que lista las
+    // referencias del grupo con su avance y los botones Alternar/Finalizar. Solo para agrupadas --
+    // una orden normal sigue yendo directo como siempre.
+    const hrefInformacion = o.IdGrupoSellado != null
+      ? `/selladora/${maquinaCodigo}/grupo/${o.IdGrupoSellado}`
+      : `/selladora/${maquinaCodigo}/orden/${o.IdOrden}`;
+    let acciones = `<a class="btn-accion btn-info" href="${hrefInformacion}">ℹ Información</a>`;
     // FIX 01/09/2026: no basta con EstadoEjecucion='PendienteOperador' -- ese flag solo se pone si
     // el operario anterior cerro sesion con el boton Salir; si el servidor se reinicia a mitad de
     // turno, las sesiones se pierden pero esa fila nunca se marca. Por eso se combinan dos señales
@@ -712,8 +796,11 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
       // ver scriptProtocoloArranque. El escaneo sigue estando, pero como paso 3.
       acciones += `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${o.IdOrden})">▶ Iniciar</button>`;
     } else if (o.Estado === 'Activa') {
+      // Sellado en paralelo (08/09/2026): "+Rollo" no aplica a una orden agrupada -- el rollo de
+      // entrada ya quedó registrado UNA sola vez para las 3 referencias al dar "Iniciar" en la
+      // ancla, no hay "rollo adicional" que agregar por separado en cada una.
       acciones += `
-        <button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${o.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>
+        ${o.IdGrupoSellado == null ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${o.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>` : ''}
         <form method="post" action="/api/selladora/orden/${o.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
           <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
         </form>`;
@@ -1693,6 +1780,42 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, proxi
 
 // Script compartido por renderPage y renderOrdenDetalle -- confirmacion antes de Finalizar, y
 // (31/08/2026) antes de Tomar control de una ejecucion PendienteOperador.
+// Sellado en paralelo (08/09/2026 -- ver DISENO_SELLADO_PARALELO_08092026.md): botón "Cambiar a
+// <referencia>" del selector de grupo en Información. Llama a /alternar-referencia, que hace todo
+// el trabajo (bajar el bulto actual a EnEspera, subir/crear el de la referencia elegida) en una
+// transacción -- acá solo se confirma y se redirige a la página de esa orden al terminar.
+function scriptAlternarReferencia() {
+  return `
+    function confirmarAlternarReferencia(idOrdenDestino, referenciaDestino) {
+      Swal.fire({
+        icon: 'question',
+        title: '¿Cambiar a ' + referenciaDestino + '?',
+        text: 'La referencia actual queda en espera -- puede volver a ella cuando quiera.',
+        showCancelButton: true,
+        confirmButtonText: 'Sí, cambiar',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#8e44ad',
+        cancelButtonColor: '#71bf44'
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        Swal.fire({ title: 'Cambiando…', allowOutsideClick: false, didOpen: function() { Swal.showLoading(); } });
+        fetch('/api/selladora/orden/' + idOrdenDestino + '/alternar-referencia', { method: 'POST' })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (!data.ok) {
+              Swal.fire({ icon: 'error', title: 'No se pudo cambiar', text: data.error || '', confirmButtonColor: '#71bf44' });
+              return;
+            }
+            window.location.href = data.redirect;
+          })
+          .catch(function(err) {
+            Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo cambiar: ' + err.message, confirmButtonColor: '#71bf44' });
+          });
+      });
+    }
+  `;
+}
+
 function scriptConfirmarFinalizar() {
   return `
     function confirmarFinalizar(evento, formulario) {
@@ -2318,13 +2441,18 @@ function scriptProtocoloArranque(maquinaCodigo) {
         // al entrar de nuevo a la orden (la maquina ya esta produciendo, no hay nada trancado).
         protocoloIntentar(
           function() { return protocoloPost('/api/selladora/orden/' + idOrden + '/temperatura', { porcentaje: valor }); },
-          function() {
+          function(datosTemp) {
             guardarPasoProtocolo(idOrden, { paso: 'temperatura', respuesta: String(valor) }, function() {
               Swal.fire({
                 icon: 'success', title: 'Protocolo de arranque completo',
                 text: 'Temperatura registrada: ' + valor + ' %. Ya puede producir.',
                 timer: 2200, showConfirmButton: false
-              }).then(function() { window.location.href = protocoloDestino(idOrden); });
+              }).then(function() {
+                // El servidor decide el destino: si esta orden es de un grupo de sellado en
+                // paralelo manda a la pagina del grupo (las 3 referencias, con Alternar), si no a
+                // la de la orden. protocoloDestino queda de respaldo por si no vino redirect.
+                window.location.href = (datosTemp && datosTemp.redirect) || protocoloDestino(idOrden);
+              });
             });
           });
       });
@@ -2528,7 +2656,16 @@ const BOTONES_RESIDUOS = [
 // la hacen los botones condicionales de la cola de ordenes de la maquina (renderColaOrdenes,
 // "Tomar control de la ejecución"/"Reanudar ejecución"), asi que ya no hacia falta duplicarla aca.
 
-function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, proximaCalidad, protocoloPendiente) {
+function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, proximaCalidad, grupoSellado, protocoloPendiente) {
+  // Sellado en paralelo (ver DISENO_SELLADO_PARALELO_08092026.md): si esta orden comparte máquina
+  // con otras (mismo rollo, hasta 3 referencias de salida distintas), grupoSellado trae TODAS las
+  // referencias del grupo (incluida esta misma) -- solo se usa para saber si hay que ocultar
+  // "+Rollo" (no aplica a una orden agrupada). El selector para alternar cuál referencia está
+  // recibiendo paquetes ahora YA NO vive aquí -- se movió a /selladora/:codigo/grupo/:idGrupo
+  // (renderGrupoSelladoDetalle), la página intermedia a la que ahora apunta "Información" para
+  // órdenes agrupadas (ver renderColaOrdenes) -- FIX 09/09/2026 a pedido del usuario.
+  const grupoSelladoOtras = (grupoSellado || []).filter(g => g.IdOrden !== orden.IdOrden);
+
   const filasHistorial = historial.length
     ? historial.map(h => `
         <div class="hist-fila">
@@ -2547,8 +2684,10 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     // Mismo protocolo de arranque que el boton Iniciar de la cola, ver renderColaOrdenes.
     acciones = `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${orden.IdOrden})">▶ Iniciar</button>`;
   } else if (activa) {
+    // Sellado en paralelo (08/09/2026): "+Rollo" no aplica a una orden agrupada -- el rollo de
+    // entrada ya quedó registrado UNA sola vez para las 3 referencias al dar "Iniciar" en la ancla.
     acciones = `
-      <button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${orden.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>
+      ${grupoSelladoOtras.length === 0 ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${orden.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>` : ''}
       <form method="post" action="/api/selladora/orden/${orden.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
         <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
       </form>
@@ -3355,10 +3494,23 @@ app.get('/', requireLogin, async (req, res) => {
 // para reusarla desde /selladora/:codigo (carga completa) y /selladora/:codigo/cola-fragmento (el
 // polling de scriptActualizarCola, que reemplazo al boton "Actualizar").
 async function obtenerColaOrdenes(p, codigo) {
+  // IdGrupoSellado (08/09/2026, Sellado en paralelo -- ver DISENO_SELLADO_PARALELO_08092026.md):
+  // NULL si esta orden no comparte máquina con otras -- ver renderColaOrdenes, que fusiona en una
+  // sola tarjeta las órdenes de un mismo grupo que TODAS sigan 'Pendiente' (nadie las ha iniciado).
+  // FIX 08/09/2026: la llave real del grupo es ord.Elemento (la referencia), no ord.Linea -- si se
+  // reasigna la referencia de una línea ya agrupada, esa línea deja de pertenecer al grupo solo.
   const colaResult = await p.request().input('codigo', codigo).query(`
     SELECT ord.IdOrden, ord.Estado, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento,
            ej.Estado AS EstadoEjecucion, ej.Operario AS OperarioEjecucionCodigo, op.Nombre AS OperarioEjecucionNombre,
-           ej.HoraFinReal
+           ej.HoraFinReal,
+           (SELECT TOP 1 g.IdGrupo FROM PRDGrupoEtapasCompartidasLineas gl
+            INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
+            -- FIX 09/09/2026 (bug real: Pedido 11085 se coló en el grupo del Pedido 11408 porque
+            -- ambos usan el mismo Elemento de salida en fechas distintas) -- Elemento por sí solo
+            -- NO es llave suficiente: dos pedidos DISTINTOS pueden compartir la misma referencia de
+            -- salida en momentos distintos. Hay que exigir también que sea el MISMO pedido (g.Numero
+            -- es el Numero del pedido para el que se armó ese grupo, ver crear_grupoetapascompartidas.sql).
+            WHERE gl.Elemento = ord.Elemento AND g.Numero = ord.NumeroPedido) AS IdGrupoSellado
     FROM SEL_OrdenProduccion ord
     INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
     LEFT JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
@@ -3511,6 +3663,239 @@ app.post('/admin/tablet-fija/quitar', requireLogin, requireAdmin, async (req, re
 // igual que CargarPesajes) e historial de materia prima (Serial/Referencia/Lote, igual que
 // SEL_InventarioMP.vb:MostrarHistorialMP). Reemplaza el viejo bloque "Rollo en curso" (SEL_EjecucionOrden)
 // que mezclaba conceptos de rollo/MP que al usuario no le interesan aqui -- solo bultos.
+// Sellado en paralelo (ver DISENO_SELLADO_PARALELO_08092026.md): si la orden pertenece a un grupo
+// SELLADORA (Agrupar Etapas en Liberación de Pedidos), devuelve TODAS las referencias del grupo --
+// [] si no está agrupada. EstadoBultoActual (Activo/Temporal/EnEspera/null) indica si esa
+// referencia ya se activó al menos una vez en esta máquina.
+// FIX 09/09/2026 (a pedido del usuario): partido en dos -- obtenerIdGrupoSelladoDeOrden resuelve
+// solo el IdGrupo (lo necesita también la nueva página /selladora/:codigo/grupo/:idGrupo y el
+// endpoint de alternar, para saber a dónde redirigir), obtenerMiembrosGrupoSellado trae los
+// miembros de un IdGrupo ya conocido (evita repetir el primer lookup cuando el grupo ya se tiene).
+// FIX 09/09/2026 (bug real, Pedido 11085 colado en el grupo del Pedido 11408): Elemento por sí solo
+// NO es llave suficiente para expandir un grupo -- dos pedidos DISTINTOS pueden usar la misma
+// referencia de salida en momentos distintos, y sin exigir también el mismo Numero de pedido
+// (g.Numero, el pedido para el que se armó ESE grupo puntual), la expansión "todos los miembros de
+// este IdGrupo" termina trayendo órdenes de OTRO pedido que nunca tuvo nada que ver -- eso bloqueaba
+// Finalizar (contaba un bulto Activo ajeno) y corrompía la página de grupo/alternar. Todas las
+// consultas de aquí para abajo que expanden un IdGrupo a sus miembros reales exigen
+// `ord.NumeroPedido = g.Numero`.
+async function obtenerIdGrupoSelladoDeOrden(p, idOrden) {
+  const dtGrupo = await p.request().input('idOrden', idOrden).query(`
+    SELECT TOP 1 g.IdGrupo
+    FROM SEL_OrdenProduccion ord
+    INNER JOIN PRDGrupoEtapasCompartidasLineas gl ON gl.Elemento = ord.Elemento
+    INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
+      AND g.Numero = ord.NumeroPedido
+    WHERE ord.IdOrden = @idOrden
+  `);
+  return dtGrupo.recordset.length > 0 ? dtGrupo.recordset[0].IdGrupo : null;
+}
+
+async function obtenerMiembrosGrupoSellado(p, idGrupo) {
+  const dtMiembros = await p.request().input('idGrupo', idGrupo).query(`
+    SELECT ord.IdOrden, ie.Referencia, ie.Nombre, ord.Estado, ISNULL(ord.NumeroPedido,'') AS NumeroPedido,
+           (SELECT TOP 1 b.estado FROM SEL_Bultos b
+            INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+            WHERE ej.IdOrden = ord.IdOrden ORDER BY b.id DESC) AS EstadoBultoActual
+    FROM PRDGrupoEtapasCompartidasLineas gl
+    INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl.IdGrupo
+    INNER JOIN SEL_OrdenProduccion ord ON ord.Elemento = gl.Elemento AND ord.NumeroPedido = g.Numero
+    INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
+    WHERE gl.IdGrupo = @idGrupo
+    ORDER BY ord.IdOrden
+  `);
+  return dtMiembros.recordset;
+}
+
+async function obtenerGrupoSelladoDeOrden(p, idOrden) {
+  const nIdGrupo = await obtenerIdGrupoSelladoDeOrden(p, idOrden);
+  if (nIdGrupo == null) return [];
+  return obtenerMiembrosGrupoSellado(p, nIdGrupo);
+}
+
+// FIX 09/09/2026 (a pedido del usuario, confirmado vía AskUserQuestion: "+ Rollo" es UNA sola
+// acción por grupo, el mismo rollo físico compartido -- se registra contra la referencia que esté
+// "Activa ahora" en el momento de escanearlo, igual que ya hace el Iniciar original). Consecuencia:
+// la materia prima de un grupo puede terminar repartida entre varios miembros distintos (el rollo
+// del Iniciar bajo la ancla, un +Rollo posterior bajo la que estaba activa en ese momento, etc.) --
+// el historial de UN miembro puntual (renderOrdenDetalle) nunca lo va a mostrar completo. Esta
+// función junta el historial de TODOS los miembros del grupo (mismo criterio de
+// EjecucionSelladora.vb:btnVerHistorial_Click por miembro, ver el bloque idéntico en
+// GET /selladora/:codigo/orden/:idOrden) para la página de grupo.
+async function obtenerHistorialMPGrupo(p, miembros) {
+  let historial = [];
+  for (const m of miembros) {
+    const ultimoBulto = await p.request().input('idOrden', m.IdOrden).query(`
+      SELECT TOP 1 b.refsalida, b.mes, b.dia FROM SEL_Bultos b
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+      WHERE ej.IdOrden = @idOrden
+      ORDER BY b.num_bulto DESC
+    `);
+    if (ultimoBulto.recordset.length === 0) continue;
+    const { refsalida: nElemento, mes, dia } = ultimoBulto.recordset[0];
+    const tLote = String(mes).padStart(2, '0') + String(dia).padStart(2, '0');
+    const nLineaOriginal = await obtenerLineaOriginalControlSellado(p, m.IdOrden, 0);
+    const historialResult = await p.request()
+      .input('elemento', nElemento).input('lote', tLote).input('lineaOriginal', nLineaOriginal)
+      .query(`
+        SELECT mp.Detalle AS Serial, e.Nombre AS Referencia, mp.LoteMP AS Lote
+        FROM PRDProduccionMateriaPrima mp
+        INNER JOIN INVElementos e ON mp.MateriaPrima = e.Codigo
+        WHERE mp.Elemento = @elemento AND mp.Lote = @lote AND mp.Linea = @lineaOriginal
+        ORDER BY mp.Linea
+      `);
+    historial.push(...historialResult.recordset.map(h => ({ ...h, ReferenciaSalida: m.Referencia })));
+  }
+  return historial;
+}
+
+// FIX 09/09/2026 (a pedido del usuario): página intermedia SOLO para pedidos con grupo SELLADORA
+// (Sellado en paralelo). Antes "Información" llevaba directo a la página tradicional de UNA
+// referencia, con una cajita "Activa ahora / Cambiar a..." metida arriba. Ahora, para un pedido
+// agrupado, "Información" llega primero AQUÍ -- lista las 3 (o las que sean) referencias del grupo
+// con su % de avance, un botón Alternar (si no es la que está activa ahora mismo) y un botón
+// Finalizar (finaliza TODO el grupo junto, ver finalizarOrden -- da igual desde cuál referencia se
+// llame). "Más información" por referencia lleva a la página tradicional de siempre
+// (/selladora/:codigo/orden/:idOrden, ya sin el selector -- ver renderOrdenDetalle). Para pedidos
+// normales (sin grupo) nada de esto aplica -- "Información" sigue yendo directo a la página
+// tradicional, como siempre.
+function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquinaCodigo, miembros, usuario, historial) {
+  // FIX 09/09/2026 (a pedido del usuario): "+ Rollo" es UNA sola acción para todo el grupo (mismo
+  // rollo físico compartido) -- se agrega SIEMPRE contra la referencia que esté "Activa ahora"
+  // (recibiendo paquetes en este momento), nunca por referencia suelta. Si por algún motivo ninguna
+  // está activa todavía (grupo recién creado, nadie ha dado Iniciar), no se ofrece el botón.
+  const miembroActivoAhora = miembros.find(m => m.EstadoBultoActual === 'Activo' || m.EstadoBultoActual === 'Temporal');
+  const btnRolloGrupoHTML = miembroActivoAhora ? `
+    <div class="orden-cola" style="margin-bottom:16px;">
+      <div class="orden-info">
+        <div class="orden-pedido">Rollo de entrada</div>
+        <div class="orden-elemento">Mismo rollo físico compartido por las ${miembros.length} referencias -- se agrega contra "${miembroActivoAhora.Referencia}" (activa ahora).</div>
+      </div>
+      <div class="orden-acciones">
+        <button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${miembroActivoAhora.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>
+      </div>
+    </div>` : '';
+
+  const filasHistorial = (historial || []).length
+    ? historial.map(h => `
+        <div class="hist-fila">
+          <span class="valor serial">${h.Serial ?? '—'}</span>
+          <span>${h.Referencia ?? '—'}</span>
+          <span>${h.Lote ?? '—'}</span>
+          <span style="color:var(--texto-suave);">${h.ReferenciaSalida ?? '—'}</span>
+        </div>`).join('')
+    : `<div class="pesaje-vacio">Sin materia prima registrada todavía.</div>`;
+
+  const filas = miembros.map(m => {
+    const esActivaAhora = m.EstadoBultoActual === 'Activo' || m.EstadoBultoActual === 'Temporal';
+
+    const avanceHTML = (m.avance && m.avance.tipo) ? (() => {
+      const color = m.avance.porcentaje >= 100 ? '#4a9c2e' : '#006984';
+      return `
+        <div class="avance-header-card" style="width:auto;justify-self:auto;margin-top:8px;box-shadow:none;border:1px solid #e4e6ea;padding:8px 12px;">
+          <div class="avance-header-top">
+            <span class="avance-header-label">Avance</span>
+            <span class="avance-header-porcentaje" style="font-size:16px;color:${color};">${m.avance.porcentaje.toLocaleString('es-CO', { maximumFractionDigits: 1 })}%</span>
+          </div>
+          <div class="avance-header-barra">
+            <div class="avance-header-relleno" style="width:${Math.min(m.avance.porcentaje, 100)}%;background:${color};"></div>
+          </div>
+          <div class="avance-header-stats">
+            <span>Producido: ${formatearCantidadAvance(m.avance.producido, m.avance.tipo)}</span>
+            <span>Programado: ${formatearCantidadAvance(m.avance.programado, m.avance.tipo)}</span>
+          </div>
+        </div>`;
+    })() : '';
+
+    let acciones = '';
+    if (m.Estado === 'Activa') {
+      acciones += esActivaAhora
+        ? `<span class="label" style="color:#4a9c2e;font-weight:700;">🟢 Activa ahora</span>`
+        : `<button type="button" class="btn-accion btn-alternar-referencia" style="margin-top:0;width:auto;" onclick="confirmarAlternarReferencia(${m.IdOrden}, ${jsString(m.Referencia).replace(/"/g, '&quot;')})">🔄 Alternar aquí</button>`;
+      acciones += `
+        <form method="post" action="/api/selladora/orden/${m.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
+          <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
+        </form>`;
+    }
+    acciones += `<a class="btn-accion btn-info" href="/selladora/${maquinaCodigo}/orden/${m.IdOrden}">ℹ Más información</a>`;
+
+    return `
+      <div class="orden-cola">
+        <div class="orden-info">
+          <div class="orden-pedido">${m.Referencia} ${badgeEstadoOrden(m.Estado)}</div>
+          <div class="orden-elemento">${m.Nombre || ''}</div>
+          ${avanceHTML}
+        </div>
+        <div class="orden-acciones">${acciones}</div>
+      </div>`;
+  }).join('');
+
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pedido ${numeroPedido || idGrupo} — ${maquinaNombre}</title>
+  <style>${estilosBase()}</style>
+</head>
+<body>
+  <header>
+    <div class="header-top">
+      <div class="logo-wrap"><img class="logo" src="/logo-carlixplast.png" alt="Carlixplast"></div>
+    </div>
+    <div class="header-inner">
+      <div class="header-fila">
+        <div class="header-info">
+          <h1>🔗 Pedido ${numeroPedido || '—'}</h1>
+          <div class="sub">Sellado en paralelo -- un solo proceso, ${miembros.length} referencias de salida</div>
+          <a class="volver" href="/selladora/${maquinaCodigo}">‹ ${maquinaNombre}</a>
+        </div>
+        <div class="header-salir-grupo">
+          <div class="header-usuario">👤 ${usuario}</div>
+          <a class="salir" href="/logout">Cerrar sesión</a>
+        </div>
+      </div>
+    </div>
+  </header>
+  <main>
+    ${btnRolloGrupoHTML}
+    ${filas}
+    <h2 style="font-size:15px;margin:22px 0 10px;">Historial de materia prima (todo el grupo)</h2>
+    <div class="ejecucion-box">${filasHistorial}</div>
+  </main>
+  <script src="/sweetalert2.min.js"></script>
+  <script>${scriptAlternarReferencia()}</script>
+  <script>${scriptConfirmarFinalizar()}</script>
+  <script>${scriptEscanearRollo(maquinaCodigo)}</script>
+  <!-- scriptProtocoloArranque aporta preguntarEstadoRolloNuevo, el chequeo del rollo (buen estado /
+       peligro fisico) que el boton "+ Rollo" de arriba exige antes de confirmar el rollo. -->
+  <script>${scriptProtocoloArranque(maquinaCodigo)}</script>
+</body>
+</html>`;
+}
+
+app.get('/selladora/:codigo/grupo/:idGrupo', requireLogin, async (req, res) => {
+  const { codigo, idGrupo } = req.params;
+  try {
+    const p = await getPool();
+    const miembros = await obtenerMiembrosGrupoSellado(p, idGrupo);
+    if (miembros.length === 0) {
+      return res.status(404).send(renderErrorSimple('Grupo no encontrado.', `/selladora/${codigo}`));
+    }
+    for (const m of miembros) {
+      m.avance = await obtenerAvanceProduccion(p, m.IdOrden);
+    }
+    const historial = await obtenerHistorialMPGrupo(p, miembros);
+    const maquinaResult = await p.request().input('codigo', codigo).query(
+      `SELECT Nombre FROM PRDMaquinas WHERE Codigo = @codigo`
+    );
+    const maquinaNombre = maquinaResult.recordset.length > 0 ? maquinaResult.recordset[0].Nombre : codigo;
+    res.send(renderGrupoSelladoDetalle(idGrupo, miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial));
+  } catch (err) {
+    res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
+  }
+});
+
 app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
   const { codigo, idOrden } = req.params;
   try {
@@ -3615,12 +4000,13 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
     }
 
     const avance = await obtenerAvanceProduccion(p, idOrden);
+    const grupoSellado = await obtenerGrupoSelladoDeOrden(p, idOrden);
 
     // Protocolo de arranque a medias en ESTA orden -- se retoma solo al abrir la pagina, y ademas
     // apaga el modal de pausa normal (ver renderOrdenDetalle) para no encimar dos ventanas.
     const protocoloPendiente = await obtenerProtocoloPendiente(p, Number(idOrden));
 
-    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, proximaCalidad, protocoloPendiente));
+    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, proximaCalidad, grupoSellado, protocoloPendiente));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
@@ -3748,12 +4134,16 @@ async function obtenerAvanceProduccion(p, idOrden) {
   const tipo = kilosSolicitados > 0 ? 'kg' : (unidadesSolicitadas > 0 ? 'unidades' : null);
   if (!tipo) return { tipo: null };
 
+  // FIX 09/09/2026 (a pedido del usuario -- Sellado en paralelo): faltaba 'EnEspera' -- una
+  // referencia hermana parqueada (con paquetes reales ya pesados antes de alternar a otra) quedaba
+  // fuera de esta suma, así que su % de avance en la página de grupo salía en 0 aunque sí tuviera
+  // producción real. 'Temporal' se agrega por si acaso (normalmente nunca tiene paquetes).
   const dtProducido = await p.request().input('idOrden', idOrden).query(`
     SELECT ISNULL(SUM(pe.PesoPaqueGr), 0) AS PesoTotalKg, COUNT(*) AS Paquetes
     FROM SEL_PesajeElemento pe
     INNER JOIN SEL_Bultos b ON b.id = pe.id_bulto
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
-    WHERE ej.IdOrden = @idOrden AND b.estado IN ('Activo', 'Cerrado')
+    WHERE ej.IdOrden = @idOrden AND b.estado IN ('Activo', 'Cerrado', 'EnEspera', 'Temporal')
   `);
   const paquetes = Number(dtProducido.recordset[0].Paquetes);
   const producido = tipo === 'kg'
@@ -3991,10 +4381,15 @@ app.get('/selladora/:codigo/orden/:idOrden/resumen-bulto-activo', requireLogin, 
   const { idOrden } = req.params;
   try {
     const p = await getPool();
+    // FIX 09/09/2026 (a pedido del usuario -- Sellado en paralelo): antes solo miraba estado='Activo',
+    // así que una referencia hermana parqueada en 'EnEspera' (con paquetes reales ya pesados antes de
+    // alternar a otra) salía siempre en 0/0 -- el resumen debe reflejar el bulto propio de ESTA orden,
+    // sea el que esté recibiendo paquetes ahora ('Activo'/'Temporal') o el que quedó parqueado
+    // ('EnEspera') -- nunca puede haber más de uno de estos a la vez para la misma orden.
     const dtBultoActivo = await p.request().input('idOrden', idOrden).query(`
       SELECT TOP 1 b.id FROM SEL_Bultos b
       INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
-      WHERE ej.IdOrden = @idOrden AND b.estado = 'Activo'
+      WHERE ej.IdOrden = @idOrden AND b.estado IN ('Activo', 'Temporal', 'EnEspera')
       ORDER BY b.id DESC
     `);
     if (dtBultoActivo.recordset.length === 0) {
@@ -4178,6 +4573,51 @@ app.post('/api/selladora/orden/:idOrden/rollo', requireLogin, async (req, res) =
     });
 
     res.json({ ok: true, redirect: `/selladora/${maquinaCodigo}` });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// Sellado en paralelo (08/09/2026 -- ver DISENO_SELLADO_PARALELO_08092026.md): alterna cuál
+// referencia del grupo (mismo pedido, vinculadas por PRDGrupoEtapasCompartidas CategoriaMaquina=
+// 'SELLADORA') está recibiendo paquetes ahora mismo en esta máquina. idOrden en la URL es la
+// referencia a la que se quiere cambiar -- alternarReferenciaGrupo() se encarga de bajar la que
+// estaba activa y subir esta.
+app.post('/api/selladora/orden/:idOrden/alternar-referencia', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  const usuario = req.session.usuario;
+
+  if (!usuario.codigoOperarioPRD) {
+    return res.json({ ok: false, error: 'Su usuario no tiene un operario de planta configurado.' });
+  }
+
+  try {
+    const p = await getPool();
+    const maquinaCodigo = await obtenerCodigoMaquinaDeOrden(p, idOrden);
+
+    const dtBolsas = await p.request().input('maquina', maquinaCodigo).query(`
+      SELECT TOP 1 ej.BolsasxGolpe FROM SEL_EjecucionOrden ej
+      INNER JOIN SEL_OrdenProduccion ord ON ord.IdOrden = ej.IdOrden
+      WHERE ord.Maquina = @maquina AND ej.Estado = 'Activa'
+      ORDER BY ej.IdEjecucion DESC
+    `);
+    const nBolsasXGolpe = dtBolsas.recordset.length > 0 ? dtBolsas.recordset[0].BolsasxGolpe : 0;
+
+    await alternarReferenciaGrupo(p, {
+      idOrdenDestino: idOrden,
+      codOperario: usuario.codigoOperarioPRD,
+      bolsasXGolpe: nBolsasXGolpe,
+      generadoPor: usuario.generadoPor
+    });
+
+    // FIX 09/09/2026 (a pedido del usuario): "Alternar" ahora se dispara desde la página de grupo
+    // (/selladora/:codigo/grupo/:idGrupo), no desde la página tradicional de una sola referencia --
+    // al terminar, vuelve ahí (con el estado ya actualizado) en vez de a la orden puntual.
+    const nIdGrupo = await obtenerIdGrupoSelladoDeOrden(p, idOrden);
+    const redirect = nIdGrupo != null
+      ? `/selladora/${maquinaCodigo}/grupo/${nIdGrupo}`
+      : `/selladora/${maquinaCodigo}/orden/${idOrden}`;
+    res.json({ ok: true, redirect });
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
@@ -4817,7 +5257,18 @@ app.post('/api/selladora/orden/:idOrden/temperatura', requireLogin, async (req, 
       .input('operario', req.session.usuario.codigoOperarioPRD || null)
       .input('porcentaje', porcentaje)
       .query(`INSERT INTO SEL_TemperaturaPerilla (id_ejecucion, Operario, Porcentaje) VALUES (@idEjecucion, @operario, @porcentaje)`);
-    res.json({ ok: true });
+
+    // A donde mandar al operario cuando este es el ULTIMO paso del protocolo de arranque (ver
+    // pasoTemperaturaProtocolo). Se resuelve aca y no en la tableta porque solo el servidor sabe si
+    // esta orden pertenece a un grupo de sellado en paralelo: si pertenece, el sitio correcto es la
+    // pagina del GRUPO (que lista las 3 referencias con Alternar/Finalizar), no la de la referencia
+    // suelta -- si no, seria imposible alternar despues de arrancar.
+    const maquinaCodigo = await obtenerCodigoMaquinaDeOrden(p, idOrden);
+    const idGrupo = await obtenerIdGrupoSelladoDeOrden(p, idOrden);
+    const redirect = idGrupo != null
+      ? `/selladora/${maquinaCodigo}/grupo/${idGrupo}`
+      : `/selladora/${maquinaCodigo}/orden/${idOrden}`;
+    res.json({ ok: true, redirect });
   } catch (err) {
     // Mensaje util si todavia no se ejecuto el script SQL en esta base.
     const falta = /Invalid object name/i.test(err.message);

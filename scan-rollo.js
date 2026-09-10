@@ -10,7 +10,7 @@ const {
   registrarMateriaPrimaRollo, generarSalidaRollo, registrarControlParcialSellado,
   resolverTurnoPorHora, resolverClienteDestino, resolverDestinoOrden,
   obtenerLineaOriginalControlSellado, obtenerFechaLoteOriginalControlSellado,
-  obtenerOCrearOrdenProduccion, valNumerico
+  obtenerOCrearOrdenProduccion, valNumerico, resolverTipoPedido, obtenerAnclaGrupoSellado
 } = require('./sel-inventario-mp');
 
 function formatMMDD(d) {
@@ -92,7 +92,17 @@ async function consultarSerial(db, { idOrden, serial, esNuevoRollo }) {
 
 // frmScanRollo.vb:173-295 (CrearBultoInicial) -- crea el primer bulto (SEL_Bultos) de la
 // ejecucion recien abierta, dentro de la transaccion de confirmarRollo.
-async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial, cantidad, lote, bolsasXGolpe, generadoPor }) {
+// sinMateriaPrima (08/09/2026, Sellado en paralelo -- ver DISENO_SELLADO_PARALELO_08092026.md):
+// al alternar a otra referencia del MISMO grupo (mismo rollo físico, ya registrado con la primera
+// referencia iniciada), NO hay que volver a descontar inventario ni duplicar
+// PRDProduccionMateriaPrima -- confirmado con el usuario. serial/cantidad/lote solo se usan para
+// esos 3 registros de materia prima, así que con la bandera en true quedan sin uso.
+// estadoInicial (08/09/2026, Sellado en paralelo): 'Activo' de por defecto -- el bulto que arranca
+// recibiendo paquetes ya mismo. Para un hermano del grupo que se crea junto pero no es el que la
+// máquina está llenando en este momento, se le pasa 'EnEspera' -- así el PLC (que resuelve el
+// bulto por `id_maquina` + estado IN ('Activo','Temporal'), sin mirar la referencia) nunca ve más
+// de un bulto de la misma máquina a la vez.
+async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial, cantidad, lote, bolsasXGolpe, generadoPor, sinMateriaPrima = false, estadoInicial = 'Activo' }) {
   const datosOrden = await obtenerDatosOrden(tx, idOrden);
   if (!datosOrden) throw new Error('Orden no encontrada.');
   const { elemento: nElemento, maquina: nMaquina, numeroPedido: tNumeroPedido } = datosOrden;
@@ -142,7 +152,7 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
   // Mismo formato que Detalle/CodigoBarras en Produccion.vb: Año(4) + Lote(6) + Linea(4) + Elemento(5) = 19 digitos
   const tSerialPadre = String(nAgno) + String(valNumerico(tLote)).padStart(6, '0') + String(nNumBulto).padStart(4, '0') + String(nElemento).padStart(5, '0');
 
-  const tBodegaRollo = await obtenerBodegaDeRollo(tx, serial);
+  const tBodegaRollo = sinMateriaPrima ? null : await obtenerBodegaDeRollo(tx, serial);
   // PRDProduccionMateriaPrima se guarda bajo la Linea ANCLA (LineaOriginal, el primer bulto de
   // toda la ejecucion), no bajo el num_bulto de este rollo puntual -- mismo criterio que ya usan
   // registrarControlParcialSellado/calcularMaterialTotalSellado. Sin esto, Produccion.vb:Buscar()
@@ -154,24 +164,36 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
   // ejecucion, en vez de esperar al cierre -- mismo cambio que frmScanRollo.vb:CrearBultoInicial
   // (23/08/2026). Asi queda disponible para estampar en PRDProduccionMateriaPrima desde el
   // primer rollo (incluidos los que llegan luego via "Añadir Rollo").
+  // FIX 09/09/2026 (a pedido del usuario -- Pedido 11408 con 2 OP distintas para el mismo grupo):
+  // obtenerOCrearOrdenProduccion busca/crea por Elemento+LineaAncla -- cada referencia del grupo
+  // tiene los suyos propios, así que sin esto cada una termina con su propia OP. Si esta orden
+  // pertenece a un grupo SELLADORA, se usa el Elemento+LineaAncla de la ANCLA del grupo (la de
+  // menor IdOrden) para TODOS los miembros -- así conviven bajo la misma OP.
+  const anclaGrupo = await obtenerAnclaGrupoSellado(tx, idOrden);
+  const nElementoParaOP = anclaGrupo ? anclaGrupo.Elemento : nElemento;
+  const nLineaAnclaParaOP = anclaGrupo
+    ? await obtenerLineaOriginalControlSellado(tx, anclaGrupo.IdOrden, 0)
+    : nLineaOriginal;
   const nCodDestinoBulto = await resolverDestinoOrden(tx, idOrden, tNumeroPedido);
   const tOrdenProduccion = await obtenerOCrearOrdenProduccion(tx, {
-    elemento: nElemento, fecha: fFechaSolo, lineaAncla: nLineaOriginal, lote: tLote,
+    elemento: nElementoParaOP, fecha: fFechaSolo, lineaAncla: nLineaAnclaParaOP, lote: tLote,
     codigoDestino: nCodDestinoBulto, generadoPor
   });
 
-  await registrarMateriaPrimaRollo(tx, {
-    fecha: fFechaSolo, lote: tLote, elementoProducto: nElemento, linea: nLineaOriginal,
-    detalleRollo: serial, cantidad, loteMP: lote, bodega: tBodegaRollo, ordenProduccion: tOrdenProduccion
-  });
-  await generarSalidaRollo(tx, {
-    idOrden, fecha: fFechaSolo, lote: tLote, elementoProducto: nElemento, linea: nNumBulto,
-    detalleRollo: serial, cantidad, generadoPor
-  });
-  await registrarControlParcialSellado(tx, {
-    idOrden, elemento: nElemento, fecha: fFechaSolo, anio: nAgno, numBultoActual: nNumBulto,
-    lote: tLote, pesoRolloBruto: cantidad, generadoPor
-  });
+  if (!sinMateriaPrima) {
+    await registrarMateriaPrimaRollo(tx, {
+      fecha: fFechaSolo, lote: tLote, elementoProducto: nElemento, linea: nLineaOriginal,
+      detalleRollo: serial, cantidad, loteMP: lote, bodega: tBodegaRollo, ordenProduccion: tOrdenProduccion
+    });
+    await generarSalidaRollo(tx, {
+      idOrden, fecha: fFechaSolo, lote: tLote, elementoProducto: nElemento, linea: nNumBulto,
+      detalleRollo: serial, cantidad, generadoPor
+    });
+    await registrarControlParcialSellado(tx, {
+      idOrden, elemento: nElemento, fecha: fFechaSolo, anio: nAgno, numBultoActual: nNumBulto,
+      lote: tLote, pesoRolloBruto: cantidad, generadoPor
+    });
+  }
 
   // FIX 31/08/2026: SEL_Bultos.NumeroPedido paso de INT a VARCHAR(20) (a pedido del usuario --
   // antes un pedido alfanumerico como "A0003" quedaba en null aqui). Ahora se guarda el texto
@@ -182,9 +204,10 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
     .input('agno', nAgno).input('mes', nMes).input('dia', nDia).input('numBulto', nNumBulto)
     .input('elemento', nElemento).input('serialPadre', tSerialPadre).input('maquina', nMaquina)
     .input('idEjecucion', idEjecucion).input('numeroPedido', tNumeroPedidoBultoSQL).input('horaInicio', fHoy)
+    .input('estadoInicial', estadoInicial)
     .query(`
       INSERT INTO SEL_Bultos (agno, mes, dia, number_paqu, num_bulto, refsalida, estado, serialArmado, serialPadre, id_maquina, id_ejecucion, NumeroPedido, HoraInicio)
-      VALUES (@agno, @mes, @dia, 0, @numBulto, @elemento, 'Activo', @serialPadre, @serialPadre, @maquina, @idEjecucion, @numeroPedido, @horaInicio)
+      VALUES (@agno, @mes, @dia, 0, @numBulto, @elemento, @estadoInicial, @serialPadre, @serialPadre, @maquina, @idEjecucion, @numeroPedido, @horaInicio)
     `);
 
   const nTurnoBulto = await resolverTurnoPorHora(tx, nMaquina, fHoy);
@@ -193,6 +216,10 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
   }
 
   const { codCliente: nCodClienteBulto } = await resolverClienteDestino(tx, tNumeroPedido);
+  // FIX 08/09/2026 (a pedido del usuario -- antes TipoPedido quedaba fijo en 4): ver
+  // resolverTipoPedido en sel-inventario-mp.js para la regla completa (AR/BR -> 4, Carlixplast
+  // mismo -> 1, tercero real -> 2).
+  const nTipoPedidoBulto = await resolverTipoPedido(tx, nElemento, nCodClienteBulto);
 
   await tx.request()
     .input('fecha', fFechaSolo).input('horaInicio', fHoy).input('maquina', nMaquina).input('turno', String(nTurnoBulto))
@@ -201,6 +228,7 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
     .input('generadoPor', generadoPor).input('bolsas', bolsasXGolpe)
     .input('numeroPedido', tNumeroPedido || null)
     .input('ordenProduccion', tOrdenProduccion || null)
+    .input('tipoPedido', nTipoPedidoBulto)
     .query(`
       -- FIX 03/09/2026 (a pedido del usuario -- mismo cambio que frmScanRollo.vb:CrearBultoInicial):
       -- HoraFinal ya no se inserta en NULL -- se deja igual a HoraInicio (placeholder, duracion "0"
@@ -212,7 +240,7 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
         FechaModificado, HoraInicio, HoraFinal, Torta, BolsasxGolpe, TipoPedido, NumeroPedido, OrdenProduccion)
       VALUES (@fecha, @maquina, @turno, 0, @lote, @elemento, @linea, 0, 0, 0, @serialPadre,
         @cliente, @destino, 0, 0, 0, 0, @generadoPor,
-        GETDATE(), @horaInicio, @horaInicio, 0, @bolsas, 4, @numeroPedido, @ordenProduccion)
+        GETDATE(), @horaInicio, @horaInicio, 0, @bolsas, @tipoPedido, @numeroPedido, @ordenProduccion)
     `);
 
   if (codOperario > 0) {
@@ -335,6 +363,40 @@ async function confirmarRollo(pool, { idOrden, idEjecucionActivo, serial, esNuev
 
       await tx.request().input('idOrden', idOrden).query(`UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden = @idOrden`);
       idEjecucionDelRollo = nuevaIdEjecucion;
+
+      // Sellado en paralelo (08/09/2026 -- ver DISENO_SELLADO_PARALELO_08092026.md, corregido tras
+      // aclaración del usuario): "Iniciar" en la orden ANCLA de un grupo arranca las 3 referencias
+      // de una vez, no solo la ancla -- las otras 2 quedan con su ejecución Activa y su primer
+      // bulto ya creado, pero en 'EnEspera' desde el arranque (no esperan a la primera vez que se
+      // "alterne" a ellas). Mismo rollo físico ya registrado arriba -- sinMateriaPrima=true, no se
+      // vuelve a descontar inventario ni a duplicar PRDProduccionMateriaPrima.
+      // FIX 09/09/2026 (bug real, Pedido 11085 colado en el grupo del Pedido 11408 al Iniciar):
+      // Elemento por sí solo NO es llave suficiente -- dos pedidos DISTINTOS pueden compartir la
+      // misma referencia de salida en momentos distintos. Exige también el mismo NumeroPedido en
+      // ambos lados (ord1 Y ord2 contra g.Numero, el pedido para el que se armó ese grupo).
+      const dtHermanos = await tx.request().input('idOrden', idOrden).query(`
+        SELECT ord2.IdOrden
+        FROM SEL_OrdenProduccion ord1
+        INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Elemento = ord1.Elemento
+        INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl1.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
+          AND g.Numero = ord1.NumeroPedido
+        INNER JOIN PRDGrupoEtapasCompartidasLineas gl2 ON gl2.IdGrupo = g.IdGrupo
+        INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Elemento = gl2.Elemento AND ord2.NumeroPedido = g.Numero
+        WHERE ord1.IdOrden = @idOrden AND ord2.IdOrden <> @idOrden AND ord2.Estado = 'Pendiente'
+      `);
+      for (const filaHermano of dtHermanos.recordset) {
+        const nIdEjecucionHermano = await abrirNuevaEjecucion(tx, {
+          idOrden: filaHermano.IdOrden, codOperario, serial: null, cantidad: null,
+          bolsasXGolpe, maquina: datosOrden.maquina
+        });
+        await crearBultoInicial(tx, {
+          idOrden: filaHermano.IdOrden, idEjecucion: nIdEjecucionHermano, codOperario, serial: null,
+          cantidad: null, lote: null, bolsasXGolpe, generadoPor, sinMateriaPrima: true, estadoInicial: 'EnEspera'
+        });
+        await tx.request().input('idOrden', filaHermano.IdOrden).query(
+          `UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden = @idOrden`
+        );
+      }
     }
 
     // Linea de tiempo del rollo (ver agregar_rollo_ejecucion.sql): es el UNICO punto donde se sabe
@@ -368,4 +430,72 @@ async function confirmarRollo(pool, { idOrden, idEjecucionActivo, serial, esNuev
   }
 }
 
-module.exports = { obtenerDatosOrden, consultarSerial, confirmarRollo };
+// Sellado en paralelo (08/09/2026 -- ver DISENO_SELLADO_PARALELO_08092026.md): alterna cuál
+// referencia del grupo (PRDGrupoEtapasCompartidas, CategoriaMaquina='SELLADORA') está recibiendo
+// paquetes en la máquina en este momento. El PLC (agregar_detalle_pesajeelemento.sql,
+// insert_pesaje_elemento.sql) resuelve el bulto a llenar por `id_maquina` + estado IN ('Activo',
+// 'Temporal') SIN mirar la referencia -- por eso nunca puede haber más de un bulto en esos estados
+// por máquina: el bulto de la referencia que se deja se pasa a 'EnEspera' antes de activar el otro.
+// No toca los triggers de SEL_Bultos (cierre, generar entrada) -- nunca ven dos bultos
+// Activo/Temporal de la misma máquina a la vez.
+// Primera vez que se activa una referencia del grupo: crea su ejecución + primer bulto igual que
+// confirmarRollo, pero con sinMateriaPrima=true -- es el MISMO rollo físico que ya se registró con
+// la primera referencia iniciada, no hay que volver a descontar inventario (confirmado con el
+// usuario). Veces siguientes: solo revive su bulto 'EnEspera' -> 'Activo'.
+async function alternarReferenciaGrupo(pool, { idOrdenDestino, codOperario, bolsasXGolpe, generadoPor }) {
+  const datosOrden = await obtenerDatosOrden(pool, idOrdenDestino);
+  if (!datosOrden) throw new Error('Orden no encontrada.');
+  const { maquina: nMaquina } = datosOrden;
+
+  const tx = new sql.Transaction(pool);
+  await tx.begin();
+  try {
+    // 1) Lo que esté Activo/Temporal en esta máquina (de cualquier otra referencia del grupo) pasa
+    //    a EnEspera -- garantiza que el PLC nunca vea dos bultos a la vez.
+    await tx.request().input('maquina', nMaquina).query(`
+      UPDATE SEL_Bultos SET estado = 'EnEspera'
+      WHERE id_maquina = @maquina AND estado IN ('Activo', 'Temporal')
+    `);
+
+    const dtEjecExistente = await tx.request().input('idOrden', idOrdenDestino).query(`
+      SELECT TOP 1 IdEjecucion FROM SEL_EjecucionOrden
+      WHERE IdOrden = @idOrden AND Estado = 'Activa'
+      ORDER BY IdEjecucion DESC
+    `);
+
+    let nIdEjecucion;
+    if (dtEjecExistente.recordset.length > 0) {
+      // Ya se había activado antes -- solo revivir su bulto EnEspera más reciente.
+      nIdEjecucion = dtEjecExistente.recordset[0].IdEjecucion;
+      const dtBultoEnEspera = await tx.request().input('idEjecucion', nIdEjecucion).query(`
+        SELECT TOP 1 id FROM SEL_Bultos WHERE id_ejecucion = @idEjecucion AND estado = 'EnEspera' ORDER BY id DESC
+      `);
+      if (dtBultoEnEspera.recordset.length === 0) {
+        throw new Error('Esta referencia ya estaba activada pero no se encontró su bulto en espera -- revisar manualmente.');
+      }
+      await tx.request().input('id', dtBultoEnEspera.recordset[0].id).query(`UPDATE SEL_Bultos SET estado = 'Activo' WHERE id = @id`);
+    } else {
+      // FIX 08/09/2026 (corregido tras aclaración del usuario): esta rama ya NO es el camino normal
+      // -- "Iniciar" en la ancla ahora crea las ejecuciones/bultos EnEspera de los 3 de una vez (ver
+      // confirmarRollo). Queda como red de seguridad por si esta referencia nunca llegó a crearse
+      // (dato inconsistente) -- abre ejecución + primer bulto, sin rollo.
+      nIdEjecucion = await abrirNuevaEjecucion(tx, {
+        idOrden: idOrdenDestino, codOperario, serial: null, cantidad: null,
+        bolsasXGolpe, maquina: nMaquina
+      });
+      await crearBultoInicial(tx, {
+        idOrden: idOrdenDestino, idEjecucion: nIdEjecucion, codOperario, serial: null,
+        cantidad: null, lote: null, bolsasXGolpe, generadoPor, sinMateriaPrima: true
+      });
+      await tx.request().input('idOrden', idOrdenDestino).query(`UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden = @idOrden`);
+    }
+
+    await tx.commit();
+    return { ok: true, idEjecucion: nIdEjecucion };
+  } catch (err) {
+    await tx.rollback();
+    throw err;
+  }
+}
+
+module.exports = { obtenerDatosOrden, consultarSerial, confirmarRollo, alternarReferenciaGrupo };

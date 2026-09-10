@@ -157,6 +157,13 @@ Notas:
 - **Nada del protocolo vive en el navegador.** Cada paso queda en la base apenas se responde, así que
   si la tableta se recarga, se apaga o se bloquea a mitad, al volver a entrar se retoma en el mismo
   paso y el cronómetro sigue con la hora real (ver `obtenerProtocoloPendiente` en `server.js`).
+- **Con sellado en paralelo (pedidos agrupados):** el protocolo corre UNA sola vez sobre la orden
+  ancla del grupo, porque es un solo proceso físico — una limpieza, un chequeo de peligro químico, un
+  rollo, un alistamiento y una temperatura para las 3 referencias. El "▶ Iniciar" de la tarjeta
+  fusionada del grupo entra por el mismo protocolo, y al terminar el paso 6 la tableta cae en la
+  página del grupo (`/selladora/:codigo/grupo/:idGrupo`), no en la de una referencia suelta — si no,
+  no habría por dónde alternar. El destino lo decide el servidor en `POST .../temperatura`, que es el
+  único que sabe si la orden está agrupada.
 - El protocolo completo aplica **solo a Iniciar**. De "+ Rollo" (añadir un rollo a una orden ya en
   curso) sí se pide el chequeo del paso 4 — *¿está en buen estado?* y *¿algún peligro físico?*, sin
   la numeración 4.1/4.2 — antes de confirmar el rollo (a pedido del usuario, 09/09/2026): un rollo
