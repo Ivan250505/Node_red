@@ -501,7 +501,6 @@ function estilosBase() {
     .seccion-traslado { margin-top: 16px; }
     .seccion-traslado .traslado-campo { margin-bottom: 12px; }
     .seccion-traslado .traslado-campo:last-of-type { margin-bottom: 16px; }
-    .btn-alternar-referencia { background: #8e44ad; width: 100%; margin-top: 8px; }
     .grupo-sellado-box { margin-bottom: 16px; background: #f3e9f9; border: 1px solid #d9bfe8; }
     .grupo-sellado-actual { font-size: 13px; color: var(--texto-suave); margin-bottom: 4px; }
     .btn-finalizar { background: #c00000; }
@@ -627,7 +626,82 @@ function estilosBase() {
       cursor: pointer;
     }
     .calidad-opcion input { width: auto; margin: 0; }
+    /* ===== Sellado en paralelo: tarjeta interactiva por referencia de salida (10/09/2026) =====
+       Un pedido con VARIAS referencias de salida (ej. el 11410) tiene su propio apartado de
+       informacion (ver renderGrupoSelladoDetalle): cada referencia es una tarjeta que se abre y
+       cierra sola -- todas colapsadas al entrar, a pedido del usuario -- y trae adentro lo que
+       antes solo existia en la pagina de UNA referencia (peso/paquetes/acumulado propios, Imprimir
+       etiqueta, Cierre bulto y sus Especificaciones). El color de --color-ref lo pone el servidor
+       por referencia (ver COLORES_REFERENCIA_GRUPO) y es el MISMO en la pagina de bultos del
+       grupo, para que el operario asocie color <-> referencia de un vistazo. */
+    .ref-card { background: white; border-radius: 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 12px; }
+    .ref-card > summary { list-style: none; cursor: pointer; }
+    .ref-card > summary::-webkit-details-marker { display: none; }
+    .ref-card-cabecera {
+      display: flex; align-items: center; gap: 14px; padding: 14px 16px;
+      border-bottom: 4px solid var(--color-ref, var(--azul-osc));
+      border-radius: 14px 14px 0 0;
+    }
+    /* Contraida, la tarjeta ES solo su encabezado: el subrayado de color tiene que seguir el
+       contorno redondeado de la tarjeta (a pedido del usuario, 10/09/2026) -- recto se sale por
+       las esquinas de abajo. Abierta vuelve a ser recto, que ahi si separa encabezado y cuerpo. */
+    .ref-card:not([open]) .ref-card-cabecera { border-radius: 14px; }
+    .ref-card-id { flex: 1 1 160px; min-width: 0; }
+    .ref-card-codigo { font-size: 17px; font-weight: 700; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .ref-card-nombre { font-size: 13px; color: var(--texto-suave); margin-top: 2px; }
+    .ref-card-avance { flex: 0 1 210px; min-width: 130px; }
+    .ref-card-avance .avance-header-top { margin-bottom: 4px; }
+    .ref-card-chevron { font-size: 15px; color: var(--texto-suave); flex-shrink: 0; transition: transform 0.15s; }
+    .ref-card[open] .ref-card-chevron { transform: rotate(90deg); }
+    .ref-card-cuerpo { padding: 16px; }
+    .ref-card-cuerpo .peso-top { margin-bottom: 16px; }
+    .ref-card-cuerpo .imprimir-acciones-grid { margin-bottom: 14px; }
+    .ref-card-extras { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+    .ref-card-extras .btn-accion { width: auto; margin-top: 0; }
+    /* Residuos DENTRO de la tarjeta de cada referencia (10/09/2026, a pedido del usuario): se
+       registran contra el bulto de esa referencia, por eso ya no viven en una isla aparte como en
+       la pagina de una orden de una sola referencia. */
+    .ref-residuos { border-top: 1px solid #eef0f2; padding-top: 12px; margin-bottom: 14px; }
+    .ref-residuos .orden-acciones { display: flex; gap: 8px; flex-wrap: wrap; }
+    .ref-especificaciones { border-top: 1px solid #eef0f2; padding-top: 12px; }
+    .ref-especificaciones > summary {
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--texto-suave);
+      cursor: pointer; margin-bottom: 10px; list-style: none;
+    }
+    .ref-especificaciones > summary::-webkit-details-marker { display: none; }
+
+    /* Bultos del grupo: filtro por referencia (una lista desplegable, a pedido del usuario
+       10/09/2026 -- antes eran botones tipo chip) e identificacion de cada bulto con el color de
+       SU referencia. Ver renderBultosGrupo. El punto de color y el borde del desplegable toman el
+       color de la referencia elegida (lo pone scriptFiltroReferencias al cambiar la seleccion). */
+    .filtro-refs {
+      background: white; border-radius: 14px; padding: 12px 14px; margin-bottom: 14px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    }
+    .filtro-refs .label { margin: 0; flex-shrink: 0; }
+    .filtro-refs-punto {
+      width: 14px; height: 14px; border-radius: 999px; flex-shrink: 0;
+      background: var(--color-ref, var(--texto-suave));
+    }
+    .filtro-refs-select {
+      flex: 1 1 260px; width: auto; min-width: 0; cursor: pointer;
+      font-size: 15px; font-weight: 600; padding: 10px 12px;
+      border: 2px solid var(--color-ref, #cfd4da);
+    }
+    .filtro-refs-conteo { font-size: 13px; color: var(--texto-suave); font-weight: 600; flex-shrink: 0; }
+    /* Islas de Reporte/Ver bultos del pedido con varias referencias: el boton va DEBAJO del titulo
+       (a pedido del usuario, 10/09/2026), no a la derecha como en una orden de una sola referencia
+       (.isla-con-boton). Ancho completo: es la fila de toque grande para la tableta. */
+    .isla.isla-boton-abajo .btn-isla { width: 100%; margin-top: 4px; }
+    .bulto-encabezado { flex: 1 1 auto; min-width: 0; }
+    .bulto-ref { margin-top: 8px; }
+    .bulto-ref-subrayado { height: 4px; border-radius: 999px; background: var(--color-ref, var(--azul-osc)); margin-bottom: 6px; }
+    .bulto-ref-nombre { font-size: 12px; color: var(--texto-suave); font-weight: 600; }
+    .oculto { display: none !important; }
     @media (max-width: 480px) {
+      .ref-card-cabecera { flex-wrap: wrap; }
+      .ref-card-avance { flex: 1 1 100%; }
       .ejecucion-grid { grid-template-columns: 1fr 1fr; }
       .grid { grid-template-columns: 1fr; }
       .imprimir-acciones-grid { grid-template-columns: 1fr; }
@@ -748,7 +822,10 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
       idsYaFusionados.add(o.IdGrupoSellado);
       const miembros = gruposFusionables.get(o.IdGrupoSellado).sort((a, b) => a.IdOrden - b.IdOrden);
       const ancla = miembros[0];
-      const referencias = miembros.map(m => m.Elemento).join(' + ');
+      // Una referencia por renglon (a pedido del usuario, 10/09/2026) -- antes iban en una sola
+      // linea separadas por " + ", que con nombres largos ("LPBTRSTA30C0.25N1 PANADERÍAS ROLLO
+      // ALIÑADO 70grs-P DEL FONCE") era ilegible en la tableta.
+      const referencias = miembros.map(m => `<div>${m.Elemento}</div>`).join('');
       let accionesGrupo, infoFinalizadaGrupo = '';
       if (ancla.Estado === 'Pendiente') {
         // Iniciar un grupo entra por el mismo protocolo de arranque que una orden suelta (ver
@@ -860,16 +937,23 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
 // Node-RED manda JSON tipo {"peso": 0.2088..., "timestamp": "..."} con el peso ya en KG -- se
 // muestra tal cual, sin convertir. Es el mismo valor en kg que Node-RED guarda despues en
 // SEL_PesajeElemento.PesoPaqueGr (columna mal nombrada, ver FIX 02/09/2026 mas abajo).
+// Peso en vivo de la bascula (/ws/peso). CAMBIO 10/09/2026: ya no escribe en UN par de elementos
+// con id fijo sino en TODOS los que lleven .peso-vivo-numero/.peso-vivo-estado -- la pagina de un
+// pedido con varias referencias de salida muestra el mismo peso dentro de la tarjeta de CADA
+// referencia (la bascula es una sola, ver renderGrupoSelladoDetalle), y ahi hay tantos recuadros
+// como referencias. Con una sola referencia el resultado es identico a antes: un solo elemento.
 function scriptPesoEnVivo() {
   return `
     (function() {
-      var pesoNumero = document.getElementById('peso-numero');
-      var pesoEstado = document.getElementById('peso-estado');
-      if (!pesoNumero || !pesoEstado) return;
+      var pesoNumeros = document.querySelectorAll('.peso-vivo-numero');
+      var pesoEstados = document.querySelectorAll('.peso-vivo-estado');
+      if (pesoNumeros.length === 0) return;
 
       function fijarEstado(conectado, texto) {
-        pesoEstado.textContent = texto;
-        pesoEstado.className = 'peso-estado ' + (conectado ? 'conectado' : 'desconectado');
+        pesoEstados.forEach(function(el) {
+          el.textContent = texto;
+          el.className = 'peso-estado peso-vivo-estado ' + (conectado ? 'conectado' : 'desconectado');
+        });
       }
 
       function conectar() {
@@ -885,7 +969,7 @@ function scriptPesoEnVivo() {
             var json = JSON.parse(evento.data);
             if (json && typeof json.peso === 'number') texto = json.peso.toFixed(2);
           } catch (e) { /* mensaje no valido -- se deja el guion */ }
-          pesoNumero.textContent = texto;
+          pesoNumeros.forEach(function(el) { el.textContent = texto; });
         };
       }
       conectar();
@@ -1428,12 +1512,16 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, proxi
     // Devuelve la promesa (antes no la devolvia) para que confirmarCerrarBultoYReimprimir pueda
     // encadenar un segundo comando (reimprimir_etiqueta) solo si el primero (cierre_bulto)
     // funciono -- no cambia nada para el resto de llamadas, que siguen sin usar el valor devuelto.
-    function enviarComando(comando, boton, datos) {
+    // idOrdenDestino (10/09/2026) es opcional y solo lo usa la pagina de un pedido con varias
+    // referencias de salida: ahi el mismo script maneja las N referencias del grupo y cada boton
+    // tiene que mandar el comando contra SU orden, no contra la que quedo fija en el closure.
+    // Sin ese parametro se comporta exactamente como antes.
+    function enviarComando(comando, boton, datos, idOrdenDestino) {
       if (boton) boton.disabled = true;
       return fetch('/api/comando', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ comando: comando, idOrden: ${JSON.stringify(idOrden)}, maquinaCodigo: ${jsString(maquinaCodigo)}, datos: datos })
+        body: JSON.stringify({ comando: comando, idOrden: idOrdenDestino || ${JSON.stringify(idOrden)}, maquinaCodigo: ${jsString(maquinaCodigo)}, datos: datos })
       })
         .then(function(r) { return r.json(); })
         .then(function(data) {
@@ -1456,7 +1544,7 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, proxi
     // Retal/Troquelado/Refilado/Salida no conforme usan confirmarPesoYEnviar (piden el peso), y
     // Cierre bulto usa confirmarCerrarBultoYReimprimir (reimprime la ultima etiqueta), ver ambas
     // mas abajo.
-    function confirmarYEnviar(mensaje, comando, boton) {
+    function confirmarYEnviar(mensaje, comando, boton, idOrdenDestino) {
       Swal.fire({
         icon: 'warning',
         title: mensaje,
@@ -1466,7 +1554,7 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, proxi
         confirmButtonColor: '#71bf44',
         cancelButtonColor: '#c0392b'
       }).then(function(resultado) {
-        if (resultado.isConfirmed) enviarComando(comando, boton);
+        if (resultado.isConfirmed) enviarComando(comando, boton, null, idOrdenDestino);
       });
     }
 
@@ -1477,7 +1565,11 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, proxi
     // ultimo paquete salen de window.idBultoActivo/window.ultimoPaqueteBultoActivo (los mantiene
     // scriptResumenBultoActivo cada 4s). Solo se reimprime si el cierre funciono Y el bulto de
     // verdad tenia algun paquete pesado (si se cierra vacio, no hay nada que reimprimir).
-    function confirmarCerrarBultoYReimprimir(mensaje, boton) {
+    // idOrdenDestino: igual que en enviarComando, solo lo usa la pagina de un pedido con varias
+    // referencias de salida -- ahi el bulto/ultimo paquete NO salen de window.idBultoActivo (que
+    // es de una sola orden) sino de window.resumenPorOrden[idOrden], que mantiene el mismo
+    // sondeo pero por referencia (ver scriptTarjetasReferencia).
+    function confirmarCerrarBultoYReimprimir(mensaje, boton, idOrdenDestino) {
       Swal.fire({
         icon: 'warning',
         title: mensaje,
@@ -1488,13 +1580,14 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, proxi
         cancelButtonColor: '#c0392b'
       }).then(function(resultado) {
         if (!resultado.isConfirmed) return;
-        var idBulto = window.idBultoActivo || null;
-        var ultimo = window.ultimoPaqueteBultoActivo;
-        enviarComando('cierre_bulto', boton).then(function(data) {
+        var resumenRef = (idOrdenDestino && window.resumenPorOrden) ? window.resumenPorOrden[idOrdenDestino] : null;
+        var idBulto = resumenRef ? resumenRef.idBulto : (window.idBultoActivo || null);
+        var ultimo = resumenRef ? resumenRef.ultimo : window.ultimoPaqueteBultoActivo;
+        enviarComando('cierre_bulto', boton, null, idOrdenDestino).then(function(data) {
           if (!data.ok || !idBulto || !ultimo) return;
           enviarComando('reimprimir_etiqueta', null, {
             idBulto: idBulto, consecutivoPaquete: ultimo.consecutivo, pesoGr: ultimo.pesoKg, serialBulto: null
-          });
+          }, idOrdenDestino);
         });
       });
     }
@@ -1802,44 +1895,14 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, proxi
   `;
 }
 
+// El boton suelto "Alternar aquí" (scriptAlternarReferencia/confirmarAlternarReferencia) se quito
+// el 10/09/2026 a pedido del usuario: ya no hace falta un boton propio para cambiar de referencia,
+// porque "Imprimir etiqueta" y "Cierre bulto" de una referencia que no esta recibiendo paquetes
+// alternan solos antes de mandar el comando (ver accionReferencia en scriptAccionesReferencia).
+// El endpoint POST /alternar-referencia sigue siendo el mismo y lo llama esa funcion.
+
 // Script compartido por renderPage y renderOrdenDetalle -- confirmacion antes de Finalizar, y
 // (31/08/2026) antes de Tomar control de una ejecucion PendienteOperador.
-// Sellado en paralelo (08/09/2026 -- ver DISENO_SELLADO_PARALELO_08092026.md): botón "Cambiar a
-// <referencia>" del selector de grupo en Información. Llama a /alternar-referencia, que hace todo
-// el trabajo (bajar el bulto actual a EnEspera, subir/crear el de la referencia elegida) en una
-// transacción -- acá solo se confirma y se redirige a la página de esa orden al terminar.
-function scriptAlternarReferencia() {
-  return `
-    function confirmarAlternarReferencia(idOrdenDestino, referenciaDestino) {
-      Swal.fire({
-        icon: 'question',
-        title: '¿Cambiar a ' + referenciaDestino + '?',
-        text: 'La referencia actual queda en espera -- puede volver a ella cuando quiera.',
-        showCancelButton: true,
-        confirmButtonText: 'Sí, cambiar',
-        cancelButtonText: 'Cancelar',
-        confirmButtonColor: '#8e44ad',
-        cancelButtonColor: '#71bf44'
-      }).then(function(resultado) {
-        if (!resultado.isConfirmed) return;
-        Swal.fire({ title: 'Cambiando…', allowOutsideClick: false, didOpen: function() { Swal.showLoading(); } });
-        fetch('/api/selladora/orden/' + idOrdenDestino + '/alternar-referencia', { method: 'POST' })
-          .then(function(r) { return r.json(); })
-          .then(function(data) {
-            if (!data.ok) {
-              Swal.fire({ icon: 'error', title: 'No se pudo cambiar', text: data.error || '', confirmButtonColor: '#71bf44' });
-              return;
-            }
-            window.location.href = data.redirect;
-          })
-          .catch(function(err) {
-            Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo cambiar: ' + err.message, confirmButtonColor: '#71bf44' });
-          });
-      });
-    }
-  `;
-}
-
 function scriptConfirmarFinalizar() {
   return `
     function confirmarFinalizar(evento, formulario) {
@@ -2680,6 +2743,86 @@ const BOTONES_RESIDUOS = [
 // la hacen los botones condicionales de la cola de ordenes de la maquina (renderColaOrdenes,
 // "Tomar control de la ejecución"/"Reanudar ejecución"), asi que ya no hacia falta duplicarla aca.
 
+// Especificaciones del elemento pedido (columnas de SEL_OrdenProduccion) -- se sacaron de
+// renderOrdenDetalle a su propia funcion (10/09/2026) porque ahora tambien se muestran dentro de
+// la tarjeta de CADA referencia en la pagina de un pedido con varias referencias de salida (ver
+// renderTarjetaReferenciaGrupo). "Lleva impresion" se resuelve por INVElementosReferencia
+// Categoria=12 (TieneImpresion, mismo criterio que Referencia.vb:175) -- ojo: la consulta que
+// alimente esta funcion tiene que traer esas mismas columnas.
+function filasEspecificaciones(orden) {
+  const tieneImpresion = orden.TieneImpresion === 1;
+  return [
+    ['Tipo de sellado', orden.TipoSellado],
+    ['Troquelado', orden.Troquelado],
+    ['Uso previsto', orden.UsoPrevisto],
+    ['Manija', orden.Manija],
+    ['Color manija', orden.ManijaColor],
+    ['Tula', orden.Tula],
+    ['Color tula', orden.TulaColor],
+    ['Parche', orden.Parche],
+    ['Cierre deslizador', orden.CierreDeslizador],
+    ['Perforaciones', orden.Perforaciones],
+    ['Nombre impresión', tieneImpresion ? (orden.TipoImpresionDescripcion || 'Sí') : 'No']
+  ].map(([label, valor]) => `<div><span class="label">${label}</span><span class="valor">${valor ?? '—'}</span></div>`).join('');
+}
+
+// Condiciones que deciden que apartados/preguntas de Calidad aplican para una orden -- ver
+// construirApartadosCalidad(). "Sí" exacto para accesorios (no alcanza con no-NULL, ver
+// conversacion 26/08/2026); Perforaciones != 0/NULL; Troquelado distinto de 'SinTroquelado' (eso
+// mismo decide si sale el boton de residuo "Troquelado", ver botonesResiduos). Se saco a su propia
+// funcion el 10/09/2026: el chequeo de Calidad ahora tambien sale en el apartado de un pedido con
+// varias referencias de salida, contra la referencia que este recibiendo paquetes.
+function calcularFlagsCalidad(orden) {
+  return {
+    tieneImpresion: orden.TieneImpresion === 1,
+    tieneAccesorios: ['Manija', 'Tula', 'Parche', 'CierreDeslizador', 'CierreHermetico', 'CintaAdhesiva']
+      .some(campo => orden[campo] === 'Sí'),
+    tieneTroquelado: !!orden.Troquelado && orden.Troquelado !== 'SinTroquelado',
+    tienePerforaciones: orden.Perforaciones != null && Number(orden.Perforaciones) !== 0
+  };
+}
+
+// Botones de residuos de UNA orden: los que aplican al tipo de maquina (BOTONES_RESIDUOS_POR_TIPO)
+// mas "Salida no conforme". Piden el peso del residuo en una ventana emergente antes de mandar el
+// comando por /api/comando para que Node-RED lo lea (FIX 26/08/2026: no escriben en esta BD).
+//
+// `refGrupo` ({ idOrden, referencia }) es el modo "pedido con varias referencias de salida"
+// (10/09/2026, a pedido del usuario: "esos botones registran los residuos al bulto de esa
+// referencia"). Cambia a que funcion del cliente llaman:
+//   - sin refGrupo: confirmarPesoYEnviar (scriptComandos) -- el residuo va al bulto activo de la
+//     unica orden de la pagina, que es lo que hay en window.idBultoActivo.
+//   - con refGrupo: residuoReferencia (scriptAccionesReferencia) -- el residuo va al bulto de ESA
+//     referencia (window.resumenPorOrden[idOrden]), este o no recibiendo paquetes en ese momento.
+function botonesResiduos(orden, refGrupo) {
+  const habilitados = BOTONES_RESIDUOS_POR_TIPO[orden.MaquinaTipo] || [];
+  // "Troquelado" ademas exige que ESTA orden lleve troquelado -- los otros residuos no dependen de
+  // ninguna columna de la orden, solo del tipo de maquina.
+  const tieneTroquelado = !!orden.Troquelado && orden.Troquelado !== 'SinTroquelado';
+  const refJs = refGrupo ? jsString(refGrupo.referencia).replace(/"/g, '&quot;') : null;
+  const llamada = (label, clave) => refGrupo
+    ? `residuoReferencia('${label}', '${clave}', this, ${refGrupo.idOrden}, ${refJs})`
+    : `confirmarPesoYEnviar('${clave === 'no_conforme' ? '¿Está seguro de marcar esta salida como no conforme?' : `¿Está seguro de marcar este bulto con ${label}?`}', '${clave}', this)`;
+
+  return [
+    ...BOTONES_RESIDUOS
+      .filter(b => habilitados.includes(b.clave))
+      .filter(b => b.clave !== 'troquelado' || tieneTroquelado)
+      .map(b => `<button type="button" class="btn-accion btn-residuo" onclick="${llamada(b.label, b.clave)}">${b.label}</button>`),
+    `<button type="button" class="btn-accion btn-no-conforme" onclick="${llamada('Salida no conforme', 'no_conforme')}">🚫 Salida no conforme</button>`
+  ].join('');
+}
+
+// Un color por referencia de salida de un pedido agrupado (a pedido del usuario, 10/09/2026:
+// "cada referencia tendra un subrayado propio con colores diferentes"). El color se asigna por
+// POSICION dentro del grupo (siempre el mismo orden: obtenerMiembrosGrupoSellado ordena por
+// IdOrden), asi la referencia que en la tarjeta interactiva sale con el subrayado naranja es la
+// misma que en la pagina de bultos del grupo tiene el chip y el subrayado naranja. Un grupo son 2
+// o 3 referencias en la practica -- la lista alcanza de sobra, pero se cicla por si acaso.
+const COLORES_REFERENCIA_GRUPO = ['#006984', '#b46200', '#8e44ad', '#0b8457', '#c0392b'];
+function colorReferenciaGrupo(indice) {
+  return COLORES_REFERENCIA_GRUPO[indice % COLORES_REFERENCIA_GRUPO.length];
+}
+
 function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, proximaCalidad, grupoSellado, protocoloPendiente) {
   // Sellado en paralelo (ver DISENO_SELLADO_PARALELO_08092026.md): si esta orden comparte máquina
   // con otras (mismo rollo, hasta 3 referencias de salida distintas), grupoSellado trae TODAS las
@@ -2727,20 +2870,8 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   // Botones de residuos (Retal/Troquelado, segun BOTONES_RESIDUOS_POR_TIPO) + Salida no conforme --
   // van agrupados bajo un titulo "Residuos", en su propia isla separada de "Producción"
   // (+Rollo/Finalizar/Pausa) pero en la MISMA fila (a pedido del usuario, 01/09/2026 -- antes vivian
-  // junto a Imprimir etiqueta/Cierre bulto). Usan confirmarPesoYEnviar (no confirmarYEnviar): piden
-  // el peso del residuo/bulto en la ventana emergente antes de mandarlo, ver esa funcion en
-  // scriptComandos(). FIX 26/08/2026 (sigue vigente): publican el comando en /api/comando para que
-  // Node-RED lo lea -- ya no hacen ninguna escritura directa en esta BD.
-  const botonesResiduosHabilitados = BOTONES_RESIDUOS_POR_TIPO[orden.MaquinaTipo] || [];
-  const botonesResiduosHTML = activa ? [
-    ...BOTONES_RESIDUOS
-      .filter(b => botonesResiduosHabilitados.includes(b.clave))
-      // "Troquelado" ademas exige que ESTA orden lleve troquelado -- los otros residuos no dependen
-      // de ninguna columna de la orden, solo del tipo de maquina.
-      .filter(b => b.clave !== 'troquelado' || tieneTroquelado)
-      .map(b => `<button type="button" class="btn-accion btn-residuo" onclick="confirmarPesoYEnviar('¿Está seguro de marcar este bulto con ${b.label}?', '${b.clave}', this)">${b.label}</button>`),
-    `<button type="button" class="btn-accion btn-no-conforme" onclick="confirmarPesoYEnviar('¿Está seguro de marcar esta salida como no conforme?', 'no_conforme', this)">🚫 Salida no conforme</button>`
-  ].join('') : '';
+  // junto a Imprimir etiqueta/Cierre bulto). Ver botonesResiduos().
+  const botonesResiduosHTML = activa ? botonesResiduos(orden, null) : '';
 
   // Peso en vivo + Imprimir etiqueta/Cierre bulto/Residuos: solo tienen sentido con la orden
   // Activa (bascula/impresora actuando sobre el bulto que se esta armando en este momento).
@@ -2751,7 +2882,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
       <div class="peso-top">
         <div>
           <div class="label">Peso paquete (báscula)</div>
-          <div class="peso-valor"><span id="peso-numero">—</span><span class="unidad">kg</span></div>
+          <div class="peso-valor"><span id="peso-numero" class="peso-vivo-numero">—</span><span class="unidad">kg</span></div>
         </div>
         <div>
           <div class="label">Paquetes bulto actual</div>
@@ -2761,7 +2892,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
           <div class="label">Peso acumulado</div>
           <div class="peso-valor"><span id="resumen-peso-acumulado">—</span><span class="unidad">kg</span></div>
         </div>
-        <span class="peso-estado desconectado" id="peso-estado">Conectando…</span>
+        <span class="peso-estado peso-vivo-estado desconectado" id="peso-estado">Conectando…</span>
       </div>
     </div>` : '';
 
@@ -2785,30 +2916,9 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   // INVElementosReferencia Categoria=12 (mismo criterio que Referencia.vb:175, ver TieneImpresion
   // en la consulta de arriba) -- de esto tambien depende si la pregunta "Impresion" aparece en el
   // modal de Calidad (ver scriptComandos).
-  const tieneImpresion = orden.TieneImpresion === 1;
+  const calidadFlags = calcularFlagsCalidad(orden);
 
-  // Condiciones que deciden que apartados/preguntas de Calidad aplican -- ver
-  // construirApartadosCalidad(). "Sí" exacto para accesorios (no alcanza con no-NULL, ver
-  // conversacion 26/08/2026); Perforaciones != 0/NULL. tieneTroquelado se calcula mas arriba
-  // (tambien decide si sale el boton de residuo "Troquelado").
-  const tieneAccesorios = ['Manija', 'Tula', 'Parche', 'CierreDeslizador', 'CierreHermetico', 'CintaAdhesiva']
-    .some(campo => orden[campo] === 'Sí');
-  const tienePerforaciones = orden.Perforaciones != null && Number(orden.Perforaciones) !== 0;
-  const calidadFlags = { tieneImpresion, tieneAccesorios, tieneTroquelado, tienePerforaciones };
-
-  const especificaciones = [
-    ['Tipo de sellado', orden.TipoSellado],
-    ['Troquelado', orden.Troquelado],
-    ['Uso previsto', orden.UsoPrevisto],
-    ['Manija', orden.Manija],
-    ['Color manija', orden.ManijaColor],
-    ['Tula', orden.Tula],
-    ['Color tula', orden.TulaColor],
-    ['Parche', orden.Parche],
-    ['Cierre deslizador', orden.CierreDeslizador],
-    ['Perforaciones', orden.Perforaciones],
-    ['Nombre impresión', tieneImpresion ? (orden.TipoImpresionDescripcion || 'Sí') : 'No']
-  ].map(([label, valor]) => `<div><span class="label">${label}</span><span class="valor">${valor ?? '—'}</span></div>`).join('');
+  const especificaciones = filasEspecificaciones(orden);
 
   // Tarjeta de Avance de produccion (encabezado) -- solo si la orden tiene meta configurada
   // (KilosSolicitados o UnidadesSolicitadas, ver obtenerAvanceProduccion). Se renderiza con el
@@ -2925,7 +3035,15 @@ const PAQUETES_POR_PAGINA = 10;
 // da al polling del cliente el mismo HTML sin reconstruir la pagina entera. El historial de
 // paquetes va dentro de un <details> (desplegable al hacer click en el bulto, colapsado por
 // defecto) porque con muchos paquetes la tarjeta se volvia demasiado larga.
-function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto) {
+// `opciones` (10/09/2026) solo lo usa la pagina de bultos de un pedido con VARIAS referencias de
+// salida (renderBultosGrupo), que llama a esta misma funcion una vez por referencia y pega los
+// resultados: { referencia, nombreReferencia, color, idOrden, soloTarjetas }. En ese modo cada
+// tarjeta lleva ademas el subrayado del color de SU referencia con el nombre debajo (a pedido del
+// usuario) y un data-ref para que el filtro por referencia pueda esconderla. Sin `opciones` se
+// comporta igual que siempre (una sola orden, sin subrayado ni filtro).
+function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto, opciones) {
+  const modoGrupo = !!(opciones && opciones.referencia);
+  const idOrdenTarjetas = (opciones && opciones.idOrden) || null;
   const tarjetas = bultos.map(b => {
     const pesajes = pesajesPorBulto.get(b.id) || [];
 
@@ -2967,7 +3085,7 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto) {
         const filasGrupo = grupo.map(pe => `
           <div class="pesaje-fila">
             <a href="javascript:void(0)" class="link-reimprimir" title="Reimprimir etiqueta o volver a pesar este paquete"
-              onclick="abrirAccionesPaquete(this, ${JSON.stringify(pe.id_paquete)}, ${JSON.stringify(b.id)}, ${JSON.stringify(pe.ConsecutivoPaquete)}, ${JSON.stringify(Number(pe.PesoPaqueGr))}, ${jsString(b.serialPadre).replace(/"/g, '&quot;')}, ${jsString(b.estado).replace(/"/g, '&quot;')})">📦 Paquete ${pe.ConsecutivoPaquete}</a>
+              onclick="abrirAccionesPaquete(this, ${JSON.stringify(pe.id_paquete)}, ${JSON.stringify(b.id)}, ${JSON.stringify(pe.ConsecutivoPaquete)}, ${JSON.stringify(Number(pe.PesoPaqueGr))}, ${jsString(b.serialPadre).replace(/"/g, '&quot;')}, ${jsString(b.estado).replace(/"/g, '&quot;')}, ${JSON.stringify(idOrdenTarjetas)})">📦 Paquete ${pe.ConsecutivoPaquete}</a>
             <span>${pe.Hora}</span>
             <span>${Number(pe.PesoPaqueGr).toString()}</span>
           </div>`).join('');
@@ -2984,10 +3102,22 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto) {
       contenidoPesajes = `<div class="pesajes-paginador" data-bulto="${b.id}" data-pagina="${paginaInicial}" data-total-paginas="${totalPaginas}">${paginasHtml.join('')}${nav}</div>`;
     }
 
+    // Encabezado "Bulto #N" con el subrayado del color de la referencia y su nombre debajo -- solo
+    // en modo grupo (a pedido del usuario, 10/09/2026). En una orden normal el encabezado queda
+    // exactamente como estaba.
+    const encabezadoBulto = modoGrupo ? `
+        <div class="bulto-encabezado">
+          <span class="bulto-num">Bulto #${b.numRelativo}</span>
+          <div class="bulto-ref">
+            <div class="bulto-ref-subrayado"></div>
+            <div class="bulto-ref-nombre">${opciones.referencia}${opciones.nombreReferencia ? ' · ' + opciones.nombreReferencia : ''}</div>
+          </div>
+        </div>` : `<span class="bulto-num">Bulto ${b.numRelativo}</span>`;
+
     return `
-    <div class="card">
+    <div class="card"${modoGrupo ? ` data-ref="${opciones.referencia}" style="--color-ref:${opciones.color};"` : ''}>
       <div class="card-top">
-        <span class="bulto-num">Bulto ${b.numRelativo}</span>
+        ${encabezadoBulto}
         ${badgeEstado(b.estado)}
       </div>
       <div class="card-grid">
@@ -3006,6 +3136,9 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto) {
     </div>`;
   }).join('');
 
+  // En modo grupo el que arma el `<div class="grid">` (y el mensaje de vacio) es renderBultosGrupo,
+  // que junta las tarjetas de TODAS las referencias en una sola rejilla.
+  if (opciones && opciones.soloTarjetas) return tarjetas;
   return bultos.length
     ? `<div class="grid">${tarjetas}</div>`
     : `<div class="vacio">Esta orden todavía no tiene bultos.</div>`;
@@ -3019,7 +3152,13 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto) {
 // (bultos/pesajesPorBulto), sin pedir nada aparte. La lógica real vive en
 // dbo.sp_SEL_TrasladarPaquete (ver crear_sp_trasladar_paquete.sql), este bloque solo arma el
 // formulario -- scriptTraslado() hace el fetch y dispara la reimpresión.
-function renderSeccionTraslado(bultos, pesajesPorBulto) {
+// `opciones` (10/09/2026, mismo criterio que renderTarjetasBultos): en un pedido con varias
+// referencias de salida hay UNA seccion de traslado por referencia -- un paquete solo puede
+// moverse entre bultos de SU MISMA referencia (son elementos distintos: mover un paquete de la
+// 7002 a un bulto de la 7015 seria un error de datos, no un traslado). Por eso la pagina de grupo
+// renderiza varias secciones y el filtro por referencia las muestra/esconde junto con sus bultos.
+function renderSeccionTraslado(bultos, pesajesPorBulto, opciones) {
+  const modoGrupo = !!(opciones && opciones.referencia);
   if (bultos.length < 2) return ''; // hace falta al menos un bulto origen y uno destino
 
   const opcionesPaquete = [];
@@ -3036,23 +3175,24 @@ function renderSeccionTraslado(bultos, pesajesPorBulto) {
   const opcionesBulto = bultos.map(b => `<option value="${b.id}">Bulto ${b.numRelativo}</option>`).join('');
 
   return `
-  <div class="card seccion-traslado">
-    <div class="card-top"><span class="bulto-num">🔀 Trasladar paquete entre bultos</span></div>
+  <div class="card seccion-traslado"${modoGrupo ? ` data-ref="${opciones.referencia}" data-orden="${opciones.idOrden}" style="--color-ref:${opciones.color};"` : ''}>
+    <div class="card-top"><span class="bulto-num">🔀 Trasladar paquete entre bultos${modoGrupo ? ` — ${opciones.referencia}` : ''}</span></div>
+    ${modoGrupo ? `<div class="bulto-ref"><div class="bulto-ref-subrayado"></div><div class="bulto-ref-nombre">${opciones.nombreReferencia || ''}</div></div>` : ''}
     <div class="traslado-campo">
       <label>Paquete a mover</label>
-      <select id="selPaqueteOrigen">
+      <select class="sel-paquete-origen">
         <option value="">Seleccione…</option>
         ${opcionesPaquete.join('')}
       </select>
     </div>
     <div class="traslado-campo">
       <label>Bulto destino</label>
-      <select id="selBultoDestino">
+      <select class="sel-bulto-destino">
         <option value="">Seleccione…</option>
         ${opcionesBulto}
       </select>
     </div>
-    <button type="button" class="btn-accion btn-traslado" onclick="confirmarTraslado()">🔀 Trasladar</button>
+    <button type="button" class="btn-accion btn-traslado" onclick="confirmarTraslado(this)">🔀 Trasladar</button>
   </div>`;
 }
 
@@ -3069,7 +3209,11 @@ function scriptReimprimir(idOrden, maquinaCodigo) {
     // CAMBIO 09/09/2026 (a pedido del usuario): tocar un paquete ya no reimprime de una -- primero
     // sale este menu, porque ahora hay dos cosas que se pueden hacer con un paquete ya registrado.
     // "Volver a pesar" es la nueva (ver volverAPesarPaquete); reimprimir es lo que hacia antes.
-    function abrirAccionesPaquete(enlace, idPaquete, idBulto, consecutivoPaquete, pesoGr, serialBulto, estadoBulto) {
+    // idOrdenBulto (10/09/2026): en la pagina de bultos de un pedido con varias referencias de
+    // salida, cada bulto pertenece a UNA de ellas -- la reimpresion tiene que ir contra esa orden y
+    // no contra la que quedo fija en el closure. En la pagina de una sola orden llega null y se usa
+    // la de siempre.
+    function abrirAccionesPaquete(enlace, idPaquete, idBulto, consecutivoPaquete, pesoGr, serialBulto, estadoBulto, idOrdenBulto) {
       Swal.fire({
         title: 'Paquete ' + consecutivoPaquete,
         html: '<div style="font-size:14px;color:#64748b;">Peso registrado: <b>' + pesoGr + ' kg</b></div>',
@@ -3079,8 +3223,8 @@ function scriptReimprimir(idOrden, maquinaCodigo) {
         denyButtonText: '⚖️ Volver a pesar', denyButtonColor: '#006984',
         cancelButtonText: 'Cancelar', cancelButtonColor: '#c0392b'
       }).then(function(resultado) {
-        if (resultado.isConfirmed) { reimprimirPaquete(enlace, idBulto, consecutivoPaquete, pesoGr, serialBulto); return; }
-        if (resultado.isDenied) { volverAPesarPaquete(enlace, idPaquete, idBulto, consecutivoPaquete, pesoGr, serialBulto, estadoBulto); }
+        if (resultado.isConfirmed) { reimprimirPaquete(enlace, idBulto, consecutivoPaquete, pesoGr, serialBulto, idOrdenBulto); return; }
+        if (resultado.isDenied) { volverAPesarPaquete(enlace, idPaquete, idBulto, consecutivoPaquete, pesoGr, serialBulto, estadoBulto, idOrdenBulto); }
       });
     }
 
@@ -3089,7 +3233,7 @@ function scriptReimprimir(idOrden, maquinaCodigo) {
     // no con la pagina. El operario vuelve a poner el paquete en la bascula, mira el numero y
     // guarda; no se puede guardar sin una lectura real (no hay campo para escribirlo a mano).
     // Al guardar se reimprime sola la etiqueta con el peso corregido y se recarga la pagina.
-    function volverAPesarPaquete(enlace, idPaquete, idBulto, consecutivoPaquete, pesoGr, serialBulto, estadoBulto) {
+    function volverAPesarPaquete(enlace, idPaquete, idBulto, consecutivoPaquete, pesoGr, serialBulto, estadoBulto, idOrdenBulto) {
       var ultimoPeso = null;
       var ws = null;
       var avisoCerrado = (estadoBulto === 'Cerrado')
@@ -3166,7 +3310,7 @@ function scriptReimprimir(idOrden, maquinaCodigo) {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             comando: 'reimprimir_etiqueta',
-            idOrden: ${JSON.stringify(idOrden)},
+            idOrden: idOrdenBulto || ${JSON.stringify(idOrden)},
             maquinaCodigo: ${jsString(maquinaCodigo)},
             datos: { idBulto: datos.idBulto, consecutivoPaquete: datos.consecutivoPaquete, pesoGr: datos.pesoNuevo, serialBulto: datos.serialBulto }
           })
@@ -3194,7 +3338,7 @@ function scriptReimprimir(idOrden, maquinaCodigo) {
       });
     }
 
-    function reimprimirPaquete(enlace, idBulto, consecutivoPaquete, pesoGr, serialBulto) {
+    function reimprimirPaquete(enlace, idBulto, consecutivoPaquete, pesoGr, serialBulto, idOrdenBulto) {
       Swal.fire({
         icon: 'warning',
         title: '¿Reimprimir la etiqueta del paquete ' + consecutivoPaquete + '?',
@@ -3211,7 +3355,7 @@ function scriptReimprimir(idOrden, maquinaCodigo) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             comando: 'reimprimir_etiqueta',
-            idOrden: ${JSON.stringify(idOrden)},
+            idOrden: idOrdenBulto || ${JSON.stringify(idOrden)},
             maquinaCodigo: ${jsString(maquinaCodigo)},
             datos: { idBulto: idBulto, consecutivoPaquete: consecutivoPaquete, pesoGr: pesoGr, serialBulto: serialBulto }
           })
@@ -3241,9 +3385,14 @@ function scriptReimprimir(idOrden, maquinaCodigo) {
 // página -- más simple y confiable que parchar a mano las tarjetas y los dos desplegables a la vez.
 function scriptTraslado(idOrden, maquinaCodigo) {
   return `
-    function confirmarTraslado() {
-      var selOrigen = document.getElementById('selPaqueteOrigen');
-      var selDestino = document.getElementById('selBultoDestino');
+    // El boton se pasa a si mismo (10/09/2026) porque ahora puede haber MAS DE UNA seccion de
+    // traslado en la misma pagina -- una por referencia de salida, ver renderSeccionTraslado. Los
+    // desplegables se buscan dentro de la seccion del boton que se toco, no por id global.
+    function confirmarTraslado(boton) {
+      var seccion = boton ? boton.closest('.seccion-traslado') : document;
+      var selOrigen = seccion.querySelector('.sel-paquete-origen');
+      var selDestino = seccion.querySelector('.sel-bulto-destino');
+      var idOrdenSeccion = (seccion.dataset && seccion.dataset.orden) ? Number(seccion.dataset.orden) : null;
       var idPaquete = selOrigen.value;
       var idBultoDestino = selDestino.value;
       if (!idPaquete || !idBultoDestino) {
@@ -3281,7 +3430,7 @@ function scriptTraslado(idOrden, maquinaCodigo) {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 comando: 'reimprimir_etiqueta',
-                idOrden: ${JSON.stringify(idOrden)},
+                idOrden: idOrdenSeccion || ${JSON.stringify(idOrden)},
                 maquinaCodigo: ${jsString(maquinaCodigo)},
                 datos: {
                   idBulto: data.idBultoDestino,
@@ -3415,6 +3564,10 @@ function scriptActualizarBultos() {
             var total = Number(el.dataset.totalPaginas);
             mostrarPaginaPesajes(el, Math.min(guardado.pagina, total - 1));
           });
+          // Pagina de bultos de un pedido con varias referencias: el filtro por referencia se
+          // acaba de perder con el reemplazo del HTML, hay que volver a aplicarlo (en la pagina de
+          // una sola orden no existe y esto no hace nada).
+          if (window.reaplicarFiltroReferencias) window.reaplicarFiltroReferencias();
         } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
       }
       setInterval(actualizar, 4000);
@@ -3756,9 +3909,22 @@ async function obtenerIdGrupoSelladoDeOrden(p, idOrden) {
   return dtGrupo.recordset.length > 0 ? dtGrupo.recordset[0].IdGrupo : null;
 }
 
+// Las columnas de especificaciones (TipoSellado/Troquelado/.../TipoImpresionDescripcion) se
+// agregaron el 10/09/2026 -- son las mismas columnas y los mismos LEFT JOIN que la consulta de
+// GET /selladora/:codigo/orden/:idOrden, porque la tarjeta interactiva de cada referencia hace
+// ahora lo mismo que esa pagina, sin salir del pedido:
+//   - muestra SUS especificaciones (filasEspecificaciones),
+//   - saca SUS botones de residuos (botonesResiduos necesita MaquinaTipo y Troquelado),
+//   - y decide que preguntas de Calidad aplican (calcularFlagsCalidad necesita ademas
+//     CierreHermetico/CintaAdhesiva).
 async function obtenerMiembrosGrupoSellado(p, idGrupo) {
   const dtMiembros = await p.request().input('idGrupo', idGrupo).query(`
     SELECT ord.IdOrden, ie.Referencia, ie.Nombre, ord.Estado, ISNULL(ord.NumeroPedido,'') AS NumeroPedido,
+           ord.TipoSellado, ord.Troquelado, ord.UsoPrevisto, ord.Manija, ord.ManijaColor, ord.Tula,
+           ord.TulaColor, ord.Parche, ord.CierreDeslizador, ord.Perforaciones,
+           ord.CierreHermetico, ord.CintaAdhesiva, maq.Tipo AS MaquinaTipo,
+           CASE WHEN er12.Valor IS NOT NULL THEN 1 ELSE 0 END AS TieneImpresion,
+           ti.Descripcion AS TipoImpresionDescripcion,
            (SELECT TOP 1 b.estado FROM SEL_Bultos b
             INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
             WHERE ej.IdOrden = ord.IdOrden ORDER BY b.id DESC) AS EstadoBultoActual
@@ -3766,6 +3932,10 @@ async function obtenerMiembrosGrupoSellado(p, idGrupo) {
     INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl.IdGrupo
     INNER JOIN SEL_OrdenProduccion ord ON ord.Elemento = gl.Elemento AND ord.NumeroPedido = g.Numero
     INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
+    INNER JOIN PRDMaquinas maq ON maq.Codigo = ord.Maquina
+    LEFT JOIN INVElementosReferencia er12 ON er12.Elemento = ord.Elemento AND er12.Categoria = 12
+    LEFT JOIN INVElementosReferencia er13 ON er13.Elemento = ord.Elemento AND er13.Categoria = 13
+    LEFT JOIN INVReferencia ti ON ti.Categoria = 13 AND ti.Codigo = er13.Valor
     WHERE gl.IdGrupo = @idGrupo
     ORDER BY ord.IdOrden
   `);
@@ -3814,32 +3984,382 @@ async function obtenerHistorialMPGrupo(p, miembros) {
   return historial;
 }
 
-// FIX 09/09/2026 (a pedido del usuario): página intermedia SOLO para pedidos con grupo SELLADORA
-// (Sellado en paralelo). Antes "Información" llevaba directo a la página tradicional de UNA
-// referencia, con una cajita "Activa ahora / Cambiar a..." metida arriba. Ahora, para un pedido
-// agrupado, "Información" llega primero AQUÍ -- lista las 3 (o las que sean) referencias del grupo
-// con su % de avance, un botón Alternar (si no es la que está activa ahora mismo) y un botón
-// Finalizar (finaliza TODO el grupo junto, ver finalizarOrden -- da igual desde cuál referencia se
-// llame). "Más información" por referencia lleva a la página tradicional de siempre
-// (/selladora/:codigo/orden/:idOrden, ya sin el selector -- ver renderOrdenDetalle). Para pedidos
-// normales (sin grupo) nada de esto aplica -- "Información" sigue yendo directo a la página
-// tradicional, como siempre.
-function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquinaCodigo, miembros, usuario, historial) {
-  // FIX 09/09/2026 (a pedido del usuario): "+ Rollo" es UNA sola acción para todo el grupo (mismo
-  // rollo físico compartido) -- se agrega SIEMPRE contra la referencia que esté "Activa ahora"
-  // (recibiendo paquetes en este momento), nunca por referencia suelta. Si por algún motivo ninguna
-  // está activa todavía (grupo recién creado, nadie ha dado Iniciar), no se ofrece el botón.
+// Sondeo por referencia de la pagina de un pedido agrupado: el % de avance del ENCABEZADO de cada
+// tarjeta (siempre visible, por eso se refresca siempre) y, solo si la tarjeta esta abierta, los
+// paquetes/peso acumulado de SU bulto. Son los mismos endpoints por orden que ya usa la pagina de
+// una sola referencia (/avance-produccion y /resumen-bulto-activo) -- aca se llaman una vez por
+// referencia en vez de una sola vez.
+//
+// window.resumenPorOrden[idOrden] guarda {idBulto, ultimo} de cada referencia: es lo que lee
+// confirmarCerrarBultoYReimprimir (scriptComandos) para reimprimir la etiqueta del ultimo paquete
+// al cerrar el bulto -- el equivalente por referencia de window.idBultoActivo, que solo servia
+// cuando la pagina hablaba de una sola orden.
+function scriptTarjetasReferencia(maquinaCodigo) {
+  return `
+    (function() {
+      var tarjetas = Array.prototype.slice.call(document.querySelectorAll('.ref-card'));
+      if (tarjetas.length === 0) return;
+      window.resumenPorOrden = window.resumenPorOrden || {};
+
+      function formatearCantidad(valor, tipo) {
+        if (tipo === 'kg') return valor.toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' kg';
+        return Math.round(valor).toLocaleString('es-CO') + ' uds';
+      }
+
+      function fijar(tarjeta, selector, texto) {
+        var el = tarjeta.querySelector(selector);
+        if (el) el.textContent = texto;
+      }
+
+      async function actualizarAvance(tarjeta) {
+        try {
+          const resp = await fetch('/selladora/' + ${jsString(maquinaCodigo)} + '/orden/' + tarjeta.dataset.orden + '/avance-produccion');
+          if (!resp.ok) return;
+          const datos = await resp.json();
+          if (!datos.ok || !datos.tipo) return;
+          var color = datos.porcentaje >= 100 ? '#4a9c2e' : '#006984';
+          var elPorcentaje = tarjeta.querySelector('.ref-avance-porcentaje');
+          var elRelleno = tarjeta.querySelector('.ref-avance-relleno');
+          if (elPorcentaje) {
+            elPorcentaje.textContent = datos.porcentaje.toLocaleString('es-CO', { maximumFractionDigits: 1 }) + '%';
+            elPorcentaje.style.color = color;
+          }
+          if (elRelleno) {
+            elRelleno.style.width = Math.min(datos.porcentaje, 100) + '%';
+            elRelleno.style.background = color;
+          }
+          fijar(tarjeta, '.ref-avance-producido', 'Producido: ' + formatearCantidad(datos.producido, datos.tipo));
+          fijar(tarjeta, '.ref-avance-programado', 'Programado: ' + formatearCantidad(datos.programado, datos.tipo));
+        } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
+      }
+
+      async function actualizarResumen(tarjeta) {
+        var idOrden = tarjeta.dataset.orden;
+        try {
+          const resp = await fetch('/selladora/' + ${jsString(maquinaCodigo)} + '/orden/' + idOrden + '/resumen-bulto-activo');
+          if (!resp.ok) return;
+          const datos = await resp.json();
+          if (!datos.ok) return;
+          fijar(tarjeta, '.ref-paquetes', datos.paquetes);
+          fijar(tarjeta, '.ref-peso-acumulado', datos.pesoTotalKg.toFixed(2));
+          window.resumenPorOrden[idOrden] = {
+            idBulto: datos.idBulto,
+            ultimo: (datos.ultimoConsecutivo != null) ? { consecutivo: datos.ultimoConsecutivo, pesoKg: datos.ultimoPesoKg } : null
+          };
+        } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
+      }
+
+      // La usa accionReferencia despues de alternar: al cambiar de referencia el bulto que recibe
+      // paquetes es otro, y el cierre necesita el idBulto bueno antes de mandar el comando.
+      window.refrescarResumenReferencia = function(idOrden) {
+        var tarjeta = document.querySelector('.ref-card[data-orden="' + idOrden + '"]');
+        return tarjeta ? actualizarResumen(tarjeta) : Promise.resolve();
+      };
+
+      function actualizar() {
+        tarjetas.forEach(function(t) {
+          actualizarAvance(t);
+          if (t.open) actualizarResumen(t);
+        });
+      }
+
+      // Al abrir una tarjeta se pide su resumen de una, sin esperar al proximo tick de 4s (si no,
+      // los paquetes/acumulado salen en "—" durante unos segundos).
+      tarjetas.forEach(function(t) {
+        t.addEventListener('toggle', function() { if (t.open) actualizarResumen(t); });
+      });
+      actualizar();
+      setInterval(actualizar, 4000);
+    })();
+  `;
+}
+
+// Botones "Imprimir etiqueta"/"Cierre bulto" DENTRO de la tarjeta de cada referencia + el menu del
+// boton de Reporte del pedido agrupado.
+//
+// Decision del usuario (10/09/2026): si la referencia que se toca NO es la que esta recibiendo
+// paquetes en ese momento, el boton NO se bloquea -- primero alterna a esa referencia (con UNA
+// sola confirmacion, no dos) y despues manda el comando. Asi el comando siempre le llega a
+// Node-RED con la maquina ya puesta en la referencia correcta. Al terminar se recarga la pagina
+// para que la insignia de "Recibiendo paquetes" quede donde corresponde.
+// Botones "Imprimir etiqueta"/"Cierre bulto" y los de residuos DENTRO de la tarjeta de cada
+// referencia, mas el menu del boton de Reporte del pedido agrupado.
+//
+// CAMBIO 10/09/2026 (a pedido del usuario): estos botones preguntan lo MISMO que en la pagina de
+// una sola referencia ("¿Está seguro de imprimir la etiqueta?"), sin ninguna ventana extra de
+// "cambiar referencia" -- si el operario se metio a la tarjeta de una referencia, ya dijo con eso
+// en cual va a trabajar. Si esa referencia no era la que estaba recibiendo paquetes, el cambio se
+// hace igual, pero solo (alternarSilencioso) y despues de que confirma, no como una pregunta
+// aparte. idOrdenActivaAhora arranca con la que trae el servidor y se actualiza sola en cuanto se
+// alterna, para no volver a alternar de gratis si se toca dos veces la misma tarjeta.
+function scriptAccionesReferencia(referencias, maquinaCodigo, idOrdenActivaAhora) {
+  return `
+    var REFERENCIAS_GRUPO = ${JSON.stringify(referencias)};
+    var MAQUINA_GRUPO = ${jsString(maquinaCodigo)};
+    window.refActivaAhora = ${JSON.stringify(idOrdenActivaAhora ?? null)};
+
+    // Cambia la referencia que recibe paquetes sin preguntar nada. Devuelve true solo si quedo
+    // hecho -- si falla, el comando NO se manda (habria quedado contra la referencia equivocada).
+    function alternarSilencioso(idOrden) {
+      Swal.fire({ title: 'Cambiando a esta referencia…', allowOutsideClick: false, didOpen: function() { Swal.showLoading(); } });
+      return fetch('/api/selladora/orden/' + idOrden + '/alternar-referencia', { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (!data.ok) {
+            Swal.fire({ icon: 'error', title: 'No se pudo cambiar de referencia', text: data.error || '', confirmButtonColor: '#71bf44' });
+            return false;
+          }
+          window.refActivaAhora = idOrden;
+          Swal.close();
+          // El bulto que recibe paquetes es otro: hay que releer su resumen antes de cerrar
+          // (cierre_bulto necesita el idBulto bueno para reimprimir la ultima etiqueta).
+          return window.refrescarResumenReferencia(idOrden).then(function() { return true; });
+        })
+        .catch(function(err) {
+          Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo cambiar de referencia: ' + err.message, confirmButtonColor: '#71bf44' });
+          return false;
+        });
+    }
+
+    // Cierre de bulto: ademas del comando, reimprime la etiqueta del ultimo paquete de ESA
+    // referencia (mismo comportamiento que confirmarCerrarBultoYReimprimir en una orden suelta).
+    function ejecutarComandoReferencia(comando, boton, idOrden) {
+      if (comando !== 'cierre_bulto') return enviarComando(comando, boton, null, idOrden);
+      var resumen = window.resumenPorOrden[idOrden] || {};
+      return enviarComando('cierre_bulto', boton, null, idOrden).then(function(cmd) {
+        if (!cmd.ok || !resumen.idBulto || !resumen.ultimo) return;
+        return enviarComando('reimprimir_etiqueta', null, {
+          idBulto: resumen.idBulto, consecutivoPaquete: resumen.ultimo.consecutivo,
+          pesoGr: resumen.ultimo.pesoKg, serialBulto: null
+        }, idOrden);
+      });
+    }
+
+    function accionReferencia(comando, boton, idOrden) {
+      var esCierre = comando === 'cierre_bulto';
+      Swal.fire({
+        icon: 'warning',
+        title: esCierre ? '¿Está seguro de cerrar el bulto?' : '¿Está seguro de imprimir la etiqueta?',
+        showCancelButton: true,
+        confirmButtonText: 'Sí',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#71bf44',
+        cancelButtonColor: '#c0392b'
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        var hayQueAlternar = window.refActivaAhora !== idOrden;
+        var preparado = hayQueAlternar ? alternarSilencioso(idOrden) : Promise.resolve(true);
+        preparado.then(function(listo) {
+          if (!listo) return;
+          return Promise.resolve(ejecutarComandoReferencia(comando, boton, idOrden)).then(function() {
+            // Solo si se cambio de referencia: la pagina se recarga para que "+ Rollo" y el avance
+            // queden apuntando a la referencia correcta. El retraso deja ver "Comando enviado".
+            if (hayQueAlternar) setTimeout(function() { location.reload(); }, 1600);
+          });
+        });
+      });
+    }
+    // Residuos de UNA referencia (Retal/Troquelado/Refilado/Salida no conforme, ver botonesResiduos):
+    // piden el peso y lo registran contra el bulto de ESA referencia -- no contra el que este
+    // recibiendo paquetes en ese momento (a pedido del usuario, 10/09/2026). Por eso NO alterna
+    // como accionReferencia: el idBulto va explicito en el comando, asi que la referencia puede
+    // estar parqueada y el residuo igual queda donde debe.
+    //
+    // El idBulto se relee antes de mandar (refrescarResumenReferencia) por si la tarjeta se acaba
+    // de abrir y el sondeo de 4s todavia no ha traido el resumen de esta referencia.
+    function residuoReferencia(etiqueta, comando, boton, idOrden, referencia) {
+      var esNoConforme = comando === 'no_conforme';
+      Swal.fire({
+        icon: 'question',
+        title: esNoConforme
+          ? '¿Marcar esta salida de ' + referencia + ' como no conforme?'
+          : '¿Marcar el bulto de ' + referencia + ' con ' + etiqueta + '?',
+        input: 'number',
+        inputLabel: 'Peso (kg)',
+        inputAttributes: { min: '0', step: '0.01', inputmode: 'decimal' },
+        showCancelButton: true,
+        confirmButtonText: 'Confirmar peso',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#71bf44',
+        cancelButtonColor: '#c0392b',
+        inputValidator: function(valor) {
+          var n = Number(valor);
+          if (valor === '' || valor == null || isNaN(n) || n <= 0) return 'Ingrese un peso válido.';
+          return null;
+        }
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        var peso = Number(resultado.value);
+        window.refrescarResumenReferencia(idOrden).then(function() {
+          var resumen = window.resumenPorOrden[idOrden] || {};
+          enviarComando(comando, boton, { peso: peso, idBulto: resumen.idBulto || null }, idOrden);
+        });
+      });
+    }
+
+    // PROVISIONAL (10/09/2026): el reporte de produccion es UNO POR REFERENCIA (cada una tiene su
+    // propia bitacora), asi que el boton del pedido agrupado pregunta cual abrir. El usuario dijo
+    // que despues indica como quiere resolver esto -- si termina siendo un solo reporte del pedido
+    // entero, esta ventana se reemplaza por el enlace directo.
+    function abrirReporteGrupo() {
+      var enlaces = REFERENCIAS_GRUPO.map(function(r) {
+        return '<a class="btn-accion" target="_blank" rel="noopener" ' +
+          'style="display:block;margin:8px 0;background:' + r.color + ';text-align:center;" ' +
+          'href="/selladora/' + MAQUINA_GRUPO + '/orden/' + r.idOrden + '/reporte">🖨️ ' + r.referencia +
+          (r.nombre ? ' · ' + r.nombre : '') + '</a>';
+      }).join('');
+      Swal.fire({
+        title: 'Reporte de producción',
+        html: '<div style="font-size:13px;color:#64748b;margin-bottom:4px;">Cada referencia de salida tiene su propia bitácora.</div>' + enlaces,
+        showConfirmButton: false,
+        showCloseButton: true,
+        width: 460
+      });
+    }
+  `;
+}
+
+// Filtro por referencia de la pagina de bultos de un pedido agrupado (a pedido del usuario,
+// 10/09/2026: "en esta ventana puedo filtrar que bultos por referencia quiero ver"; la lista
+// desplegable reemplazo a los botones tipo chip el mismo dia). Esconde y muestra cualquier
+// elemento con data-ref -- las tarjetas de bulto y tambien las secciones de "Trasladar paquete",
+// que son una por referencia. Se expone en window porque scriptActualizarBultos reemplaza el HTML
+// de las tarjetas cada 4s y tiene que volver a aplicar el filtro elegido.
+function scriptFiltroReferencias() {
+  return `
+    (function() {
+      var selector = document.getElementById('filtro-referencia');
+      if (!selector) return;
+      var punto = document.querySelector('.filtro-refs-punto');
+      var conteo = document.getElementById('filtro-referencia-conteo');
+
+      function aplicar() {
+        var refActual = selector.value;
+        document.querySelectorAll('[data-ref]').forEach(function(el) {
+          el.classList.toggle('oculto', refActual !== '' && el.dataset.ref !== refActual);
+        });
+        // El punto y el borde del desplegable toman el color de la referencia elegida (gris con
+        // "Todas") -- el mismo codigo de color de los subrayados de las tarjetas.
+        var opcion = selector.options[selector.selectedIndex];
+        var color = opcion ? (opcion.dataset.color || '') : '';
+        if (punto) punto.style.setProperty('--color-ref', color);
+        selector.style.setProperty('--color-ref', color);
+        if (conteo && opcion) conteo.textContent = (opcion.dataset.conteo || '0') + ' bulto(s)';
+      }
+      window.reaplicarFiltroReferencias = aplicar;
+
+      selector.addEventListener('change', aplicar);
+      aplicar();
+    })();
+  `;
+}
+
+// Tarjeta interactiva de UNA referencia de salida dentro de un pedido agrupado (a pedido del
+// usuario, 10/09/2026). Encabezado: la referencia, su nombre en gris y su avance individual, con
+// el subrayado del color propio de esa referencia. Adentro (colapsada al entrar, tambien a pedido
+// del usuario): peso de bascula, paquetes del bulto actual y peso acumulado DE ESA REFERENCIA,
+// Imprimir etiqueta, Cierre bulto y sus Especificaciones. Los botones de operar solo salen si la
+// orden de esa referencia esta Activa.
+function renderTarjetaReferenciaGrupo(m, indice) {
+  const color = colorReferenciaGrupo(indice);
+  const refJs = jsString(m.Referencia).replace(/"/g, '&quot;');
+  const activa = m.Estado === 'Activa';
+  const avance = (m.avance && m.avance.tipo) ? m.avance : null;
+  const colorAvance = (avance && avance.porcentaje >= 100) ? '#4a9c2e' : '#006984';
+
+  const avanceHeader = avance ? `
+          <div class="ref-card-avance">
+            <div class="avance-header-top">
+              <span class="avance-header-label">Avance</span>
+              <span class="avance-header-porcentaje ref-avance-porcentaje" style="font-size:17px;color:${colorAvance};">${avance.porcentaje.toLocaleString('es-CO', { maximumFractionDigits: 1 })}%</span>
+            </div>
+            <div class="avance-header-barra">
+              <div class="avance-header-relleno ref-avance-relleno" style="width:${Math.min(avance.porcentaje, 100)}%;background:${colorAvance};"></div>
+            </div>
+          </div>` : '';
+
+  const statsAvance = avance ? `
+        <div class="avance-header-stats" style="margin-bottom:14px;">
+          <span class="ref-avance-producido">Producido: ${formatearCantidadAvance(avance.producido, avance.tipo)}</span>
+          <span class="ref-avance-programado">Programado: ${formatearCantidadAvance(avance.programado, avance.tipo)}</span>
+        </div>` : '';
+
+  // Peso en vivo: la bascula es UNA sola para toda la maquina, asi que ese numero es el mismo en
+  // todas las tarjetas (lo escribe scriptPesoEnVivo en cada .peso-vivo-numero). Lo que si es propio
+  // de cada referencia son los paquetes y el peso acumulado de SU bulto (scriptTarjetasReferencia).
+  const bloqueOperar = activa ? `
+        <div class="peso-top">
+          <div>
+            <div class="label">Peso paquete (báscula)</div>
+            <div class="peso-valor"><span class="peso-vivo-numero">—</span><span class="unidad">kg</span></div>
+          </div>
+          <div>
+            <div class="label">Paquetes bulto actual</div>
+            <div class="peso-valor"><span class="ref-paquetes">—</span></div>
+          </div>
+          <div>
+            <div class="label">Peso acumulado</div>
+            <div class="peso-valor"><span class="ref-peso-acumulado">—</span><span class="unidad">kg</span></div>
+          </div>
+          <span class="peso-estado peso-vivo-estado desconectado">Conectando…</span>
+        </div>
+        <div class="imprimir-acciones-grid">
+          <button type="button" class="btn-accion btn-imprimir" onclick="accionReferencia('imprimir_etiqueta', this, ${m.IdOrden})">🖨️ Imprimir etiqueta</button>
+          <button type="button" class="btn-accion btn-cierre-bulto" onclick="accionReferencia('cierre_bulto', this, ${m.IdOrden})">📦 Cierre bulto</button>
+        </div>
+        <div class="ref-residuos">
+          <div class="label">Residuos</div>
+          <div class="orden-acciones">${botonesResiduos(m, { idOrden: m.IdOrden, referencia: m.Referencia })}</div>
+        </div>` : `
+        <div class="pesaje-vacio">Esta referencia no está activa (${m.Estado}) — no se puede imprimir ni cerrar bultos.</div>`;
+
+  return `
+    <details class="ref-card" data-orden="${m.IdOrden}" data-ref="${m.Referencia}" style="--color-ref:${color};">
+      <summary>
+        <div class="ref-card-cabecera">
+          <div class="ref-card-id">
+            <div class="ref-card-codigo">${m.Referencia}</div>
+            <div class="ref-card-nombre">${m.Nombre || ''}</div>
+          </div>
+          ${avanceHeader}
+          <span class="ref-card-chevron">▶</span>
+        </div>
+      </summary>
+      <div class="ref-card-cuerpo">
+        ${statsAvance}
+        ${bloqueOperar}
+        <details class="ref-especificaciones">
+          <summary>Especificaciones</summary>
+          <div class="ejecucion-grid">${filasEspecificaciones(m)}</div>
+        </details>
+      </div>
+    </details>`;
+}
+
+// Apartado de informacion PROPIO de un pedido con VARIAS referencias de salida (Sellado en
+// paralelo) -- a pedido del usuario, 10/09/2026. Antes esta pagina era una lista de filas sueltas,
+// una por referencia (Alternar/Finalizar/Mas informacion). Ahora replica el apartado de una orden
+// normal, pero repartido:
+//   - Isla "Producción" del pedido entero: + Rollo (el mismo rollo fisico compartido, se registra
+//     contra la referencia que este recibiendo paquetes), Finalizar (cierra TODO el grupo, da
+//     igual desde cual referencia se llame) y Pausa.
+//   - En el lugar donde una orden normal tiene "Residuos" van las islas de Reporte y Ver bultos --
+//     los residuos siguen siendo del escritorio/digitador y no aplican por referencia.
+//   - Una tarjeta interactiva por referencia (ver renderTarjetaReferenciaGrupo).
+// "Ver bultos" lleva a la pagina de bultos del GRUPO (/grupo/:idGrupo/bultos), con el filtro por
+// referencia -- no a la de una sola orden.
+function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquinaCodigo, miembros, usuario, historial, totalBultos, pausaActiva, proximaCalidad, protocoloPendiente) {
+  // "Activo ahora" es el que esta recibiendo paquetes en este momento (su bulto esta Activo o
+  // Temporal). Si ninguno lo esta (grupo recien creado, nadie ha dado Iniciar) no se ofrece
+  // "+ Rollo": el rollo se registra siempre contra la referencia activa.
   const miembroActivoAhora = miembros.find(m => m.EstadoBultoActual === 'Activo' || m.EstadoBultoActual === 'Temporal');
-  const btnRolloGrupoHTML = miembroActivoAhora ? `
-    <div class="orden-cola" style="margin-bottom:16px;">
-      <div class="orden-info">
-        <div class="orden-pedido">Rollo de entrada</div>
-        <div class="orden-elemento">Mismo rollo físico compartido por las ${miembros.length} referencias -- se agrega contra "${miembroActivoAhora.Referencia}" (activa ahora).</div>
-      </div>
-      <div class="orden-acciones">
-        <button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${miembroActivoAhora.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>
-      </div>
-    </div>` : '';
+  // Ancla para las acciones que son del PEDIDO y no de una referencia puntual (Finalizar y Pausa,
+  // que escriben contra SEL_EjecucionOrden): la que este recibiendo paquetes, o la primera Activa.
+  const miembroAncla = miembroActivoAhora || miembros.find(m => m.Estado === 'Activa') || null;
+
+  const referenciasJs = miembros.map((m, i) => ({
+    idOrden: m.IdOrden, referencia: m.Referencia, nombre: m.Nombre || '', color: colorReferenciaGrupo(i)
+  }));
 
   const filasHistorial = (historial || []).length
     ? historial.map(h => `
@@ -3851,49 +4371,21 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
         </div>`).join('')
     : `<div class="pesaje-vacio">Sin materia prima registrada todavía.</div>`;
 
-  const filas = miembros.map(m => {
-    const esActivaAhora = m.EstadoBultoActual === 'Activo' || m.EstadoBultoActual === 'Temporal';
-
-    const avanceHTML = (m.avance && m.avance.tipo) ? (() => {
-      const color = m.avance.porcentaje >= 100 ? '#4a9c2e' : '#006984';
-      return `
-        <div class="avance-header-card" style="width:auto;justify-self:auto;margin-top:8px;box-shadow:none;border:1px solid #e4e6ea;padding:8px 12px;">
-          <div class="avance-header-top">
-            <span class="avance-header-label">Avance</span>
-            <span class="avance-header-porcentaje" style="font-size:16px;color:${color};">${m.avance.porcentaje.toLocaleString('es-CO', { maximumFractionDigits: 1 })}%</span>
-          </div>
-          <div class="avance-header-barra">
-            <div class="avance-header-relleno" style="width:${Math.min(m.avance.porcentaje, 100)}%;background:${color};"></div>
-          </div>
-          <div class="avance-header-stats">
-            <span>Producido: ${formatearCantidadAvance(m.avance.producido, m.avance.tipo)}</span>
-            <span>Programado: ${formatearCantidadAvance(m.avance.programado, m.avance.tipo)}</span>
-          </div>
-        </div>`;
-    })() : '';
-
-    let acciones = '';
-    if (m.Estado === 'Activa') {
-      acciones += esActivaAhora
-        ? `<span class="label" style="color:#4a9c2e;font-weight:700;">🟢 Activa ahora</span>`
-        : `<button type="button" class="btn-accion btn-alternar-referencia" style="margin-top:0;width:auto;" onclick="confirmarAlternarReferencia(${m.IdOrden}, ${jsString(m.Referencia).replace(/"/g, '&quot;')})">🔄 Alternar aquí</button>`;
-      acciones += `
-        <form method="post" action="/api/selladora/orden/${m.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
+  const accionesProduccion = [
+    miembroActivoAhora
+      ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${miembroActivoAhora.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>`
+      : '',
+    miembroAncla
+      ? `<form method="post" action="/api/selladora/orden/${miembroAncla.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
           <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
-        </form>`;
-    }
-    acciones += `<a class="btn-accion btn-info" href="/selladora/${maquinaCodigo}/orden/${m.IdOrden}">ℹ Más información</a>`;
+        </form>`
+      : '',
+    (miembroAncla && !pausaActiva)
+      ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>`
+      : ''
+  ].join('');
 
-    return `
-      <div class="orden-cola">
-        <div class="orden-info">
-          <div class="orden-pedido">${m.Referencia} ${badgeEstadoOrden(m.Estado)}</div>
-          <div class="orden-elemento">${m.Nombre || ''}</div>
-          ${avanceHTML}
-        </div>
-        <div class="orden-acciones">${acciones}</div>
-      </div>`;
-  }).join('');
+  const tarjetasReferencia = miembros.map((m, i) => renderTarjetaReferenciaGrupo(m, i)).join('');
 
   return `<!DOCTYPE html>
 <html lang="es">
@@ -3923,20 +4415,162 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
     </div>
   </header>
   <main>
-    ${btnRolloGrupoHTML}
-    ${filas}
+    <div class="islas-fila">
+      ${accionesProduccion ? `<div class="isla">
+        <div class="label">Producción</div>
+        <div class="orden-acciones">${accionesProduccion}</div>
+      </div>` : ''}
+      <div class="isla isla-boton-abajo">
+        <div class="label">Reporte de producción</div>
+        <div class="isla-detalle">Bitácora por referencia de salida</div>
+        <button type="button" class="btn-accion btn-isla btn-imprimir" onclick="abrirReporteGrupo()">🖨️ Reporte</button>
+      </div>
+      <div class="isla isla-boton-abajo">
+        <div class="label">Bultos producidos</div>
+        <div class="isla-detalle">${totalBultos} bulto(s) en las ${miembros.length} referencias</div>
+        <a class="btn-accion btn-isla btn-info" href="/selladora/${maquinaCodigo}/grupo/${idGrupo}/bultos">📦 Ver bultos</a>
+      </div>
+    </div>
+    <h2 style="font-size:15px;margin:0 0 10px;">Referencias de salida</h2>
+    ${tarjetasReferencia}
     <h2 style="font-size:15px;margin:22px 0 10px;">Historial de materia prima (todo el grupo)</h2>
     <div class="ejecucion-box">${filasHistorial}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
-  <script>${scriptAlternarReferencia()}</script>
+  <!-- Los tres avisos automaticos que antes solo estaban en la pagina de una referencia suelta se
+       agregaron aca el 10/09/2026, junto con quitar el boton "Más información" de cada tarjeta (a
+       pedido del usuario): este apartado tiene que bastarse solo, y sin ellos el operario que se
+       quedara aca no se enteraba de un pedido nuevo, de una suspension pedida por Programación ni
+       de un protocolo de arranque a medias. -->
+  <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
   <!-- scriptProtocoloArranque aporta preguntarEstadoRolloNuevo, el chequeo del rollo (buen estado /
-       peligro fisico) que el boton "+ Rollo" de arriba exige antes de confirmar el rollo. -->
+       peligro fisico) que el boton "+ Rollo" de arriba exige antes de confirmar el rollo -- y
+       reanudarProtocoloArranque, que retoma el protocolo a medias mas abajo. -->
   <script>${scriptProtocoloArranque(maquinaCodigo)}</script>
+  <script>${scriptAvisoSuspension(maquinaCodigo)}</script>
+  ${miembroAncla ? `<!-- scriptComandos con la orden ancla: aporta enviarComando (la base de
+       accionReferencia y de residuoReferencia, que le pasan el IdOrden de cada referencia),
+       abrirPausa, el cronometro de la pausa activa y el chequeo de Calidad.
+       CAMBIO 10/09/2026 (a pedido del usuario): el chequeo de Calidad ahora tambien sale en este
+       apartado, no solo en la pagina de una referencia suelta. Sale contra la orden ANCLA -- la
+       que este recibiendo paquetes -- y con SUS preguntas (calcularFlagsCalidad de esa
+       referencia): es la que se esta sellando en ese momento, y es su SEL_EjecucionOrden la que
+       lleva la ProximaCalidad que el servidor reprograma al responder.
+       pausaActiva va en null si hay protocolo pendiente -- mismo cuidado que en renderOrdenDetalle:
+       si no, se encimarian dos ventanas bloqueantes (la pausa del protocolo ya la muestra el). -->
+  <script>${scriptComandos(miembroAncla.IdOrden, maquinaCodigo, calcularFlagsCalidad(miembroAncla), protocoloPendiente ? null : pausaActiva, proximaCalidad)}</script>
+  <script>${scriptPesoEnVivo()}</script>` : ''}
+  <script>${scriptTarjetasReferencia(maquinaCodigo)}</script>
+  <script>${scriptAccionesReferencia(referenciasJs, maquinaCodigo, miembroActivoAhora ? miembroActivoAhora.IdOrden : null)}</script>
+  ${protocoloPendiente ? `<script>
+    // Protocolo de arranque a medias en la referencia ancla: se retoma en el paso que iba, igual
+    // que en la pagina de una referencia suelta.
+    reanudarProtocoloArranque(${JSON.stringify(protocoloPendiente)}, false);
+  </script>` : ''}
 </body>
 </html>`;
+}
+
+// Bultos de TODAS las referencias de un pedido agrupado, en una sola rejilla y con filtro por
+// referencia (a pedido del usuario, 10/09/2026). Cada tarjeta lleva "Bulto #N" con el subrayado
+// del color de su referencia y el nombre debajo (ver renderTarjetasBultos en modo grupo). La
+// numeracion es la RELATIVA de cada referencia -- el "Bulto #1" de la 7002 y el "Bulto #1" de la
+// 7015 son dos bultos distintos, por eso el color y el nombre van pegados al numero.
+function renderTarjetasBultosGrupo(datosPorReferencia) {
+  const tarjetas = datosPorReferencia.map(d => renderTarjetasBultos(d.bultos, d.pesajesPorBulto, d.residuosPorBulto, {
+    referencia: d.referencia, nombreReferencia: d.nombre, color: d.color, idOrden: d.idOrden, soloTarjetas: true
+  })).join('');
+  return tarjetas.trim()
+    ? `<div class="grid">${tarjetas}</div>`
+    : `<div class="vacio">Este pedido todavía no tiene bultos.</div>`;
+}
+
+function renderBultosGrupo(idGrupo, numeroPedido, maquinaCodigo, datosPorReferencia, usuario) {
+  // Filtro por referencia como lista desplegable (a pedido del usuario, 10/09/2026 -- antes eran
+  // botones tipo chip). Cada opcion lleva su color en data-color: el punto y el borde del
+  // desplegable se pintan con el de la referencia elegida, para que el filtro use el mismo codigo
+  // de color que los subrayados de las tarjetas.
+  const totalBultos = datosPorReferencia.reduce((suma, d) => suma + d.bultos.length, 0);
+  const opcionesFiltro = [
+    `<option value="" data-color="" data-conteo="${totalBultos}">Todas las referencias</option>`,
+    ...datosPorReferencia.map(d =>
+      `<option value="${d.referencia}" data-color="${d.color}" data-conteo="${d.bultos.length}">${d.referencia}${d.nombre ? ' · ' + d.nombre : ''}</option>`)
+  ].join('');
+  const filtro = `
+      <span class="filtro-refs-punto"></span>
+      <label class="label" for="filtro-referencia">Referencia</label>
+      <select id="filtro-referencia" class="filtro-refs-select">${opcionesFiltro}</select>
+      <span class="filtro-refs-conteo" id="filtro-referencia-conteo">${totalBultos} bulto(s)</span>`;
+
+  // Una seccion de traslado por referencia: un paquete solo puede moverse entre bultos de su misma
+  // referencia. Van fuera de #contenedor-bultos (igual que en la pagina de una orden) para que el
+  // sondeo de cada 4s no borre un desplegable a medio llenar.
+  const traslados = datosPorReferencia.map(d => renderSeccionTraslado(d.bultos, d.pesajesPorBulto, {
+    referencia: d.referencia, nombreReferencia: d.nombre, color: d.color, idOrden: d.idOrden
+  })).join('');
+
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bultos — Pedido ${numeroPedido || idGrupo}</title>
+  <style>${estilosBase()}</style>
+</head>
+<body>
+  <header>
+    <div class="header-top">
+      <div class="logo-wrap"><img class="logo" src="/logo-carlixplast.png" alt="Carlixplast"></div>
+    </div>
+    <div class="header-inner">
+      <div class="header-fila">
+        <div class="header-info">
+          <h1>📦 Bultos</h1>
+          <div class="sub">${datosPorReferencia.length} referencias de salida</div>
+          <a class="volver" href="/selladora/${maquinaCodigo}/grupo/${idGrupo}">‹ Pedido ${numeroPedido || '—'}</a>
+        </div>
+        <div class="header-salir-grupo">
+          <div class="header-usuario">👤 ${usuario}</div>
+          <a class="salir" href="/logout">Cerrar sesión</a>
+        </div>
+      </div>
+    </div>
+  </header>
+  <main>
+    <div class="filtro-refs">${filtro}</div>
+    <div id="contenedor-bultos">${renderTarjetasBultosGrupo(datosPorReferencia)}</div>
+    ${traslados}
+  </main>
+  <script src="/sweetalert2.min.js"></script>
+  <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <!-- El idOrden que reciben estos dos es solo el de respaldo: cada tarjeta de bulto y cada
+       seccion de traslado traen el IdOrden de SU referencia, y ese es el que se usa. -->
+  <script>${scriptReimprimir(datosPorReferencia[0] ? datosPorReferencia[0].idOrden : 0, maquinaCodigo)}</script>
+  <script>${scriptTraslado(datosPorReferencia[0] ? datosPorReferencia[0].idOrden : 0, maquinaCodigo)}</script>
+  <script>${scriptPaginadorPesajes()}</script>
+  <script>${scriptTarjetaBultoInteractiva()}</script>
+  <script>${scriptFiltroReferencias()}</script>
+  <script>${scriptActualizarBultos()}</script>
+</body>
+</html>`;
+}
+
+// Bultos/pesajes/residuos de CADA referencia del grupo, ya con el color que le toca a cada una
+// (mismo indice que las tarjetas de la pagina del pedido, ver colorReferenciaGrupo).
+async function obtenerBultosGrupo(p, miembros) {
+  const datos = [];
+  for (let i = 0; i < miembros.length; i++) {
+    const m = miembros[i];
+    const { bultos, pesajesPorBulto, residuosPorBulto } = await obtenerBultosYPesajes(p, m.IdOrden);
+    datos.push({
+      idOrden: m.IdOrden, referencia: m.Referencia, nombre: m.Nombre || '', color: colorReferenciaGrupo(i),
+      bultos, pesajesPorBulto, residuosPorBulto
+    });
+  }
+  return datos;
 }
 
 app.get('/selladora/:codigo/grupo/:idGrupo', requireLogin, async (req, res) => {
@@ -3947,17 +4581,111 @@ app.get('/selladora/:codigo/grupo/:idGrupo', requireLogin, async (req, res) => {
     if (miembros.length === 0) {
       return res.status(404).send(renderErrorSimple('Grupo no encontrado.', `/selladora/${codigo}`));
     }
+    // Bultos de TODAS las referencias (el conteo de la isla "Bultos producidos") y avance de cada
+    // una (el % del encabezado de su tarjeta).
+    let totalBultos = 0;
     for (const m of miembros) {
       m.avance = await obtenerAvanceProduccion(p, m.IdOrden);
+      const dtConteo = await p.request().input('idOrden', m.IdOrden).query(`
+        SELECT COUNT(*) AS Total
+        FROM SEL_Bultos b
+        INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+        WHERE ej.IdOrden = @idOrden AND b.estado <> 'Anulado'
+      `);
+      totalBultos += dtConteo.recordset[0].Total;
     }
+
+    // Pausa (10/09/2026): el boton de Pausa ahora vive en la isla "Producción" de esta pagina, asi
+    // que hay que saber si la ejecucion ya esta pausada -- si lo esta, en vez del boton sale el
+    // cronometro bloqueante (abrirModalPausaActiva, ver scriptComandos). Es una pausa del PROCESO
+    // compartido: se mira la orden ancla, la misma contra la que se pausa/reanuda (la que este
+    // recibiendo paquetes o, si ninguna, la primera Activa) -- mismo criterio que
+    // renderGrupoSelladoDetalle.
+    const miembroAncla = miembros.find(m => m.EstadoBultoActual === 'Activo' || m.EstadoBultoActual === 'Temporal')
+      || miembros.find(m => m.Estado === 'Activa') || null;
+    //
+    // ProximaCalidad (10/09/2026, a pedido del usuario: "el registro de calidad debe salir en esta
+    // variante"): mismo mecanismo que la pagina de una referencia suelta -- la hora del proximo
+    // chequeo vive en SEL_EjecucionOrden, no en un setTimeout del navegador, y se inicializa la
+    // primera vez que se abre este apartado con la orden ya Activa. Va contra la MISMA orden ancla:
+    // es la referencia que se esta sellando, y es la que recibe el comando 'calidad' al responder
+    // (POST /api/comando reprograma su ProximaCalidad y guarda el chequeo).
+    let pausaActiva = null;
+    let proximaCalidad = null;
+    if (miembroAncla) {
+      const dtEjecucion = await p.request().input('idOrden', miembroAncla.IdOrden).query(
+        `SELECT TOP 1 IdEjecucion, Estado, ProximaCalidad FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden`
+      );
+      if (dtEjecucion.recordset.length > 0) {
+        const { IdEjecucion: idEjecucion, Estado: estadoEjecucion } = dtEjecucion.recordset[0];
+        proximaCalidad = dtEjecucion.recordset[0].ProximaCalidad;
+        if (estadoEjecucion === 'En pausa') {
+          const dtPausa = await p.request().input('idEjecucion', idEjecucion).query(
+            `SELECT TOP 1 Tipo, Subtipo, Observaciones, HoraInicio FROM SEL_TiempoMuerto WHERE id_ejecucion = @idEjecucion AND HoraFin IS NULL ORDER BY id DESC`
+          );
+          if (dtPausa.recordset.length > 0) pausaActiva = dtPausa.recordset[0];
+        }
+        // Igual que en la pagina de una referencia: nunca en 'PendienteOperador' (nadie ha retomado
+        // el control todavia, no tiene sentido pedir un chequeo sin un operario real detras).
+        if (miembroAncla.Estado === 'Activa' && estadoEjecucion !== 'PendienteOperador') {
+          if (proximaCalidad == null) {
+            proximaCalidad = calcularProximaCalidad();
+            await p.request().input('idEjecucion', idEjecucion).input('proximaCalidad', proximaCalidad).query(
+              `UPDATE SEL_EjecucionOrden SET ProximaCalidad = @proximaCalidad WHERE IdEjecucion = @idEjecucion`
+            );
+          }
+        } else {
+          proximaCalidad = null;
+        }
+      }
+    }
+
     const historial = await obtenerHistorialMPGrupo(p, miembros);
     const maquinaResult = await p.request().input('codigo', codigo).query(
       `SELECT Nombre FROM PRDMaquinas WHERE Codigo = @codigo`
     );
     const maquinaNombre = maquinaResult.recordset.length > 0 ? maquinaResult.recordset[0].Nombre : codigo;
-    res.send(renderGrupoSelladoDetalle(idGrupo, miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial));
+    // Protocolo de arranque a medias en la referencia ancla -- se retoma solo al abrir este
+    // apartado, igual que en la pagina de una referencia suelta (10/09/2026: este apartado tiene
+    // que bastarse solo, ya no hay boton "Más información" que lleve a la otra pagina).
+    const protocoloPendiente = miembroAncla ? await obtenerProtocoloPendiente(p, miembroAncla.IdOrden) : null;
+
+    res.send(renderGrupoSelladoDetalle(idGrupo, miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial, totalBultos, pausaActiva, proximaCalidad, protocoloPendiente));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
+  }
+});
+
+// Bultos de TODAS las referencias de un pedido agrupado, con filtro por referencia (a pedido del
+// usuario, 10/09/2026) -- es a donde lleva "Ver bultos" desde la pagina del pedido. La de una sola
+// orden (/orden/:idOrden/bultos) sigue existiendo tal cual: es a donde llega "Más información" de
+// una referencia puntual.
+app.get('/selladora/:codigo/grupo/:idGrupo/bultos', requireLogin, async (req, res) => {
+  const { codigo, idGrupo } = req.params;
+  try {
+    const p = await getPool();
+    const miembros = await obtenerMiembrosGrupoSellado(p, idGrupo);
+    if (miembros.length === 0) {
+      return res.status(404).send(renderErrorSimple('Grupo no encontrado.', `/selladora/${codigo}`));
+    }
+    const datosPorReferencia = await obtenerBultosGrupo(p, miembros);
+    res.send(renderBultosGrupo(idGrupo, miembros[0].NumeroPedido, codigo, datosPorReferencia, req.session.usuario.nombre));
+  } catch (err) {
+    res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}/grupo/${idGrupo}`));
+  }
+});
+
+// Fragmento del sondeo de esa pagina (mismo mecanismo que el de una orden, ver
+// scriptActualizarBultos): solo las tarjetas, sin cabecera ni estilos.
+app.get('/selladora/:codigo/grupo/:idGrupo/bultos/fragmento', requireLogin, async (req, res) => {
+  const { idGrupo } = req.params;
+  try {
+    const p = await getPool();
+    const miembros = await obtenerMiembrosGrupoSellado(p, idGrupo);
+    const datosPorReferencia = await obtenerBultosGrupo(p, miembros);
+    res.send(renderTarjetasBultosGrupo(datosPorReferencia));
+  } catch (err) {
+    res.status(500).send('Error: ' + err.message);
   }
 });
 
