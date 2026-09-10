@@ -468,11 +468,19 @@ function estilosBase() {
     /* Renglon de detalle dentro de una isla (ej. "3 bulto(s) en esta orden") -- .orden-elemento no
        sirve aca porque su estilo esta acotado a .orden-cola. */
     .isla .isla-detalle { font-size: 13px; color: var(--texto-suave); margin: -4px 0 10px; }
-    /* Islas de "Bultos producidos" / "Reporte de produccion": un solo boton cada una, y los dos
-       tienen que verse IGUAL (a pedido del usuario, 09/09/2026 -- el de reporte salia mas ancho
-       solo porque su texto era mas largo). El min-width los iguala sin depender del largo de la
-       etiqueta; text-align centra el texto dentro de ese ancho fijo. */
-    .isla .btn-isla { min-width: 140px; text-align: center; }
+    /* Islas de "Bultos producidos" / "Reporte de produccion": el texto a la izquierda y su boton a
+       la DERECHA, en la misma linea (a pedido del usuario, 09/09/2026) -- antes el boton iba
+       debajo del texto. */
+    /* Base mas ancha que el resto de islas (220px): con el boton fijo de 140px al lado, a 220px al
+       texto le quedaban ~36px. Asi estas dos se van una debajo de otra antes de apretarse. */
+    .isla-con-boton { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex: 1 1 300px; }
+    .isla-con-boton .isla-texto { min-width: 0; }
+    .isla-con-boton .label { margin-bottom: 4px; }
+    .isla-con-boton .isla-detalle { margin: 0; }
+    /* Los dos botones tienen que verse IGUAL de grandes (el de reporte salia mas ancho solo porque
+       su texto era mas largo). width fijo -- no min-width -- para que queden identicos pase lo que
+       pase con el largo de la etiqueta; flex-shrink:0 evita que la fila los apriete. */
+    .isla .btn-isla { width: 140px; text-align: center; flex-shrink: 0; }
     .isla .orden-acciones { display: flex; gap: 8px; flex-wrap: wrap; }
     .isla .orden-acciones form { width: auto; }
     .btn-accion {
@@ -2851,19 +2859,19 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     ${pesoBox}
     ${imprimirYAccionesBox}
     <div class="islas-fila">
-      <div class="isla">
-        <div class="label">Bultos producidos</div>
-        <div class="isla-detalle">${totalBultos} bulto(s) en esta orden</div>
-        <div class="orden-acciones">
-          <a class="btn-accion btn-isla btn-info" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/bultos">📦 Ver bultos</a>
+      <div class="isla isla-con-boton">
+        <div class="isla-texto">
+          <div class="label">Bultos producidos</div>
+          <div class="isla-detalle">${totalBultos} bulto(s) en esta orden</div>
         </div>
+        <a class="btn-accion btn-isla btn-info" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/bultos">📦 Ver bultos</a>
       </div>
-      <div class="isla">
-        <div class="label">Reporte de producción</div>
-        <div class="isla-detalle">Bitácora completa de la orden</div>
-        <div class="orden-acciones">
-          <a class="btn-accion btn-isla btn-imprimir" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/reporte" target="_blank" rel="noopener">🖨️ Reporte</a>
+      <div class="isla isla-con-boton">
+        <div class="isla-texto">
+          <div class="label">Reporte de producción</div>
+          <div class="isla-detalle">Bitácora completa de la orden</div>
         </div>
+        <a class="btn-accion btn-isla btn-imprimir" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/reporte" target="_blank" rel="noopener">🖨️ Reporte</a>
       </div>
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Especificaciones</h2>
