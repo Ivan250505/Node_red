@@ -4961,7 +4961,11 @@ function renderReporteProduccion(datos, maquinaCodigo) {
   const esc = (t) => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
   const pistas = ejecucion && ejecucion.BolsasxGolpe ? ejecucion.BolsasxGolpe : '';
-  const medida = medidaDeBolsa(orden.NombreElemento);
+  // En el papel la medida se anota corta ("12x18x2 - 60 - transp"), no con las palabras completas
+  // que trae el nombre del elemento -- la columna es angosta y asi es como la escribe el operario.
+  const medidaLarga = medidaDeBolsa(orden.NombreElemento);
+  const m = medidaLarga.match(/Ancho\s+([\d.]+)\s+Largo\s+([\d.]+)\s+Calibre\s+([\d.]+)/i);
+  const medida = m ? `${m[1]} x ${m[2]} · cal ${m[3]}` : medidaLarga;
 
   // Bloque de caracteristicas: SIEMPRE las mismas columnas (ver comentario de arriba), por eso se
   // pide construirApartadosCalidad con todas las banderas en true.
