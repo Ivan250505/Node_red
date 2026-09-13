@@ -480,22 +480,25 @@ function estilosBase() {
     /* Renglon de detalle dentro de una isla (ej. "3 bulto(s) en esta orden") -- .orden-elemento no
        sirve aca porque su estilo esta acotado a .orden-cola. */
     .isla .isla-detalle { font-size: 13px; color: var(--texto-suave); margin: -4px 0 10px; }
-    /* Islas de "Bultos producidos" / "Reporte de produccion": el texto a la izquierda y su boton a
-       la DERECHA, en la misma linea (a pedido del usuario, 09/09/2026) -- antes el boton iba
-       debajo del texto. */
+    /* Isla de "Bultos producidos": el texto a la izquierda y su boton a la DERECHA, en la misma
+       linea (a pedido del usuario, 09/09/2026) -- antes el boton iba debajo del texto. Hasta el
+       11/09/2026 al lado iba tambien la isla de "Reporte de produccion", que se elimino.
+       La usan las DOS paginas -- la de una sola referencia y la del pedido con varias (a pedido
+       del usuario, 11/09/2026: el boton tiene que verse igual en ambas). Justamente por eso el
+       boton es de ancho FIJO (.isla .btn-isla, 140px) y no del 100%: las dos islas no miden lo
+       mismo (en el pedido agrupado comparte fila con "Produccion" y en la otra va sola), asi que
+       un boton al 100% saldria de un tamano distinto en cada pagina. */
     /* Base mas ancha que el resto de islas (220px): con el boton fijo de 140px al lado, a 220px al
-       texto le quedaban ~36px. Asi estas dos se van una debajo de otra antes de apretarse. */
+       texto le quedaban ~36px. Asi no se aprieta si vuelve a acompanarla otra isla. */
     .isla-con-boton { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex: 1 1 300px; }
     .isla-con-boton .isla-texto { min-width: 0; }
     .isla-con-boton .label { margin-bottom: 4px; }
     .isla-con-boton .isla-detalle { margin: 0; }
-    /* Los dos botones tienen que verse IGUAL de grandes. Ojo con .btn-imprimir: esa clase existe
-       para el boton grande de "Imprimir etiqueta" del recuadro de peso (min-height 110px, width
-       100%, blanco de toque grande para la tableta), y el de "Reporte" la usa solo por el color
-       azul -- sin neutralizar esas dos cosas quedaba con 110px de alto contra los ~40px de "Ver
-       bultos". Por eso aca se fijan alto, ancho y display de forma explicita: asi los dos salen
-       identicos pase lo que pase con el largo de la etiqueta o con la clase de color que lleven.
-       flex-shrink:0 evita ademas que la fila de la isla los apriete. */
+    /* Boton de una isla. Se fijan alto, ancho y display de forma explicita para que no herede el
+       tamano de .btn-imprimir (el boton grande de "Imprimir etiqueta" del recuadro de peso, con
+       min-height 110px y width 100% de toque grande para la tableta): cualquier boton de isla
+       tiene que salir del mismo tamano, lleve la clase de color que lleve.
+       flex-shrink:0 evita ademas que la fila de la isla lo apriete. */
     .isla .btn-isla {
       width: 140px; min-height: 0; padding: 10px 16px; flex-shrink: 0;
       display: inline-flex; align-items: center; justify-content: center; text-align: center;
@@ -702,10 +705,6 @@ function estilosBase() {
       border: 2px solid var(--color-ref, #cfd4da);
     }
     .filtro-refs-conteo { font-size: 13px; color: var(--texto-suave); font-weight: 600; flex-shrink: 0; }
-    /* Islas de Reporte/Ver bultos del pedido con varias referencias: el boton va DEBAJO del titulo
-       (a pedido del usuario, 10/09/2026), no a la derecha como en una orden de una sola referencia
-       (.isla-con-boton). Ancho completo: es la fila de toque grande para la tableta. */
-    .isla.isla-boton-abajo .btn-isla { width: 100%; margin-top: 4px; }
     .bulto-encabezado { flex: 1 1 auto; min-width: 0; }
     .bulto-ref { margin-top: 8px; }
     .bulto-ref-subrayado { height: 4px; border-radius: 999px; background: var(--color-ref, var(--azul-osc)); margin-bottom: 6px; }
@@ -1385,6 +1384,91 @@ function scriptAvisoPedidoNuevo(maquinaCodigo) {
   `;
 }
 
+// Medidas de la bolsa, para las preguntas de Calidad del apartado "Medidas" (a pedido del usuario,
+// 11/09/2026). No hay columnas de medida en SEL_OrdenProduccion: cada medida es una fila de
+// INVElementosReferencia (Elemento + Categoria + Valor), y el catalogo de categorias esta en
+// INVReferenciaCategoria (comprobado contra la base el 11/09/2026):
+//     5 Ancho · 6 Fuelle Izquierdo · 7 Fuelle Derecho · 8 Alto · 9 Fuelle Superior ("solapa")
+//    10 Fuelle Fondo · 16 Medida = la UNIDAD de todas ellas (PUL/CM/MT/KG, ver INVReferencia)
+// Los valores vienen como texto con ceros a la izquierda ('010.00', '00.00'), por eso se convierten
+// a numero antes de mostrarlos. Un 0 significa que la bolsa NO lleva ese fuelle/solapa -- esa
+// pregunta simplemente no sale (por eso el apartado es dinamico y cambia de una referencia a otra).
+const MEDIDAS_BOLSA = [
+  { clave: 'medida_ancho',            campo: 'MedidaAncho',           articulo: 'El', etiqueta: 'ancho' },
+  { clave: 'medida_alto',             campo: 'MedidaAlto',            articulo: 'El', etiqueta: 'alto' },
+  { clave: 'medida_fuelle_izquierdo', campo: 'MedidaFuelleIzquierdo', articulo: 'El', etiqueta: 'fuelle izquierdo' },
+  { clave: 'medida_fuelle_derecho',   campo: 'MedidaFuelleDerecho',   articulo: 'El', etiqueta: 'fuelle derecho' },
+  { clave: 'medida_fuelle_fondo',     campo: 'MedidaFuelleFondo',     articulo: 'El', etiqueta: 'fuelle de fondo' },
+  { clave: 'medida_solapa',           campo: 'MedidaSolapa',          articulo: 'La', etiqueta: 'solapa (fuelle superior)' }
+];
+
+// Categoria 16 de INVReferencia -- se escribe en palabras dentro de la pregunta ("es de 10
+// pulgadas"), que se lee mejor en la tableta que la sigla. En singular y plural, para que una
+// medida de 1 no salga como "es de 1 pulgadas". Si llegara una unidad nueva que no este aca, se
+// usa el codigo tal cual en vez de dejar la pregunta sin unidad.
+const UNIDADES_MEDIDA_BOLSA = {
+  PUL: ['pulgada', 'pulgadas'],
+  CM: ['centímetro', 'centímetros'],
+  MT: ['metro', 'metros'],
+  KG: ['kilogramo', 'kilogramos']
+};
+
+// Columnas y OUTER APPLY que traen esas medidas en las consultas de la orden. Ambas asumen que la
+// tabla SEL_OrdenProduccion viene con el alias `ord`, que es como se llama en las tres consultas
+// que las usan (GET /selladora/:codigo/orden/:idOrden, obtenerMiembrosGrupoSellado y
+// registrarChequeoCalidad).
+//
+// El pivote (un MAX(CASE...) por categoria) es el de la consulta de apoyo que dio el usuario
+// (11/09/2026) y hace UNA sola pasada por las filas del elemento, en vez de un LEFT JOIN a
+// INVElementosReferencia por cada medida.
+//
+// Los valores se traen TAL CUAL, como texto, y se convierten en calcularMedidasBolsa(). La consulta
+// de apoyo los castea en SQL (CAST(... AS decimal(9,2))) porque mira un elemento a la vez; aca no
+// se puede: hay filas de esas categorias con texto no numerico en la base (comprobado el
+// 11/09/2026 -- un CONVERT sobre toda la tabla revienta con "Error converting data type varchar to
+// float"). Si una de esas cayera en una orden que se esta sellando, el CAST tumbaria la consulta
+// ENTERA de la pagina; convirtiendo en JS lo unico que pasa es que esa medida da NaN y su pregunta
+// no se hace, que es el mismo camino que ya siguen las medidas en cero.
+const COLUMNAS_MEDIDAS_BOLSA = `med.Ancho AS MedidaAncho, med.Alto AS MedidaAlto,
+             med.FuelleIzquierdo AS MedidaFuelleIzquierdo, med.FuelleDerecho AS MedidaFuelleDerecho,
+             med.FuelleFondo AS MedidaFuelleFondo, med.FuelleSuperior AS MedidaSolapa,
+             med.Unidad AS MedidaUnidad`;
+const JOINS_MEDIDAS_BOLSA = `
+      OUTER APPLY (
+        SELECT MAX(CASE WHEN r.Categoria = 16 THEN r.Valor END) AS Unidad,
+               MAX(CASE WHEN r.Categoria =  5 THEN r.Valor END) AS Ancho,
+               MAX(CASE WHEN r.Categoria =  8 THEN r.Valor END) AS Alto,
+               MAX(CASE WHEN r.Categoria =  6 THEN r.Valor END) AS FuelleIzquierdo,
+               MAX(CASE WHEN r.Categoria =  7 THEN r.Valor END) AS FuelleDerecho,
+               MAX(CASE WHEN r.Categoria =  9 THEN r.Valor END) AS FuelleSuperior,
+               MAX(CASE WHEN r.Categoria = 10 THEN r.Valor END) AS FuelleFondo
+        FROM INVElementosReferencia r
+        WHERE r.Elemento = ord.Elemento
+      ) med`;
+
+// Preguntas de medida que aplican a UNA orden, ya redactadas ("¿El ancho de la bolsa es de 10
+// pulgadas?"). `orden` es una fila que traiga las columnas de COLUMNAS_MEDIDAS_BOLSA. Se devuelve
+// tambien valorEsperado ("10 pulgadas") aparte del titulo, porque es lo que se guarda en la base
+// junto con la respuesta: dentro de un mes la referencia puede haber cambiado de medida y el
+// registro tiene que seguir diciendo contra que se comparo ese dia.
+function calcularMedidasBolsa(orden) {
+  const codigoUnidad = String(orden.MedidaUnidad || '').toUpperCase();
+  const formasUnidad = UNIDADES_MEDIDA_BOLSA[codigoUnidad] || [codigoUnidad, codigoUnidad];
+  return MEDIDAS_BOLSA.map(m => {
+    const n = Number(orden[m.campo]);
+    // Sin valor, no numerico o en cero: la bolsa no lleva esa medida -- no se pregunta por ella.
+    if (!isFinite(n) || n === 0) return null;
+    const valor = n.toLocaleString('es-CO', { maximumFractionDigits: 2 });
+    const unidad = formasUnidad[n === 1 ? 0 : 1];
+    const valorEsperado = unidad ? `${valor} ${unidad}` : valor;
+    return {
+      clave: m.clave,
+      titulo: `¿${m.articulo} ${m.etiqueta} de la bolsa es de ${valorEsperado}?`,
+      valorEsperado
+    };
+  }).filter(Boolean);
+}
+
 // Apartados/preguntas del modal de Calidad (a pedido del usuario, 26/08/2026) -- que apartados y
 // que preguntas aparecen depende de datos reales de la orden:
 // - Pelicula: siempre, solo "Color de la película" (apartado propio).
@@ -1399,11 +1483,24 @@ function scriptAvisoPedidoNuevo(maquinaCodigo) {
 //   Perforaciones (!= 0/NULL). Con solo Troquelado van 2 preguntas (Posicion correcta/Estado de
 //   corte); si hay Perforaciones (con o sin Troquelado) se agrega la 3ra ("No. Perforaciones vs
 //   programa") -- por eso alcanza con revisar tienePerforaciones para decidir si van 2 o 3.
-function construirApartadosCalidad({ tieneImpresion, tieneAccesorios, tieneTroquelado, tienePerforaciones }) {
-  const apartados = [
+// - Medidas: apartado DINAMICO (11/09/2026, a pedido del usuario) -- una pregunta redactada por
+//   cada medida que la referencia realmente tenga (ancho, alto, los tres fuelles y la solapa), con
+//   su valor y su unidad adentro: "¿El ancho de la bolsa es de 10 pulgadas?". Va primero porque es
+//   lo que el operario puede medir de una con el flexometro, antes de mirar pelicula o sellado.
+//   `medidas` lo arma calcularMedidasBolsa() a partir de INVElementosReferencia; si no se pasa
+//   (o viene vacio) el apartado sencillamente no sale, que es lo que pasa con una referencia sin
+//   ninguna medida registrada.
+function construirApartadosCalidad({ tieneImpresion, tieneAccesorios, tieneTroquelado, tienePerforaciones, medidas }) {
+  const apartados = [];
+
+  if (medidas && medidas.length > 0) {
+    apartados.push({ titulo: 'Medidas', preguntas: medidas });
+  }
+
+  apartados.push(
     { titulo: 'Película', preguntas: [{ clave: 'color_pelicula', titulo: 'Color de la película' }] },
     { titulo: 'Deslizamiento', preguntas: [{ clave: 'deslizamiento', titulo: 'Deslizamiento (caras de película separadas)' }] }
-  ];
+  );
 
   if (tieneImpresion) {
     apartados.push({
@@ -1448,35 +1545,47 @@ function construirApartadosCalidad({ tieneImpresion, tieneAccesorios, tieneTroqu
 }
 
 // Guarda el chequeo de Calidad ya respondido en SEL_ChequeoCalidad (cabecera) +
-// SEL_ChequeoCalidadDetalle (una fila por pregunta) -- a pedido del usuario (03/09/2026), las
-// tablas ya existian de una conversacion anterior sobre el diseno. Llamada desde POST /api/comando
-// cuando comando==='calidad'. Reconstruye el mismo Apartado por clave que uso el modal
-// (construirApartadosCalidad) en vez de depender de que el cliente lo mande -- asi no hay riesgo de
-// que un cliente desactualizado guarde un Apartado distinto al que el CHECK de Pregunta espera.
+// SEL_ChequeoCalidadDetalle (una fila por pregunta) -- a pedido del usuario (03/09/2026); las dos
+// tablas las crea agregar_calidad_por_bulto_y_medidas.sql donde falten. Llamada desde
+// POST /api/comando cuando comando==='calidad'.
+//
+// Reconstruye el Apartado (y el ValorEsperado de las preguntas de medida) por clave, con los
+// MISMOS datos de la orden que uso el modal, en vez de depender de que el cliente los mande: asi
+// un cliente desactualizado no puede guardar un apartado que no existe ni una medida inventada.
 // 'conforme'/'no_conforme' (los value= de los checkboxes, ver abrirCalidad en scriptComandos) se
 // traducen a 'Conforme'/'NoConforme' -- CK_SEL_ChequeoCalidadDetalle_Respuesta exige exactamente
 // esos dos valores. Errores no revientan el comando ya enviado a Node-RED -- se registran en
 // consola nada mas (ver el catch en el llamador).
+//
+// OJO (11/09/2026): la fila de SEL_ChequeoCalidad que se escribe aca es lo que marca el bulto como
+// revisado -- /calidad-pendiente no vuelve a pedir el chequeo de un bulto que ya tenga una. Por eso
+// el bulto que se guarda en id_bulto tiene que salir del MISMO criterio que usa ese endpoint.
 async function registrarChequeoCalidad(p, { idOrden, operarioCodigo, respuestas }) {
   const dtOrden = await p.request().input('idOrden', idOrden).query(`
     SELECT ord.Troquelado, ord.Perforaciones, ord.Manija, ord.Tula, ord.Parche, ord.CierreDeslizador,
            ord.CierreHermetico, ord.CintaAdhesiva,
-           CASE WHEN er12.Valor IS NOT NULL THEN 1 ELSE 0 END AS TieneImpresion
+           CASE WHEN er12.Valor IS NOT NULL THEN 1 ELSE 0 END AS TieneImpresion,
+           ${COLUMNAS_MEDIDAS_BOLSA}
     FROM SEL_OrdenProduccion ord
-    LEFT JOIN INVElementosReferencia er12 ON er12.Elemento = ord.Elemento AND er12.Categoria = 12
+    LEFT JOIN INVElementosReferencia er12 ON er12.Elemento = ord.Elemento AND er12.Categoria = 12${JOINS_MEDIDAS_BOLSA}
     WHERE ord.IdOrden = @idOrden
   `);
   if (dtOrden.recordset.length === 0) return;
   const o = dtOrden.recordset[0];
-  const calidadFlags = {
-    tieneImpresion: o.TieneImpresion === 1,
-    tieneAccesorios: ['Manija', 'Tula', 'Parche', 'CierreDeslizador', 'CierreHermetico', 'CintaAdhesiva']
-      .some(campo => o[campo] === 'Sí'),
-    tieneTroquelado: !!o.Troquelado && o.Troquelado !== 'SinTroquelado',
-    tienePerforaciones: o.Perforaciones != null && Number(o.Perforaciones) !== 0
-  };
+  // calcularFlagsCalidad sirve tal cual: la fila de arriba trae las mismas columnas que las
+  // consultas de las dos paginas (incluidas las de COLUMNAS_MEDIDAS_BOLSA, para el apartado
+  // dinamico "Medidas"), asi que los apartados que se reconstruyen aca son exactamente los que vio
+  // el operario en la tableta.
+  const calidadFlags = calcularFlagsCalidad(o);
+  // Ademas del Apartado, se guarda el ValorEsperado de las preguntas de medida ("10 pulgadas"):
+  // es el dato contra el que el operario comparo, y sin el la fila 'medida_ancho | Conforme' no
+  // diria nada dentro de unos meses (la referencia puede haber cambiado de medida desde entonces).
   const claveApartado = new Map();
-  construirApartadosCalidad(calidadFlags).forEach(ap => ap.preguntas.forEach(preg => claveApartado.set(preg.clave, ap.titulo)));
+  const claveValorEsperado = new Map();
+  construirApartadosCalidad(calidadFlags).forEach(ap => ap.preguntas.forEach(preg => {
+    claveApartado.set(preg.clave, ap.titulo);
+    if (preg.valorEsperado) claveValorEsperado.set(preg.clave, preg.valorEsperado);
+  }));
 
   const dtEjecucion = await p.request().input('idOrden', idOrden).query(
     `SELECT TOP 1 IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden`
@@ -1484,8 +1593,9 @@ async function registrarChequeoCalidad(p, { idOrden, operarioCodigo, respuestas 
   if (dtEjecucion.recordset.length === 0) return;
   const idEjecucion = dtEjecucion.recordset[0].IdEjecucion;
 
-  // Bulto Activo en este momento -- mismo criterio que /resumen-bulto-activo. Puede no haber
-  // ninguno (entre que se cierra un bulto y se abre el siguiente); id_bulto es nullable.
+  // Bulto Activo en este momento -- mismo criterio que /calidad-pendiente (ver el OJO de arriba).
+  // Puede no haber ninguno (entre que se cierra un bulto y se abre el siguiente); id_bulto es
+  // nullable, y en ese caso el chequeo queda guardado pero sin bulto al que marcar.
   const dtBulto = await p.request().input('idEjecucion', idEjecucion).query(
     `SELECT TOP 1 id FROM SEL_Bultos WHERE id_ejecucion = @idEjecucion AND estado = 'Activo' ORDER BY id DESC`
   );
@@ -1508,7 +1618,9 @@ async function registrarChequeoCalidad(p, { idOrden, operarioCodigo, respuestas 
     const respuestaTexto = respuesta === 'no_conforme' ? 'NoConforme' : 'Conforme';
     await p.request()
       .input('idChequeo', idChequeo).input('apartado', apartado).input('pregunta', clave).input('respuesta', respuestaTexto)
-      .query(`INSERT INTO SEL_ChequeoCalidadDetalle (IdChequeo, Apartado, Pregunta, Respuesta) VALUES (@idChequeo, @apartado, @pregunta, @respuesta)`);
+      .input('valorEsperado', claveValorEsperado.get(clave) || null)
+      .query(`INSERT INTO SEL_ChequeoCalidadDetalle (IdChequeo, Apartado, Pregunta, Respuesta, ValorEsperado)
+              VALUES (@idChequeo, @apartado, @pregunta, @respuesta, @valorEsperado)`);
   }
 }
 
@@ -1518,7 +1630,7 @@ async function registrarChequeoCalidad(p, { idOrden, operarioCodigo, respuestas 
 // nombre del comando. `datos` es opcional -- lo usa el modal de Calidad para mandar las
 // respuestas junto con el comando (ver abrirCalidad() mas abajo). `calidadFlags` decide que
 // apartados/preguntas de Calidad aplican para esta orden, ver construirApartadosCalidad().
-function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, proximaCalidad) {
+function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, calidadHabilitada) {
   const apartadosCalidad = construirApartadosCalidad(calidadFlags);
   return `
     // Devuelve la promesa (antes no la devolvia) para que confirmarCerrarBultoYReimprimir pueda
@@ -1792,12 +1904,12 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, proxi
       });
     }
 
-    // Pausa y Calidad ya no son mutuamente excluyentes (03/09/2026): el chequeo de Calidad ahora se
-    // programa SIEMPRE que haya una ProximaCalidad (siga o no en pausa la ejecucion en este
-    // momento) -- programarCalidadAleatoria() se encarga de no abrirlo mientras haya otra ventana
-    // (la de pausa) abierta, ver esa funcion mas abajo.
+    // Pausa y Calidad ya no son mutuamente excluyentes (03/09/2026): el chequeo de Calidad se
+    // vigila SIEMPRE que la ejecucion este en curso (siga o no en pausa en este momento) --
+    // revisarCalidadDelBulto() se encarga de no abrirlo mientras haya otra ventana (la de pausa)
+    // abierta, ver esa funcion mas abajo. Ojo: el arranque de esa vigilancia va al FINAL de este
+    // script, no aca -- necesita las variables que se declaran junto con ella.
     ${pausaActiva ? `abrirModalPausaActiva(${JSON.stringify(pausaActiva)});` : ''}
-    ${proximaCalidad ? `programarCalidadAleatoria(${JSON.stringify(proximaCalidad)});` : ''}
 
     // Apartado de Calidad: pantalla emergente con las preguntas agrupadas por apartado (Pelicula,
     // Sellado, Accesorios, Troquelado/Perforaciones -- ver construirApartadosCalidad() en
@@ -1809,6 +1921,7 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, proxi
     var APARTADOS_CALIDAD = ${JSON.stringify(apartadosCalidad)};
 
     function abrirCalidad() {
+      calidadEnPantalla = true;
       var html = APARTADOS_CALIDAD.map(function(ap) {
         var preguntasHtml = ap.preguntas.map(function(p) {
           return '<div class="calidad-pregunta">' +
@@ -1869,41 +1982,67 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, proxi
         }
       }).then(function(resultado) {
         if (resultado.isConfirmed) {
-          enviarComando('calidad', null, resultado.value);
-          // El servidor ya guardo una ProximaCalidad nueva al recibir este comando (POST
-          // /api/comando), pero no hace falta esperar a releerla para seguir contando en esta
-          // misma carga de pagina -- se calcula el mismo rango aca mismo.
-          programarCalidadAleatoria(new Date(Date.now() + 20 * 60 * 1000 + Math.random() * (10 * 60 * 1000)).toISOString());
+          // calidadEnPantalla se libera cuando el POST termina, no cuando se cierra la ventana: si
+          // se liberara antes, el sondeo de 5s podria alcanzar al guardado a medio camino (el
+          // servidor todavia no ha escrito el chequeo, /calidad-pendiente sigue diciendo que si) y
+          // volveria a abrir el mismo chequeo encima.
+          enviarComando('calidad', null, resultado.value)
+            .then(function(data) {
+              // Si no se pudo guardar (Node-RED caido, red intermitente) el chequeo sigue
+              // pendiente -- se reintenta en 5 minutos, no cada 5 segundos.
+              if (!data || !data.ok) calidadReintentarDesde = Date.now() + 5 * 60 * 1000;
+            })
+            .finally(function() { calidadEnPantalla = false; });
         } else {
-          // Se cancelo -- se reintenta pronto (5 min) en vez de esperar un ciclo completo nuevo: el
-          // chequeo debe insistir, no desaparecer porque se cancelo una vez (a pedido del usuario,
-          // 03/09/2026). El servidor no toco ProximaCalidad en este caso, sigue "vencida".
-          programarCalidadAleatoria(new Date(Date.now() + 5 * 60 * 1000).toISOString());
+          // Se cancelo -- se reintenta pronto (5 min) en vez de desaparecer: el chequeo debe
+          // insistir, no perderse porque se cancelo una vez (a pedido del usuario, 03/09/2026).
+          calidadReintentarDesde = Date.now() + 5 * 60 * 1000;
+          calidadEnPantalla = false;
         }
       });
     }
 
-    // Calidad ya no tiene boton (a pedido del usuario, 31/08/2026) -- sale sola, en un momento
-    // aleatorio entre 20 y 30 minutos desde que la orden esta Activa. FIX 03/09/2026: ese momento
-    // (ProximaCalidad) ahora lo guarda el servidor en SEL_EjecucionOrden -- ya NO se calcula un
-    // intervalo nuevo desde que carga la pagina (eso hacia que un refresh, cambiar de pestaña o
-    // cualquier recarga del WebView reiniciara la cuenta a cero, y casi nunca llegaba a
-    // completarse). El parametro es una fecha/hora absoluta (ISO), no una espera relativa.
-    // Tampoco es mutuamente excluyente con Pausa: si al llegar la hora la ejecucion esta pausada
-    // (o el operario esta justo eligiendo el motivo), NO compite por la pantalla con esa ventana
-    // bloqueante -- reintenta cada minuto hasta que quede libre, en vez de forzarse encima.
-    function programarCalidadAleatoria(proximaCalidadIso) {
-      var espera = Math.max(0, new Date(proximaCalidadIso).getTime() - Date.now());
-      setTimeout(intentarAbrirCalidad, espera);
+    // Calidad no tiene boton (a pedido del usuario, 31/08/2026) -- sale sola.
+    //
+    // CAMBIO 11/09/2026 (a pedido del usuario): ya NO sale cada 20-30 minutos. Sale UNA VEZ POR
+    // BULTO, apenas se registra el PRIMER paquete de ese bulto -- que es el momento en que de
+    // verdad hay producto nuevo que revisar. Con esto desaparece la ProximaCalidad que se guardaba
+    // en SEL_EjecucionOrden (era la hora del proximo chequeo aleatorio) y el temporizador del
+    // navegador: quien decide es el servidor, en /calidad-pendiente, mirando el bulto que esta
+    // recibiendo paquetes -- si ya tiene paquetes y todavia no tiene un chequeo, hay que pedirlo.
+    // Al vivir del lado del servidor, recargar la pagina o cambiar de pestaña no pierde ni repite
+    // nada: el chequeo del bulto 3 se pide una sola vez, la haga quien la haga.
+    //
+    // Sigue sin ser mutuamente excluyente con Pausa: si al tocar el turno hay otra ventana
+    // bloqueante abierta (pausa, escaneo de rollo, protocolo de arranque), NO se fuerza encima --
+    // se salta ese sondeo y lo vuelve a intentar 5 segundos despues, hasta que la pantalla quede
+    // libre.
+    var CALIDAD_SONDEO_MS = 5000;
+    var calidadEnPantalla = false;      // hay un chequeo abierto/guardandose ahora mismo
+    var calidadReintentarDesde = 0;     // se cancelo o fallo el guardado: no insistir antes de esta hora
+
+    function vigilarCalidadDelBulto() {
+      revisarCalidadDelBulto();
+      setInterval(revisarCalidadDelBulto, CALIDAD_SONDEO_MS);
     }
 
-    function intentarAbrirCalidad() {
-      if (Swal.isVisible()) {
-        setTimeout(intentarAbrirCalidad, 60 * 1000);
-        return;
-      }
-      abrirCalidad();
+    function revisarCalidadDelBulto() {
+      if (calidadEnPantalla || Date.now() < calidadReintentarDesde) return;
+      fetch('/selladora/' + ${jsString(maquinaCodigo)} + '/orden/' + ${JSON.stringify(idOrden)} + '/calidad-pendiente')
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function(datos) {
+          if (!datos || !datos.ok || !datos.pendiente) return;
+          if (calidadEnPantalla || Swal.isVisible()) return;
+          abrirCalidad();
+        })
+        .catch(function() { /* red intermitente -- se reintenta en el proximo sondeo */ });
     }
+
+    // Arranque de la vigilancia. Va al final a proposito: CALIDAD_SONDEO_MS y las dos banderas de
+    // arriba se declaran con var, o sea que mas arriba en el script existen pero valen undefined
+    // -- llamar a vigilarCalidadDelBulto() desde el principio dejaba un setInterval(fn, undefined),
+    // que es un setInterval de 0 ms sondeando sin parar.
+    ${calidadHabilitada ? `vigilarCalidadDelBulto();` : ''}
   `;
 }
 
@@ -2433,7 +2572,7 @@ function scriptProtocoloArranque(maquinaCodigo) {
     //   preguntarEstadoRolloNuevo -> "+ Rollo" en una orden ya en curso (mismas dos preguntas, sin
     //       numerar: ahi no hay pasos 1..5, es un rollo suelto que entra a mitad de la orden)
     // Las respuestas de los dos casos van a la misma tabla y siempre con el serial del rollo
-    // evaluado, que es lo que las distingue en el reporte.
+    // evaluado, que es lo que permite distinguirlas despues.
     function preguntarEstadoRollo(idOrden, rollo, seguir) {
       chequeoRollo(idOrden, rollo, seguir, true);
     }
@@ -2632,6 +2771,15 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
     </div>
   </header>
   <main>
+    <div class="islas-fila">
+      <div class="isla isla-con-boton">
+        <div class="isla-texto">
+          <div class="label">Bitácora de turno</div>
+          <div class="isla-detalle">Bultos, rollos y unidades del turno en curso</div>
+        </div>
+        <a class="btn-accion btn-isla btn-info" href="/selladora/${maquinaCodigo}/bitacora">📋 Bitácora</a>
+      </div>
+    </div>
     <div class="barra">
       <span class="actualizado" id="cola-actualizado">Actualizado: ${new Date().toLocaleTimeString('es-CO')}</span>
     </div>
@@ -2790,7 +2938,11 @@ function calcularFlagsCalidad(orden) {
     tieneAccesorios: ['Manija', 'Tula', 'Parche', 'CierreDeslizador', 'CierreHermetico', 'CintaAdhesiva']
       .some(campo => orden[campo] === 'Sí'),
     tieneTroquelado: !!orden.Troquelado && orden.Troquelado !== 'SinTroquelado',
-    tienePerforaciones: orden.Perforaciones != null && Number(orden.Perforaciones) !== 0
+    tienePerforaciones: orden.Perforaciones != null && Number(orden.Perforaciones) !== 0,
+    // Apartado "Medidas" (11/09/2026): sale de las columnas de COLUMNAS_MEDIDAS_BOLSA, que las dos
+    // consultas de orden ya traen. Si la fila no las trae (o la referencia no tiene ninguna medida
+    // registrada) queda un arreglo vacio y el apartado no aparece.
+    medidas: calcularMedidasBolsa(orden)
   };
 }
 
@@ -2835,7 +2987,7 @@ function colorReferenciaGrupo(indice) {
   return COLORES_REFERENCIA_GRUPO[indice % COLORES_REFERENCIA_GRUPO.length];
 }
 
-function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, proximaCalidad, grupoSellado, protocoloPendiente) {
+function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente) {
   // Sellado en paralelo (ver DISENO_SELLADO_PARALELO_08092026.md): si esta orden comparte máquina
   // con otras (mismo rollo, hasta 3 referencias de salida distintas), grupoSellado trae TODAS las
   // referencias del grupo (incluida esta misma) -- solo se usa para saber si hay que ocultar
@@ -2999,13 +3151,6 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     <div class="islas-fila">
       <div class="isla isla-con-boton">
         <div class="isla-texto">
-          <div class="label">Reporte de producción</div>
-          <div class="isla-detalle">Bitácora completa de la orden</div>
-        </div>
-        <a class="btn-accion btn-isla btn-imprimir" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/reporte" target="_blank" rel="noopener">🖨️ Reporte</a>
-      </div>
-      <div class="isla isla-con-boton">
-        <div class="isla-texto">
           <div class="label">Bultos producidos</div>
           <div class="isla-detalle">${totalBultos} bulto(s) en esta orden</div>
         </div>
@@ -3024,7 +3169,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   <script>${scriptProtocoloArranque(maquinaCodigo)}</script>
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptAvisoSuspension(maquinaCodigo)}</script>
-  ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo, calidadFlags, protocoloPendiente ? null : pausaActiva, proximaCalidad)}</script><script>${scriptPesoEnVivo()}</script><script>${scriptResumenBultoActivo(orden.IdOrden, maquinaCodigo)}</script>` : ''}
+  ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo, calidadFlags, protocoloPendiente ? null : pausaActiva, calidadHabilitada)}</script><script>${scriptPesoEnVivo()}</script><script>${scriptResumenBultoActivo(orden.IdOrden, maquinaCodigo)}</script>` : ''}
   ${protocoloPendiente ? `<script>
     // Protocolo de arranque a medias en esta orden: se retoma en el paso que iba. Ojo con el
     // orden -- va DESPUES de scriptComandos, y a ese se le pasa pausaActiva en null cuando hay
@@ -3937,6 +4082,7 @@ async function obtenerMiembrosGrupoSellado(p, idGrupo) {
            ord.CierreHermetico, ord.CintaAdhesiva, maq.Tipo AS MaquinaTipo,
            CASE WHEN er12.Valor IS NOT NULL THEN 1 ELSE 0 END AS TieneImpresion,
            ti.Descripcion AS TipoImpresionDescripcion,
+           ${COLUMNAS_MEDIDAS_BOLSA},
            (SELECT TOP 1 b.estado FROM SEL_Bultos b
             INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
             WHERE ej.IdOrden = ord.IdOrden ORDER BY b.id DESC) AS EstadoBultoActual
@@ -3947,7 +4093,7 @@ async function obtenerMiembrosGrupoSellado(p, idGrupo) {
     INNER JOIN PRDMaquinas maq ON maq.Codigo = ord.Maquina
     LEFT JOIN INVElementosReferencia er12 ON er12.Elemento = ord.Elemento AND er12.Categoria = 12
     LEFT JOIN INVElementosReferencia er13 ON er13.Elemento = ord.Elemento AND er13.Categoria = 13
-    LEFT JOIN INVReferencia ti ON ti.Categoria = 13 AND ti.Codigo = er13.Valor
+    LEFT JOIN INVReferencia ti ON ti.Categoria = 13 AND ti.Codigo = er13.Valor${JOINS_MEDIDAS_BOLSA}
     WHERE gl.IdGrupo = @idGrupo
     ORDER BY ord.IdOrden
   `);
@@ -4121,8 +4267,7 @@ function scriptTarjetasReferencia(maquinaCodigo) {
   `;
 }
 
-// Botones "Imprimir etiqueta"/"Cierre bulto" DENTRO de la tarjeta de cada referencia + el menu del
-// boton de Reporte del pedido agrupado.
+// Botones "Imprimir etiqueta"/"Cierre bulto" DENTRO de la tarjeta de cada referencia.
 //
 // Decision del usuario (10/09/2026): si la referencia que se toca NO es la que esta recibiendo
 // paquetes en ese momento, el boton NO se bloquea -- primero alterna a esa referencia (con UNA
@@ -4130,7 +4275,7 @@ function scriptTarjetasReferencia(maquinaCodigo) {
 // Node-RED con la maquina ya puesta en la referencia correcta. Al terminar se recarga la pagina
 // para que la insignia de "Recibiendo paquetes" quede donde corresponde.
 // Botones "Imprimir etiqueta"/"Cierre bulto" y los de residuos DENTRO de la tarjeta de cada
-// referencia, mas el menu del boton de Reporte del pedido agrupado.
+// referencia.
 //
 // CAMBIO 10/09/2026 (a pedido del usuario): estos botones preguntan lo MISMO que en la pagina de
 // una sola referencia ("¿Está seguro de imprimir la etiqueta?"), sin ninguna ventana extra de
@@ -4139,10 +4284,8 @@ function scriptTarjetasReferencia(maquinaCodigo) {
 // hace igual, pero solo (alternarSilencioso) y despues de que confirma, no como una pregunta
 // aparte. idOrdenActivaAhora arranca con la que trae el servidor y se actualiza sola en cuanto se
 // alterna, para no volver a alternar de gratis si se toca dos veces la misma tarjeta.
-function scriptAccionesReferencia(referencias, maquinaCodigo, idOrdenActivaAhora) {
+function scriptAccionesReferencia(maquinaCodigo, idOrdenActivaAhora) {
   return `
-    var REFERENCIAS_GRUPO = ${JSON.stringify(referencias)};
-    var MAQUINA_GRUPO = ${jsString(maquinaCodigo)};
     window.refActivaAhora = ${JSON.stringify(idOrdenActivaAhora ?? null)};
 
     // Cambia la referencia que recibe paquetes sin preguntar nada. Devuelve true solo si quedo
@@ -4182,6 +4325,16 @@ function scriptAccionesReferencia(referencias, maquinaCodigo, idOrdenActivaAhora
       });
     }
 
+    // Cierra la tarjeta desplegable (<details class="ref-card">) de UNA referencia. A pedido del
+    // usuario (11/09/2026): despues de imprimir la etiqueta, la tarjeta de esa referencia se cierra
+    // sola -- da igual si era la que estaba recibiendo paquetes o una que hubo que alternar antes.
+    // Asi la pantalla vuelve a la lista de referencias y no queda una tarjeta abierta de una
+    // referencia con la que ya se termino de operar.
+    function cerrarTarjetaReferencia(idOrden) {
+      var tarjeta = document.querySelector('.ref-card[data-orden="' + idOrden + '"]');
+      if (tarjeta) tarjeta.open = false;
+    }
+
     function accionReferencia(comando, boton, idOrden) {
       var esCierre = comando === 'cierre_bulto';
       Swal.fire({
@@ -4198,7 +4351,12 @@ function scriptAccionesReferencia(referencias, maquinaCodigo, idOrdenActivaAhora
         var preparado = hayQueAlternar ? alternarSilencioso(idOrden) : Promise.resolve(true);
         preparado.then(function(listo) {
           if (!listo) return;
-          return Promise.resolve(ejecutarComandoReferencia(comando, boton, idOrden)).then(function() {
+          return Promise.resolve(ejecutarComandoReferencia(comando, boton, idOrden)).then(function(data) {
+            // Imprimir etiqueta: la tarjeta de ESA referencia se cierra apenas el comando sale
+            // (11/09/2026). Si el comando fallo se deja abierta -- el operario todavia tiene algo
+            // que hacer ahi. Cierre bulto no cierra la tarjeta: despues del cierre se sigue
+            // operando la misma referencia con el bulto nuevo.
+            if (!esCierre && data && data.ok) cerrarTarjetaReferencia(idOrden);
             // Solo si se cambio de referencia: la pagina se recarga para que "+ Rollo" y el avance
             // queden apuntando a la referencia correcta. El retraso deja ver "Comando enviado".
             if (hayQueAlternar) setTimeout(function() { location.reload(); }, 1600);
@@ -4241,26 +4399,6 @@ function scriptAccionesReferencia(referencias, maquinaCodigo, idOrdenActivaAhora
           var resumen = window.resumenPorOrden[idOrden] || {};
           enviarComando(comando, boton, { peso: peso, idBulto: resumen.idBulto || null }, idOrden);
         });
-      });
-    }
-
-    // PROVISIONAL (10/09/2026): el reporte de produccion es UNO POR REFERENCIA (cada una tiene su
-    // propia bitacora), asi que el boton del pedido agrupado pregunta cual abrir. El usuario dijo
-    // que despues indica como quiere resolver esto -- si termina siendo un solo reporte del pedido
-    // entero, esta ventana se reemplaza por el enlace directo.
-    function abrirReporteGrupo() {
-      var enlaces = REFERENCIAS_GRUPO.map(function(r) {
-        return '<a class="btn-accion" target="_blank" rel="noopener" ' +
-          'style="display:block;margin:8px 0;background:' + r.color + ';text-align:center;" ' +
-          'href="/selladora/' + MAQUINA_GRUPO + '/orden/' + r.idOrden + '/reporte">🖨️ ' + r.referencia +
-          (r.nombre ? ' · ' + r.nombre : '') + '</a>';
-      }).join('');
-      Swal.fire({
-        title: 'Reporte de producción',
-        html: '<div style="font-size:13px;color:#64748b;margin-bottom:4px;">Cada referencia de salida tiene su propia bitácora.</div>' + enlaces,
-        showConfirmButton: false,
-        showCloseButton: true,
-        width: 460
       });
     }
   `;
@@ -4417,12 +4555,12 @@ function renderTarjetaReferenciaGrupo(m, indice) {
 //   - Isla "Producción" del pedido entero: + Rollo (el mismo rollo fisico compartido, se registra
 //     contra la referencia que este recibiendo paquetes), Finalizar (cierra TODO el grupo, da
 //     igual desde cual referencia se llame) y Pausa.
-//   - En el lugar donde una orden normal tiene "Residuos" van las islas de Reporte y Ver bultos --
-//     los residuos siguen siendo del escritorio/digitador y no aplican por referencia.
+//   - En el lugar donde una orden normal tiene "Residuos" va la isla de Ver bultos -- los residuos
+//     siguen siendo del escritorio/digitador y no aplican por referencia.
 //   - Una tarjeta interactiva por referencia (ver renderTarjetaReferenciaGrupo).
 // "Ver bultos" lleva a la pagina de bultos del GRUPO (/grupo/:idGrupo/bultos), con el filtro por
 // referencia -- no a la de una sola orden.
-function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquinaCodigo, miembros, usuario, historial, totalBultos, pausaActiva, proximaCalidad, protocoloPendiente) {
+function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquinaCodigo, miembros, usuario, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente) {
   // "Activo ahora" es el que esta recibiendo paquetes en este momento (su bulto esta Activo o
   // Temporal). Si ninguno lo esta (grupo recien creado, nadie ha dado Iniciar) no se ofrece
   // "+ Rollo": el rollo se registra siempre contra la referencia activa.
@@ -4430,10 +4568,6 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
   // Ancla para las acciones que son del PEDIDO y no de una referencia puntual (Finalizar y Pausa,
   // que escriben contra SEL_EjecucionOrden): la que este recibiendo paquetes, o la primera Activa.
   const miembroAncla = miembroActivoAhora || miembros.find(m => m.Estado === 'Activa') || null;
-
-  const referenciasJs = miembros.map((m, i) => ({
-    idOrden: m.IdOrden, referencia: m.Referencia, nombre: m.Nombre || '', color: colorReferenciaGrupo(i)
-  }));
 
   const filasHistorial = (historial || []).length
     ? historial.map(h => `
@@ -4521,14 +4655,11 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
         <div class="label">Producción</div>
         <div class="orden-acciones">${accionesProduccion}</div>
       </div>` : ''}
-      <div class="isla isla-boton-abajo">
-        <div class="label">Reporte de producción</div>
-        <div class="isla-detalle">Bitácora por referencia de salida</div>
-        <button type="button" class="btn-accion btn-isla btn-imprimir" onclick="abrirReporteGrupo()">🖨️ Reporte</button>
-      </div>
-      <div class="isla isla-boton-abajo">
-        <div class="label">Bultos producidos</div>
-        <div class="isla-detalle">${totalBultos} bulto(s) en las ${miembros.length} referencias</div>
+      <div class="isla isla-con-boton">
+        <div class="isla-texto">
+          <div class="label">Bultos producidos</div>
+          <div class="isla-detalle">${totalBultos} bulto(s) en las ${miembros.length} referencias</div>
+        </div>
         <a class="btn-accion btn-isla btn-info" href="/selladora/${maquinaCodigo}/grupo/${idGrupo}/bultos">📦 Ver bultos</a>
       </div>
     </div>
@@ -4558,14 +4689,15 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
        CAMBIO 10/09/2026 (a pedido del usuario): el chequeo de Calidad ahora tambien sale en este
        apartado, no solo en la pagina de una referencia suelta. Sale contra la orden ANCLA -- la
        que este recibiendo paquetes -- y con SUS preguntas (calcularFlagsCalidad de esa
-       referencia): es la que se esta sellando en ese momento, y es su SEL_EjecucionOrden la que
-       lleva la ProximaCalidad que el servidor reprograma al responder.
+       referencia): es la que se esta sellando en ese momento, y es su bulto el que se revisa en
+       /calidad-pendiente (11/09/2026: el chequeo sale en el primer paquete de cada bulto). Si se
+       alterna de referencia, esta pagina se recarga y el ancla pasa a ser la nueva.
        pausaActiva va en null si hay protocolo pendiente -- mismo cuidado que en renderOrdenDetalle:
        si no, se encimarian dos ventanas bloqueantes (la pausa del protocolo ya la muestra el). -->
-  <script>${scriptComandos(miembroAncla.IdOrden, maquinaCodigo, calcularFlagsCalidad(miembroAncla), protocoloPendiente ? null : pausaActiva, proximaCalidad)}</script>
+  <script>${scriptComandos(miembroAncla.IdOrden, maquinaCodigo, calcularFlagsCalidad(miembroAncla), protocoloPendiente ? null : pausaActiva, calidadHabilitada)}</script>
   <script>${scriptPesoEnVivo()}</script>` : ''}
   <script>${scriptTarjetasReferencia(maquinaCodigo)}</script>
-  <script>${scriptAccionesReferencia(referenciasJs, maquinaCodigo, miembroActivoAhora ? miembroActivoAhora.IdOrden : null)}</script>
+  <script>${scriptAccionesReferencia(maquinaCodigo, miembroActivoAhora ? miembroActivoAhora.IdOrden : null)}</script>
   ${protocoloPendiente ? `<script>
     // Protocolo de arranque a medias en la referencia ancla: se retoma en el paso que iba, igual
     // que en la pagina de una referencia suelta.
@@ -4705,21 +4837,20 @@ app.get('/selladora/:codigo/grupo/:idGrupo', requireLogin, async (req, res) => {
     const miembroAncla = miembros.find(m => m.EstadoBultoActual === 'Activo' || m.EstadoBultoActual === 'Temporal')
       || miembros.find(m => m.Estado === 'Activa') || null;
     //
-    // ProximaCalidad (10/09/2026, a pedido del usuario: "el registro de calidad debe salir en esta
-    // variante"): mismo mecanismo que la pagina de una referencia suelta -- la hora del proximo
-    // chequeo vive en SEL_EjecucionOrden, no en un setTimeout del navegador, y se inicializa la
-    // primera vez que se abre este apartado con la orden ya Activa. Va contra la MISMA orden ancla:
-    // es la referencia que se esta sellando, y es la que recibe el comando 'calidad' al responder
-    // (POST /api/comando reprograma su ProximaCalidad y guarda el chequeo).
+    // Chequeo de Calidad (10/09/2026, a pedido del usuario: "el registro de calidad debe salir en
+    // esta variante"): mismo mecanismo que la pagina de una referencia suelta -- desde el
+    // 11/09/2026 sale en el primer paquete de cada bulto, y quien lo decide es el servidor en
+    // /calidad-pendiente. Aca solo se resuelve si esta pagina debe vigilarlo o no, contra la MISMA
+    // orden ancla: es la referencia que se esta sellando, la duena del bulto que recibe paquetes y
+    // la que recibe el comando 'calidad' al responder.
     let pausaActiva = null;
-    let proximaCalidad = null;
+    let calidadHabilitada = false;
     if (miembroAncla) {
       const dtEjecucion = await p.request().input('idOrden', miembroAncla.IdOrden).query(
-        `SELECT TOP 1 IdEjecucion, Estado, ProximaCalidad FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden`
+        `SELECT TOP 1 IdEjecucion, Estado FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden`
       );
       if (dtEjecucion.recordset.length > 0) {
         const { IdEjecucion: idEjecucion, Estado: estadoEjecucion } = dtEjecucion.recordset[0];
-        proximaCalidad = dtEjecucion.recordset[0].ProximaCalidad;
         if (estadoEjecucion === 'En pausa') {
           const dtPausa = await p.request().input('idEjecucion', idEjecucion).query(
             `SELECT TOP 1 Tipo, Subtipo, Observaciones, HoraInicio FROM SEL_TiempoMuerto WHERE id_ejecucion = @idEjecucion AND HoraFin IS NULL ORDER BY id DESC`
@@ -4728,16 +4859,7 @@ app.get('/selladora/:codigo/grupo/:idGrupo', requireLogin, async (req, res) => {
         }
         // Igual que en la pagina de una referencia: nunca en 'PendienteOperador' (nadie ha retomado
         // el control todavia, no tiene sentido pedir un chequeo sin un operario real detras).
-        if (miembroAncla.Estado === 'Activa' && estadoEjecucion !== 'PendienteOperador') {
-          if (proximaCalidad == null) {
-            proximaCalidad = calcularProximaCalidad();
-            await p.request().input('idEjecucion', idEjecucion).input('proximaCalidad', proximaCalidad).query(
-              `UPDATE SEL_EjecucionOrden SET ProximaCalidad = @proximaCalidad WHERE IdEjecucion = @idEjecucion`
-            );
-          }
-        } else {
-          proximaCalidad = null;
-        }
+        calidadHabilitada = miembroAncla.Estado === 'Activa' && estadoEjecucion !== 'PendienteOperador';
       }
     }
 
@@ -4751,7 +4873,7 @@ app.get('/selladora/:codigo/grupo/:idGrupo', requireLogin, async (req, res) => {
     // que bastarse solo, ya no hay boton "Más información" que lleve a la otra pagina).
     const protocoloPendiente = miembroAncla ? await obtenerProtocoloPendiente(p, miembroAncla.IdOrden) : null;
 
-    res.send(renderGrupoSelladoDetalle(idGrupo, miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial, totalBultos, pausaActiva, proximaCalidad, protocoloPendiente));
+    res.send(renderGrupoSelladoDetalle(idGrupo, miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
@@ -4802,13 +4924,14 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
              ord.TulaColor, ord.Parche, ord.CierreDeslizador, ord.Perforaciones,
              ord.CierreHermetico, ord.CintaAdhesiva,
              CASE WHEN er12.Valor IS NOT NULL THEN 1 ELSE 0 END AS TieneImpresion,
-             ti.Descripcion AS TipoImpresionDescripcion
+             ti.Descripcion AS TipoImpresionDescripcion,
+             ${COLUMNAS_MEDIDAS_BOLSA}
       FROM SEL_OrdenProduccion ord
       INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
       INNER JOIN PRDMaquinas maq ON maq.Codigo = ord.Maquina
       LEFT JOIN INVElementosReferencia er12 ON er12.Elemento = ord.Elemento AND er12.Categoria = 12
       LEFT JOIN INVElementosReferencia er13 ON er13.Elemento = ord.Elemento AND er13.Categoria = 13
-      LEFT JOIN INVReferencia ti ON ti.Categoria = 13 AND ti.Codigo = er13.Valor
+      LEFT JOIN INVReferencia ti ON ti.Categoria = 13 AND ti.Codigo = er13.Valor${JOINS_MEDIDAS_BOLSA}
       WHERE ord.IdOrden = @idOrden
     `);
     if (ordenResult.recordset.length === 0) {
@@ -4822,40 +4945,30 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
     // la pausa sigue mostrando el tiempo correcto en vez de reiniciar en 00:00:00).
     let idEjecucion = null;
     let pausaActiva = null;
-    // ProximaCalidad (03/09/2026): cuando debe salir el proximo chequeo de Calidad, guardado en BD
-    // -- no en un setTimeout del navegador, que se reiniciaba cada vez que se recargaba la pagina o
-    // se navegaba a otra pestaña y casi nunca llegaba a completar el conteo de 20-30 min. Si la
-    // orden esta Activa y todavia no tiene una fecha programada (primera vez que se abre
-    // Informacion desde que se inicio), se inicializa aca mismo.
-    // FIX 03/09/2026: ahora tambien exige que la EJECUCION (no solo la orden) este realmente en
+    // Chequeo de Calidad (03/09/2026, reescrito el 11/09/2026 a pedido del usuario): ya no se
+    // programa una hora futura (la vieja columna SEL_EjecucionOrden.ProximaCalidad, que era un
+    // chequeo aleatorio cada 20-30 min). Ahora sale en el PRIMER PAQUETE de cada bulto y quien lo
+    // decide es el servidor, en /calidad-pendiente -- aca solo se resuelve si esta pagina tiene que
+    // vigilarlo.
+    // Se mantiene el FIX 03/09/2026: exige que la EJECUCION (no solo la orden) este realmente en
     // curso -- Activa o En pausa, nunca 'PendienteOperador' (nadie ha retomado el control todavia,
-    // no tiene sentido pedir un chequeo de calidad sin un operario real detras). Si esta en
-    // PendienteOperador no se inicializa una fecha nueva NI se manda la que ya hubiera guardada --
-    // se retoma sola, sin perderse, la proxima vez que alguien la retome y vuelva Activa/En pausa.
-    let proximaCalidad = null;
+    // no tiene sentido pedir un chequeo de calidad sin un operario real detras). Nada se pierde por
+    // no vigilarlo ahora: el chequeo de ese bulto sigue pendiente y sale apenas alguien retome el
+    // control y vuelva a abrir esta pagina.
+    let calidadHabilitada = false;
     const dtEjecucion = await p.request().input('idOrden', idOrden).query(
-      `SELECT TOP 1 IdEjecucion, Estado, ProximaCalidad FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden`
+      `SELECT TOP 1 IdEjecucion, Estado FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden`
     );
     if (dtEjecucion.recordset.length > 0) {
       idEjecucion = dtEjecucion.recordset[0].IdEjecucion;
       const estadoEjecucion = dtEjecucion.recordset[0].Estado;
-      proximaCalidad = dtEjecucion.recordset[0].ProximaCalidad;
       if (estadoEjecucion === 'En pausa') {
         const dtPausa = await p.request().input('idEjecucion', idEjecucion).query(
           `SELECT TOP 1 Tipo, Subtipo, Observaciones, HoraInicio FROM SEL_TiempoMuerto WHERE id_ejecucion = @idEjecucion AND HoraFin IS NULL ORDER BY id DESC`
         );
         if (dtPausa.recordset.length > 0) pausaActiva = dtPausa.recordset[0];
       }
-      if (orden.Estado === 'Activa' && estadoEjecucion !== 'PendienteOperador') {
-        if (proximaCalidad == null) {
-          proximaCalidad = calcularProximaCalidad();
-          await p.request().input('idEjecucion', idEjecucion).input('proximaCalidad', proximaCalidad).query(
-            `UPDATE SEL_EjecucionOrden SET ProximaCalidad = @proximaCalidad WHERE IdEjecucion = @idEjecucion`
-          );
-        }
-      } else {
-        proximaCalidad = null;
-      }
+      calidadHabilitada = orden.Estado === 'Activa' && estadoEjecucion !== 'PendienteOperador';
     }
 
     // Los bultos producidos viven en su propia pagina (/selladora/:codigo/orden/:idOrden/bultos) --
@@ -4900,7 +5013,7 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
     // apaga el modal de pausa normal (ver renderOrdenDetalle) para no encimar dos ventanas.
     const protocoloPendiente = await obtenerProtocoloPendiente(p, Number(idOrden));
 
-    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, proximaCalidad, grupoSellado, protocoloPendiente));
+    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
@@ -4993,17 +5106,6 @@ async function obtenerBultosYPesajes(p, idOrden) {
 // Cada paquete producido cuenta como 100 unidades cuando la orden se mide en unidades (regla de
 // negocio dada por el usuario, 02/09/2026 -- no sale de ninguna columna, es fija).
 const UNIDADES_POR_PAQUETE = 100;
-
-// Proximo momento en que debe salir el chequeo de Calidad -- entre 20 y 30 minutos desde ahora
-// (mismo rango que antes, cuando era un setTimeout del navegador). Se llama al inicializar
-// SEL_EjecucionOrden.ProximaCalidad por primera vez (ver GET /selladora/:codigo/orden/:idOrden) y
-// para reprogramar el siguiente chequeo despues de que se responde uno (ver POST /api/comando,
-// comando 'calidad').
-function calcularProximaCalidad() {
-  const minMs = 20 * 60 * 1000;
-  const maxMs = 30 * 60 * 1000;
-  return new Date(Date.now() + minMs + Math.random() * (maxMs - minMs));
-}
 
 // Avance de produccion de una orden: lo producido contra lo pedido (tarjeta del encabezado de
 // Informacion, ver renderOrdenDetalle). Reglas acordadas con el usuario (02/09/2026):
@@ -5315,6 +5417,53 @@ app.get('/selladora/:codigo/orden/:idOrden/resumen-bulto-activo', requireLogin, 
   }
 });
 
+// ¿Hay que pedirle el chequeo de Calidad al operario ahora mismo? (a pedido del usuario,
+// 11/09/2026: "el registro de calidad ya no sale cada media hora, debe aparecer en el primer
+// paquete registrado de cada bulto"). Lo sondea la tableta cada 5s, ver revisarCalidadDelBulto()
+// en scriptComandos.
+//
+// La regla es de una sola frase: el bulto que esta recibiendo paquetes YA tiene al menos uno
+// pesado y TODAVIA no tiene una fila en SEL_ChequeoCalidad. Con eso el chequeo:
+//   - sale en el primer paquete de cada bulto, no cada 20-30 min como hasta ahora (esa era la
+//     columna SEL_EjecucionOrden.ProximaCalidad, que quedo sin uso),
+//   - sale UNA sola vez por bulto -- la fila del chequeo es la marca de "este bulto ya se reviso",
+//     asi que recargar la pagina, cambiar de pestaña o abrirla en otra tableta no lo repite,
+//   - y no se pierde si el operario cancela: el bulto sigue sin chequeo y se vuelve a pedir (el
+//     cliente espera 5 minutos antes de insistir).
+// Criterio del bulto identico al de registrarChequeoCalidad (estado='Activo', el mas reciente):
+// tiene que ser el MISMO bulto que termine en la columna id_bulto del chequeo, si no se volveria
+// a pedir para siempre.
+app.get('/selladora/:codigo/orden/:idOrden/calidad-pendiente', requireLogin, async (req, res) => {
+  const { idOrden } = req.params;
+  try {
+    const p = await getPool();
+    const dtBulto = await p.request().input('idOrden', idOrden).query(`
+      SELECT TOP 1 b.id FROM SEL_Bultos b
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+      WHERE ej.IdOrden = @idOrden AND b.estado = 'Activo'
+      ORDER BY b.id DESC
+    `);
+    if (dtBulto.recordset.length === 0) {
+      return res.json({ ok: true, pendiente: false, idBulto: null, paquetes: 0 });
+    }
+    const idBulto = dtBulto.recordset[0].id;
+    const dtEstado = await p.request().input('idBulto', idBulto).query(`
+      SELECT (SELECT COUNT(*) FROM SEL_PesajeElemento WHERE id_bulto = @idBulto) AS Paquetes,
+             (SELECT COUNT(*) FROM SEL_ChequeoCalidad WHERE id_bulto = @idBulto) AS Chequeos
+    `);
+    const { Paquetes, Chequeos } = dtEstado.recordset[0];
+    res.json({ ok: true, pendiente: Paquetes > 0 && Chequeos === 0, idBulto, paquetes: Paquetes });
+  } catch (err) {
+    // Mismo blindaje que el resto de tablas nuevas: SEL_ChequeoCalidad puede no existir todavia en
+    // la base contra la que se este probando (ver agregar_calidad_por_bulto_y_medidas.sql). Sin esa
+    // tabla no hay forma de saber que bultos ya se revisaron, y pedir el chequeo cada 5 segundos
+    // seria peor que no pedirlo: se contesta que no hay nada pendiente y se deja el aviso en
+    // consola.
+    console.error('No se pudo revisar el chequeo de Calidad del bulto (¿falta ejecutar agregar_calidad_por_bulto_y_medidas.sql?):', err.message);
+    res.json({ ok: true, pendiente: false, idBulto: null, paquetes: 0 });
+  }
+});
+
 // Tomar control de la EJECUCION (SEL_EjecucionOrden) -- vive en la cola de ordenes de la maquina
 // (renderColaOrdenes), no en Informacion (a pedido del usuario, 31/08/2026: el viejo boton "Tomar
 // control" de Informacion, que solo tocaba SEL_OperarioActualMaquina, se elimino -- esta ruta
@@ -5362,6 +5511,12 @@ app.post('/api/selladora/orden/:idOrden/tomar-control-ejecucion', requireLogin, 
       WHEN MATCHED THEN UPDATE SET Operario = @operario, FechaHora = GETDATE()
       WHEN NOT MATCHED THEN INSERT (Maquina, Operario, FechaHora) VALUES (@maquina, @operario, GETDATE());
     `);
+    // Bitacora de turno (12/09/2026): este es EL punto donde se abre -- el mismo en que la maquina
+    // cambia de dueno. Si el que toma control es el mismo operario y sigue el mismo turno, no abre
+    // otra: reusa la que ya esta abierta (un corte de red o un retome no pueden partir la bitacora
+    // en dos, requisito del usuario). Si es otro operario, cierra la anterior por 'relevo'.
+    // No revienta hacia afuera: si falla, el operario igual toma control -- ver abrirOReanudarBitacora.
+    await abrirOReanudarBitacora(p, Maquina, miOperario);
     // FIX 31/08/2026: si la ejecucion NO estaba 'En pausa' (o sea, con este cambio quedo 'Activa' --
     // ver el CASE de arriba), se pregunta en la cola de la maquina si hay alguna actividad por hacer
     // antes de producir o si entra directo (a pedido del usuario). Si ya estaba 'En pausa', no se
@@ -5517,6 +5672,452 @@ app.post('/api/selladora/orden/:idOrden/alternar-referencia', requireLogin, asyn
   }
 });
 
+// ============================ Bitacora de turno ============================
+// "Un registro unico" por (maquina, operario, turno) -- a pedido del usuario, 12/09/2026, en
+// reemplazo de la planilla por orden que se elimino el 11/09/2026. Ver agregar_bitacora_turno.sql
+// para el porque de la tabla y de que se abre/cierra cuando.
+//
+// La tabla SEL_BitacoraTurno guarda SOLO la cabecera. Los renglones (bulto, horas, rollo, hora de
+// registro, unidades) se leen en vivo de SEL_Bultos / SEL_RolloEjecucion / SEL_PesajeElemento con
+// un JOIN por ventana de tiempo -- decision del usuario: nada se copia, para que no haya dos
+// versiones del mismo dato.
+
+// OJO CON LA ZONA HORARIA (comprobado 09/09/2026 contra la base): SQL Server guarda y devuelve
+// hora LOCAL de Colombia (GETDATE() = 14:39 cuando aca son las 14:39), pero el driver mssql la
+// entrega como Date de JS interpretandola como UTC. Si se formatea con toLocaleTimeString a secas,
+// el navegador le vuelve a restar 5 horas y un paquete pesado a las 14:39 se muestra "09:39".
+// Por eso se formatea con timeZone 'UTC': asi se ve tal como esta guardado, que es justo la hora de
+// pared que vio el operario.
+function horaCorta(fecha) {
+  if (!fecha) return '—';
+  return new Date(fecha).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' });
+}
+
+function fechaHoraLocalBD(fecha) {
+  if (!fecha) return '—';
+  return new Date(fecha).toLocaleString('es-CO', {
+    day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+    hour12: false, timeZone: 'UTC'
+  });
+}
+
+// Turnos que se usan cuando la maquina no tiene ninguno cargado en TURHorariosMaquinas (en
+// produccion pasa con 4 de las 16 selladoras: 03, 08, 09 y 12 -- comprobado el 12/09/2026). Son los
+// tres de 8 horas que si tienen asignados las otras 12, todas con las mismas cinco franjas.
+// Ver la NOTA SOBRE EL TURNO en agregar_bitacora_turno.sql.
+const TURNOS_BASE_SELLADORA = [6, 7, 8];
+
+// 'HH:MM' -> minutos desde medianoche. NOMTurnos.HoraInicial/HoraFinal y
+// TURHorariosMaquinas.HoraInicio/HoraFin son varchar, no time.
+function minutosDelDia(hhmm) {
+  const m = /^\s*(\d{1,2}):(\d{2})/.exec(String(hhmm || ''));
+  if (!m) return null;
+  const minutos = Number(m[1]) * 60 + Number(m[2]);
+  return minutos >= 0 && minutos < 1440 ? minutos : null;
+}
+
+// Fecha local en 'YYYY-MM-DD'. Se manda como TEXTO a la columna DATE: pasar un Date de JS deja que
+// el driver lo convierta a UTC y un turno abierto a las 21:30 terminaria imputado al dia siguiente.
+function fechaISOLocal(fecha) {
+  const d = new Date(fecha);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Turno en el que cae `momento` para una maquina, deducido de su horario (decision del usuario,
+// 12/09/2026). Devuelve { turno, descripcion, fechaTurno } -- turno/descripcion en null si no hay
+// ninguna franja que contenga esa hora (la bitacora igual se abre: tiene operario, maquina y horas).
+//
+// Las DOS reglas que no salen de ninguna tabla y que hay que conocer antes de tocar esto:
+//   - Los horarios SE SOLAPAN (la SELLADORA 04 tiene Tarde 14:00-22:00 y Pleno Noche 18:00-05:45 a
+//     la vez). Desempata la franja MAS CORTA: los turnos "Pleno" son jornadas extendidas montadas
+//     encima de los tres turnos normales de 8 horas, y el ordinario es el que la planta usa por
+//     defecto.
+//   - Si la maquina no tiene horarios, se usan los tres turnos base (TURNOS_BASE_SELLADORA).
+// Si alguna de las dos no es lo que quiere la planta, lo correcto es arreglar los DATOS antes que
+// este codigo -- ver agregar_bitacora_turno.sql.
+async function resolverTurnoMaquina(p, maquinaCodigo, momento) {
+  const cuando = momento ? new Date(momento) : new Date();
+  const dtHorarios = await p.request().input('maquina', maquinaCodigo).query(`
+    SELECT th.CodigoTurno AS Codigo, t.Descripcion, th.HoraInicio, th.HoraFin
+    FROM TURHorariosMaquinas th
+    INNER JOIN NOMTurnos t ON t.Codigo = th.CodigoTurno
+    WHERE th.CodigoMaquina = @maquina
+  `);
+  let franjas = dtHorarios.recordset;
+  if (franjas.length === 0) {
+    const dtBase = await p.request().query(`
+      SELECT Codigo, Descripcion, HoraInicial AS HoraInicio, HoraFinal AS HoraFin
+      FROM NOMTurnos WHERE Codigo IN (${TURNOS_BASE_SELLADORA.join(',')})
+    `);
+    franjas = dtBase.recordset;
+  }
+
+  const minutosAhora = cuando.getHours() * 60 + cuando.getMinutes();
+  const candidatas = franjas.map(f => {
+    const ini = minutosDelDia(f.HoraInicio);
+    const fin = minutosDelDia(f.HoraFin);
+    if (ini == null || fin == null) return null;
+    // fin <= ini => la franja cruza medianoche (22:00-06:00).
+    const cruzaMedianoche = fin <= ini;
+    const contiene = cruzaMedianoche ? (minutosAhora >= ini || minutosAhora < fin) : (minutosAhora >= ini && minutosAhora < fin);
+    if (!contiene) return null;
+    return {
+      codigo: f.Codigo,
+      descripcion: f.Descripcion,
+      duracion: cruzaMedianoche ? (1440 - ini + fin) : (fin - ini),
+      // Estamos en el pedazo DESPUES de medianoche de un turno que empezo ayer.
+      despuesDeMedianoche: cruzaMedianoche && minutosAhora < fin
+    };
+  }).filter(Boolean);
+
+  if (candidatas.length === 0) {
+    return { turno: null, descripcion: null, fechaTurno: fechaISOLocal(cuando) };
+  }
+  candidatas.sort((a, b) => a.duracion - b.duracion);
+  const elegida = candidatas[0];
+
+  // El turno de la noche que arranco ayer se imputa a AYER, no al dia del reloj: los bultos de las
+  // 2 a.m. son del turno de anoche, que es como los cuenta la planta.
+  const fechaBase = new Date(cuando);
+  if (elegida.despuesDeMedianoche) fechaBase.setDate(fechaBase.getDate() - 1);
+
+  return { turno: elegida.codigo, descripcion: elegida.descripcion, fechaTurno: fechaISOLocal(fechaBase) };
+}
+
+async function cerrarBitacora(p, idBitacora, motivo) {
+  await p.request().input('id', idBitacora).input('motivo', motivo).query(
+    `UPDATE SEL_BitacoraTurno SET HoraCierre = GETDATE(), MotivoCierre = @motivo
+     WHERE IdBitacora = @id AND HoraCierre IS NULL`
+  );
+}
+
+// Abre la bitacora del turno, o REUSA la que ya este abierta si es del mismo operario y del mismo
+// turno. Se llama desde "tomar control de la maquina".
+//
+// Lo de reusar es un requisito explicito del usuario (12/09/2026): "no cuando el operario cierra
+// sesion porque puede pasar que se vaya el internet o retome la orden". Un corte de red, un
+// re-login o volver a tomar control a mitad del turno NO pueden partir la bitacora en dos.
+// Por eso tampoco hay nada que cierre la bitacora en /logout: solo la cierra un RELEVO (otro
+// operario toma la maquina) o el CAMBIO DE TURNO.
+//
+// Nunca revienta hacia afuera: si algo falla, se registra en consola y el operario igual toma
+// control de la maquina. La bitacora es un registro, no puede bloquear la produccion.
+async function abrirOReanudarBitacora(p, maquinaCodigo, operarioCodigo) {
+  try {
+    const turnoAhora = await resolverTurnoMaquina(p, maquinaCodigo);
+
+    const dtAbierta = await p.request().input('maquina', maquinaCodigo).query(`
+      SELECT TOP 1 IdBitacora, Operario, Turno, CONVERT(varchar(10), FechaTurno, 23) AS FechaTurno
+      FROM SEL_BitacoraTurno WHERE Maquina = @maquina AND HoraCierre IS NULL
+      ORDER BY IdBitacora DESC
+    `);
+
+    if (dtAbierta.recordset.length > 0) {
+      const abierta = dtAbierta.recordset[0];
+      const mismoOperario = abierta.Operario === operarioCodigo;
+      // Turno en null a los dos lados tambien cuenta como "el mismo" -- si no, una maquina sin
+      // horarios abriria una bitacora nueva en cada toma de control.
+      const mismoTurno = (abierta.Turno == null ? null : Number(abierta.Turno)) === turnoAhora.turno
+        && abierta.FechaTurno === turnoAhora.fechaTurno;
+      if (mismoOperario && mismoTurno) return abierta.IdBitacora;  // retome: la misma bitacora sigue
+      await cerrarBitacora(p, abierta.IdBitacora, mismoOperario ? 'cambio_turno' : 'relevo');
+    }
+
+    const dtNueva = await p.request()
+      .input('maquina', maquinaCodigo).input('operario', operarioCodigo)
+      .input('turno', turnoAhora.turno).input('fechaTurno', turnoAhora.fechaTurno)
+      .query(`
+        DECLARE @Insertados TABLE (Id INT);
+        INSERT INTO SEL_BitacoraTurno (Maquina, Operario, Turno, FechaTurno)
+        OUTPUT INSERTED.IdBitacora INTO @Insertados
+        VALUES (@maquina, @operario, @turno, @fechaTurno);
+        SELECT Id FROM @Insertados;
+      `);
+    return dtNueva.recordset[0].Id;
+  } catch (err) {
+    console.error('No se pudo abrir/reanudar la bitacora de turno (¿falta ejecutar agregar_bitacora_turno.sql?):', err.message);
+    return null;
+  }
+}
+
+// Cabecera + renglones de una bitacora. `idBitacora` opcional: sin el se toma la que este ABIERTA
+// en esa maquina y, si no hay ninguna, la ultima que se cerro.
+async function obtenerBitacora(p, maquinaCodigo, idBitacora) {
+  const dtCabecera = await p.request().input('maquina', maquinaCodigo).input('id', idBitacora || null).query(`
+    SELECT TOP 1 bi.IdBitacora, bi.Maquina, bi.Operario, bi.Turno,
+           CONVERT(varchar(10), bi.FechaTurno, 23) AS FechaTurno,
+           bi.HoraApertura, bi.HoraCierre, bi.MotivoCierre,
+           maq.Nombre AS MaquinaNombre, op.Nombre AS OperarioNombre,
+           tu.Descripcion AS TurnoDescripcion
+    FROM SEL_BitacoraTurno bi
+    LEFT JOIN PRDMaquinas maq ON maq.Codigo = bi.Maquina
+    LEFT JOIN PRDOperarios op ON op.Codigo = bi.Operario
+    LEFT JOIN NOMTurnos tu ON tu.Codigo = bi.Turno
+    WHERE bi.Maquina = @maquina AND (@id IS NULL OR bi.IdBitacora = @id)
+    -- Sin @id: manda la abierta (HoraCierre NULL ordena primero con este CASE) y si no, la ultima.
+    ORDER BY CASE WHEN bi.HoraCierre IS NULL THEN 0 ELSE 1 END, bi.HoraApertura DESC
+  `);
+  if (dtCabecera.recordset.length === 0) return null;
+  const cabecera = dtCabecera.recordset[0];
+
+  // Un bulto es de esta bitacora si salio de ESTA maquina dentro de la ventana del turno. Se usa
+  // HoraInicio y, cuando esta en NULL (pasa: 5 de 38 bultos en la base de pruebas), la hora del
+  // primer paquete pesado, que es lo mas cercano a "cuando empezo este bulto".
+  const dtRenglones = await p.request()
+    .input('maquina', cabecera.Maquina)
+    .input('apertura', cabecera.HoraApertura)
+    .input('cierre', cabecera.HoraCierre)
+    .query(`
+      SELECT b.id AS IdBulto, b.num_bulto, b.estado, b.HoraInicio, b.HoraFin,
+             b.number_paqu, b.CantidadTotal, ISNULL(b.NumeroPedido, '') AS NumeroPedido,
+             ie.Referencia, ie.Nombre AS NombreElemento,
+             pk.PrimerPaquete, pk.UltimoPaquete, pk.Paquetes, pk.PesoPaquetes,
+             ro.Seriales AS SerialesRollo
+      FROM SEL_Bultos b
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+      INNER JOIN SEL_OrdenProduccion ord ON ord.IdOrden = ej.IdOrden
+      INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
+      OUTER APPLY (
+        SELECT MIN(pe.FechaHora) AS PrimerPaquete, MAX(pe.FechaHora) AS UltimoPaquete,
+               COUNT(*) AS Paquetes, SUM(pe.PesoPaqueGr) AS PesoPaquetes
+        FROM SEL_PesajeElemento pe WHERE pe.id_bulto = b.id
+      ) pk
+      OUTER APPLY (
+        SELECT STRING_AGG(re.Serial, ' · ') AS Seriales
+        FROM SEL_RolloEjecucion re WHERE re.id_bulto = b.id
+      ) ro
+      WHERE b.id_maquina = @maquina
+        AND COALESCE(b.HoraInicio, pk.PrimerPaquete) >= @apertura
+        AND (@cierre IS NULL OR COALESCE(b.HoraInicio, pk.PrimerPaquete) < @cierre)
+      ORDER BY COALESCE(b.HoraInicio, pk.PrimerPaquete), b.id
+    `);
+
+  // Rollos montados durante el turno. Van aparte de los renglones porque SEL_RolloEjecucion.id_bulto
+  // es nullable: el rollo del arranque se registra ANTES de que exista el primer bulto, asi que si
+  // solo se listaran los atados a un bulto, ese se perderia.
+  let rollos = [];
+  try {
+    const dtRollos = await p.request()
+      .input('maquina', cabecera.Maquina)
+      .input('apertura', cabecera.HoraApertura)
+      .input('cierre', cabecera.HoraCierre)
+      .query(`
+        SELECT re.Serial, re.FechaHora, re.Cantidad, re.LoteMP, re.EsInicio, re.id_bulto
+        FROM SEL_RolloEjecucion re
+        INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = re.id_ejecucion
+        INNER JOIN SEL_OrdenProduccion ord ON ord.IdOrden = ej.IdOrden
+        WHERE ord.Maquina = @maquina AND re.FechaHora >= @apertura
+          AND (@cierre IS NULL OR re.FechaHora < @cierre)
+        ORDER BY re.FechaHora
+      `);
+    rollos = dtRollos.recordset;
+  } catch (err) {
+    console.error('Bitacora: no se pudo leer SEL_RolloEjecucion (¿falta ejecutar agregar_rollo_ejecucion.sql?):', err.message);
+  }
+
+  return { cabecera, renglones: dtRenglones.recordset, rollos };
+}
+
+// Las ultimas bitacoras de la maquina, para el desplegable que permite mirar turnos anteriores.
+async function obtenerBitacorasRecientes(p, maquinaCodigo) {
+  const dt = await p.request().input('maquina', maquinaCodigo).query(`
+    SELECT TOP 20 bi.IdBitacora, CONVERT(varchar(10), bi.FechaTurno, 23) AS FechaTurno,
+           bi.HoraApertura, bi.HoraCierre, op.Nombre AS OperarioNombre, tu.Descripcion AS TurnoDescripcion
+    FROM SEL_BitacoraTurno bi
+    LEFT JOIN PRDOperarios op ON op.Codigo = bi.Operario
+    LEFT JOIN NOMTurnos tu ON tu.Codigo = bi.Turno
+    WHERE bi.Maquina = @maquina
+    ORDER BY bi.HoraApertura DESC
+  `);
+  return dt.recordset;
+}
+
+// Pagina de la bitacora. Una fila por BULTO, en orden cronologico, con lo que pidio el usuario
+// (12/09/2026): hora de inicio y fin del bulto, serial del rollo, a que hora se registro y las
+// unidades. "Registrado" es la franja entre el primer y el ultimo paquete pesado de ese bulto --
+// que es, literalmente, cuando se registro.
+function renderBitacora(datos, recientes, maquinaCodigo, usuario) {
+  const esc = (x) => String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const { cabecera: c, renglones, rollos } = datos;
+
+  // Unidades: misma regla que el resto de la app (100 bolsas por paquete, ver UNIDADES_POR_PAQUETE).
+  const unidadesDe = (r) => (r.number_paqu || 0) * UNIDADES_POR_PAQUETE;
+  const totalPaquetes = renglones.reduce((s, r) => s + (r.number_paqu || 0), 0);
+  const totalUnidades = renglones.reduce((s, r) => s + unidadesDe(r), 0);
+  // PesoPaqueGr guarda KILOGRAMOS pese al nombre (ver FIX 02/09/2026 en scriptResumenBultoActivo).
+  const totalKg = renglones.reduce((s, r) => s + Number(r.PesoPaquetes || 0), 0);
+
+  const abierta = c.HoraCierre == null;
+  const filas = renglones.length ? renglones.map(r => `
+      <tr>
+        <td class="cen"><strong>${r.num_bulto}</strong></td>
+        <td>
+          <div>${esc(r.NumeroPedido) || '—'}</div>
+          <div class="bit-sub">${esc(r.Referencia)}</div>
+        </td>
+        <td class="cen">${horaCorta(r.HoraInicio)}</td>
+        <td class="cen">${horaCorta(r.HoraFin)}</td>
+        <td class="cen">${r.PrimerPaquete ? horaCorta(r.PrimerPaquete) + ' – ' + horaCorta(r.UltimoPaquete) : '—'}</td>
+        <td>${esc(r.SerialesRollo) || '—'}</td>
+        <td class="cen">${r.number_paqu || 0}</td>
+        <td class="num">${unidadesDe(r).toLocaleString('es-CO')}</td>
+        <td class="num">${r.PesoPaquetes != null ? Number(r.PesoPaquetes).toFixed(2) : '—'}</td>
+        <td class="cen">${esc(r.estado)}</td>
+      </tr>`).join('')
+    : `<tr><td colspan="10" class="bit-vacio">Todavía no hay bultos en este turno.</td></tr>`;
+
+  const filasRollos = rollos.length ? rollos.map(ro => `
+      <div class="hist-fila">
+        <span class="valor serial">${esc(ro.Serial)}</span>
+        <span>${horaCorta(ro.FechaHora)}</span>
+        <span>${ro.Cantidad != null ? Number(ro.Cantidad).toFixed(2) + ' kg' : '—'}</span>
+        <span style="color:var(--texto-suave);">${ro.EsInicio ? 'Arranque' : 'Añadido'}${ro.LoteMP ? ' · Lote ' + esc(ro.LoteMP) : ''}</span>
+      </div>`).join('')
+    : `<div class="pesaje-vacio">Sin rollos montados en este turno.</div>`;
+
+  const opcionesRecientes = recientes.map(b => {
+    const etiqueta = `${b.FechaTurno} · ${b.TurnoDescripcion || 'Sin turno'} · ${b.OperarioNombre || 'Operario ' + b.IdBitacora}` +
+      (b.HoraCierre == null ? ' · ABIERTA' : '');
+    return `<option value="${b.IdBitacora}" ${b.IdBitacora === c.IdBitacora ? 'selected' : ''}>${esc(etiqueta)}</option>`;
+  }).join('');
+
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bitácora — ${esc(c.MaquinaNombre)}</title>
+  <style>${estilosBase()}
+    .bit-cabecera { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+    .bit-dato { background: white; border-radius: 14px; padding: 12px 16px; flex: 1 1 160px;
+                box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+    .bit-dato .label { margin-bottom: 4px; }
+    .bit-dato .valor { font-size: 16px; font-weight: 700; }
+    .bit-estado { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+    .bit-abierta { background: var(--verde-fondo); color: var(--verde); }
+    .bit-cerrada { background: var(--naranja-fondo); color: var(--naranja); }
+    /* La tabla es lo unico que puede ser mas ancho que la pantalla de la tableta: se desplaza
+       sola en horizontal en vez de apretar las columnas hasta romperlas. */
+    .bit-scroll { overflow-x: auto; background: white; border-radius: 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+    table.bitacora { border-collapse: collapse; width: 100%; min-width: 820px; font-size: 13px; }
+    table.bitacora th, table.bitacora td { border-bottom: 1px solid #e6e9ee; padding: 9px 10px; text-align: left; }
+    table.bitacora th { background: #f4f6f8; font-size: 12px; text-transform: uppercase;
+                        letter-spacing: .3px; color: var(--texto-suave); white-space: nowrap; }
+    table.bitacora tfoot td { font-weight: 700; border-top: 2px solid #cfd4da; border-bottom: none; }
+    table.bitacora .cen { text-align: center; white-space: nowrap; }
+    table.bitacora .num { text-align: right; white-space: nowrap; }
+    .bit-sub { font-size: 11px; color: var(--texto-suave); }
+    .bit-vacio { text-align: center; color: var(--texto-suave); padding: 22px 0; }
+    .bit-selector { margin-bottom: 16px; }
+    .bit-selector select { width: 100%; max-width: 520px; padding: 10px 12px; border-radius: 10px;
+                           border: 2px solid #cfd4da; font-size: 14px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-top">
+      <div class="logo-wrap"><img class="logo" src="/logo-carlixplast.png" alt="Carlixplast"></div>
+    </div>
+    <div class="header-inner">
+      <div class="header-fila">
+        <div class="header-info">
+          <h1>📋 Bitácora de turno</h1>
+          <div class="sub">${esc(c.MaquinaNombre)}</div>
+          <a class="volver" href="/selladora/${maquinaCodigo}">‹ ${esc(c.MaquinaNombre)}</a>
+        </div>
+        <div class="header-salir-grupo">
+          <div class="header-usuario">👤 ${esc(usuario)}</div>
+          <a class="salir" href="/logout">Cerrar sesión</a>
+        </div>
+      </div>
+    </div>
+  </header>
+  <main>
+    <div class="bit-selector">
+      <div class="label" style="margin-bottom:6px;">Turno</div>
+      <select id="selector-bitacora" onchange="location.href='/selladora/${maquinaCodigo}/bitacora/' + this.value;">
+        ${opcionesRecientes}
+      </select>
+    </div>
+
+    <div class="bit-cabecera">
+      <div class="bit-dato">
+        <div class="label">Operario</div>
+        <div class="valor">${esc(c.OperarioNombre) || ('Código ' + c.Operario)}</div>
+      </div>
+      <div class="bit-dato">
+        <div class="label">Turno</div>
+        <div class="valor">${esc(c.TurnoDescripcion) || 'Sin turno asignado'}</div>
+        <div class="bit-sub">${esc(c.FechaTurno)}</div>
+      </div>
+      <div class="bit-dato">
+        <div class="label">Desde / hasta</div>
+        <div class="valor">${horaCorta(c.HoraApertura)} – ${abierta ? '…' : horaCorta(c.HoraCierre)}</div>
+        <div class="bit-sub">
+          <span class="bit-estado ${abierta ? 'bit-abierta' : 'bit-cerrada'}">${abierta ? 'Abierta' : 'Cerrada'}</span>
+          ${!abierta && c.MotivoCierre ? ' · ' + esc(c.MotivoCierre === 'relevo' ? 'Relevo de operario' : (c.MotivoCierre === 'cambio_turno' ? 'Cambio de turno' : c.MotivoCierre)) : ''}
+        </div>
+      </div>
+      <div class="bit-dato">
+        <div class="label">Producido</div>
+        <div class="valor">${totalUnidades.toLocaleString('es-CO')} und</div>
+        <div class="bit-sub">${renglones.length} bulto(s) · ${totalPaquetes} paquete(s) · ${totalKg.toFixed(2)} kg</div>
+      </div>
+    </div>
+
+    <div class="bit-scroll">
+      <table class="bitacora">
+        <thead>
+          <tr>
+            <th class="cen">Bulto</th>
+            <th>Pedido / referencia</th>
+            <th class="cen">Hora inicio</th>
+            <th class="cen">Hora fin</th>
+            <th class="cen">Registrado</th>
+            <th>Serial del rollo</th>
+            <th class="cen">Paquetes</th>
+            <th class="num">Unidades</th>
+            <th class="num">Peso (kg)</th>
+            <th class="cen">Estado</th>
+          </tr>
+        </thead>
+        <tbody>${filas}</tbody>
+        ${renglones.length ? `<tfoot>
+          <tr>
+            <td colspan="6">Total del turno</td>
+            <td class="cen">${totalPaquetes}</td>
+            <td class="num">${totalUnidades.toLocaleString('es-CO')}</td>
+            <td class="num">${totalKg.toFixed(2)}</td>
+            <td></td>
+          </tr>
+        </tfoot>` : ''}
+      </table>
+    </div>
+
+    <h2 style="font-size:15px;margin:22px 0 10px;">Rollos montados en el turno</h2>
+    <div class="ejecucion-box">${filasRollos}</div>
+  </main>
+</body>
+</html>`;
+}
+
+app.get('/selladora/:codigo/bitacora/:idBitacora?', requireLogin, async (req, res) => {
+  const { codigo, idBitacora } = req.params;
+  try {
+    const p = await getPool();
+    const datos = await obtenerBitacora(p, codigo, idBitacora ? Number(idBitacora) : null);
+    if (!datos) {
+      return res.status(404).send(renderErrorSimple(
+        'Esta máquina todavía no tiene ninguna bitácora. Se abre sola cuando un operario toma control de la máquina.',
+        `/selladora/${codigo}`));
+    }
+    const recientes = await obtenerBitacorasRecientes(p, codigo);
+    res.send(renderBitacora(datos, recientes, codigo, req.session.usuario.nombre));
+  } catch (err) {
+    res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
+  }
+});
+
 // Botones "Imprimir etiqueta" / "Cierre bulto" / "Retal" / "Troquelado" / "Refilado" / "Calidad" /
 // "Salida no conforme" de la pagina de Informacion (solo visibles con la orden Activa, ver
 // renderOrdenDetalle) -- reenvia el comando a Node-RED via enviarComandoANodeRed(). El
@@ -5535,709 +6136,8 @@ app.post('/api/selladora/orden/:idOrden/alternar-referencia', requireLogin, asyn
 // antes de enviarse; idBulto es el bulto Activo en ese momento (window.idBultoActivo, lo mantiene
 // scriptResumenBultoActivo -- puede ser null si no hay bulto Activo). Ambos van para que Node-RED
 // sepa a que bulto pertenece e imprima la etiqueta del residuo/salida no conforme.
-// ============================ Reporte de produccion (impresion) ============================
-// Planilla en papel de una orden, con las columnas que pidio el usuario (09/09/2026): pedido,
-// tiquete del rollo, numero de paquete, pistas, unidades, horas, medida de la bolsa, calidad por
-// paquete, golpes x minuto, potencia y % de la perilla de temperatura, mas los bloques de
-// actividades registradas y del registro de calidad tal como lo digito el operario.
-//
-// Equivalencias acordadas con el usuario, porque los nombres de planta no coinciden con los de la
-// base:
-//   - "Pistas" = SEL_EjecucionOrden.BolsasxGolpe (es el mismo dato con otro nombre).
-//   - "Golpes x minuto" = SEL_PesajeElemento.Golpes (ya se muestra asi en la pagina de Bultos).
-//   - Unidades producidas = paquetes x UNIDADES_POR_PAQUETE (100 bolsas por paquete).
-//   - Temperatura: la digita el operario (ver agregar_temperatura_perilla.sql) porque el PLC no la
-//     manda; a cada paquete se le asigna el ultimo valor registrado antes de su hora.
-//
-// El tiquete del rollo va en el ENCABEZADO y no por paquete: hoy la base no ata un rollo a un
-// paquete ni a un bulto -- PRDProduccionMateriaPrima los guarda todos bajo la linea ancla del
-// proceso, y SEL_EjecucionOrden.SerialRolloEntrada se SOBREESCRIBE en cada "Añadir Rollo"
-// (scan-rollo.js). Por eso la columna de la tabla repite el tiquete del proceso, y dice "varios"
-// cuando hubo mas de un rollo, con el detalle completo arriba.
-async function obtenerDatosReporte(p, idOrden) {
-  // Las columnas de caracteristicas (C/NC) de la planilla salen de las MISMAS banderas que arman el
-  // modal de Calidad (construirApartadosCalidad), no de los chequeos ya respondidos: asi una orden
-  // sin chequeos todavia se imprime con sus casillas en blanco, listas para diligenciar a mano.
-  const dtOrden = await p.request().input('idOrden', idOrden).query(`
-    SELECT ord.IdOrden, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento,
-           ie.Nombre AS NombreElemento, maq.Nombre AS MaquinaNombre, maq.Codigo AS MaquinaCodigo,
-           ord.Estado, ord.KilosSolicitados, ord.UnidadesSolicitadas, ord.Turno, ord.FechaProgramada,
-           ord.Troquelado, ord.Perforaciones, ord.Manija, ord.Tula, ord.Parche,
-           ord.CierreDeslizador, ord.CierreHermetico, ord.CintaAdhesiva,
-           CASE WHEN er12.Valor IS NOT NULL THEN 1 ELSE 0 END AS TieneImpresion
-    FROM SEL_OrdenProduccion ord
-    INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
-    INNER JOIN PRDMaquinas maq ON maq.Codigo = ord.Maquina
-    LEFT JOIN INVElementosReferencia er12 ON er12.Elemento = ord.Elemento AND er12.Categoria = 12
-    WHERE ord.IdOrden = @idOrden
-  `);
-  if (dtOrden.recordset.length === 0) return null;
-
-  // Numero de planilla: se usa el codigo de orden de produccion de Mirane (OP09070001SEL...) que ya
-  // quedo estampado en PRDProduccion al crear el primer bulto. Es el consecutivo que la planta ya
-  // reconoce; si por lo que sea no existe, el reporte cae al IdOrden.
-  const dtOP = await p.request().input('idOrden', idOrden).query(`
-    SELECT TOP 1 pp.OrdenProduccion
-    FROM PRDProduccion pp
-    INNER JOIN SEL_Bultos b ON b.serialPadre = pp.Detalle
-    INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
-    WHERE ej.IdOrden = @idOrden AND pp.OrdenProduccion IS NOT NULL
-    ORDER BY b.num_bulto ASC
-  `);
-
-  const dtEjecucion = await p.request().input('idOrden', idOrden).query(`
-    SELECT TOP 1 ej.IdEjecucion, ej.BolsasxGolpe, ej.SerialRolloEntrada, ej.HoraInicioReal, ej.HoraFinReal,
-           op.Nombre AS OperarioNombre, opf.Nombre AS OperarioFinalNombre
-    FROM SEL_EjecucionOrden ej
-    LEFT JOIN PRDOperarios op ON op.Codigo = ej.Operario
-    LEFT JOIN PRDOperarios opf ON opf.Codigo = ej.OperarioFinal
-    WHERE ej.IdOrden = @idOrden ORDER BY ej.IdEjecucion ASC
-  `);
-
-  const dtPaquetes = await p.request().input('idOrden', idOrden).query(`
-    SELECT pe.id_paquete, pe.ConsecutivoPaquete, pe.PesoPaqueGr, pe.Golpes, pe.Potencia,
-           pe.Temperatura, pe.FechaHora, b.id AS IdBulto, b.num_bulto, b.HoraInicio, b.HoraFin
-    FROM SEL_PesajeElemento pe
-    INNER JOIN SEL_Bultos b ON b.id = pe.id_bulto
-    INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
-    WHERE ej.IdOrden = @idOrden AND b.estado <> 'Anulado'
-    ORDER BY b.num_bulto ASC, pe.ConsecutivoPaquete ASC
-  `);
-
-  // Todos los rollos del proceso (incluidos los de "Añadir Rollo"), emparejados por el
-  // Fecha/Lote/Elemento de los bultos de esta orden -- mismo criterio que usa el resto de la app
-  // para hablarle a PRDProduccionMateriaPrima.
-  const dtRollos = await p.request().input('idOrden', idOrden).query(`
-    SELECT DISTINCT mp.Detalle AS Tiquete, mp.Cantidad, mp.LoteMP, mp.Bodega, mp.Fecha
-    FROM PRDProduccionMateriaPrima mp
-    WHERE EXISTS (
-      SELECT 1 FROM SEL_Bultos b
-      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
-      WHERE ej.IdOrden = @idOrden
-        AND mp.Elemento = b.refsalida
-        AND mp.Fecha = DATEFROMPARTS(b.agno, b.mes, b.dia)
-        AND mp.Lote = RIGHT('0' + CAST(b.mes AS VARCHAR(2)), 2) + RIGHT('0' + CAST(b.dia AS VARCHAR(2)), 2)
-    )
-    ORDER BY mp.Fecha ASC, mp.Detalle ASC
-  `);
-
-  // Rollos CON hora (SEL_RolloEjecucion, ver agregar_rollo_ejecucion.sql). Es lo que permite decir
-  // de que rollo salio cada paquete. Solo existe para ordenes posteriores a ese cambio: si no hay
-  // filas, el reporte cae a la lista sin hora de arriba y deja la columna "Rollo" en blanco.
-  let rollosConHora = [];
-  try {
-    const dtRollosHora = await p.request().input('idOrden', idOrden).query(`
-      SELECT re.Serial AS Tiquete, re.Cantidad, re.LoteMP, re.Bodega, re.FechaHora, re.EsInicio,
-             b.num_bulto AS NumBulto
-      FROM SEL_RolloEjecucion re
-      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = re.id_ejecucion
-      LEFT JOIN SEL_Bultos b ON b.id = re.id_bulto
-      WHERE ej.IdOrden = @idOrden ORDER BY re.FechaHora ASC
-    `);
-    rollosConHora = dtRollosHora.recordset;
-  } catch (err) {
-    console.error('Reporte: no se pudo leer SEL_RolloEjecucion (¿falta ejecutar agregar_rollo_ejecucion.sql?):', err.message);
-  }
-
-  // Los bultos completos (no solo los que tienen paquetes): sus aperturas y cierres son eventos de
-  // la bitacora por si solos.
-  const dtBultos = await p.request().input('idOrden', idOrden).query(`
-    SELECT b.id, b.num_bulto, b.estado, b.HoraInicio, b.HoraFin, ISNULL(b.number_paqu,0) AS Paquetes,
-           b.CantidadTotal
-    FROM SEL_Bultos b
-    INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
-    WHERE ej.IdOrden = @idOrden AND b.estado <> 'Anulado'
-    ORDER BY b.num_bulto ASC
-  `);
-
-  // DuracionMinutos viene NULL en todas las filas registradas hasta hoy (el POST de pausar no la
-  // calcula al reanudar), asi que el reporte la deriva con DATEDIFF en vez de imprimir un guion.
-  const dtActividades = await p.request().input('idOrden', idOrden).query(`
-    SELECT tm.Tipo, tm.Subtipo, tm.HoraInicio, tm.HoraFin, tm.Observaciones,
-           ISNULL(tm.DuracionMinutos, DATEDIFF(MINUTE, tm.HoraInicio, tm.HoraFin)) AS Minutos,
-           op.Nombre AS OperarioNombre
-    FROM SEL_TiempoMuerto tm
-    INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = tm.id_ejecucion
-    LEFT JOIN PRDOperarios op ON op.Codigo = tm.Operario
-    WHERE ej.IdOrden = @idOrden ORDER BY tm.HoraInicio ASC
-  `);
-
-  // SEL_ChequeoCalidad existe en la base de produccion pero NO en carlixplastPrueba (comprobado
-  // 09/09/2026) -- igual que con la temperatura, el reporte sale sin ese bloque en vez de reventar
-  // cuando se esta probando contra esa base.
-  let calidad = [];
-  try {
-    const dtCalidad = await p.request().input('idOrden', idOrden).query(`
-      SELECT c.IdChequeo, c.FechaHora, c.id_bulto, op.Nombre AS OperarioNombre,
-             d.Apartado, d.Pregunta, d.Respuesta
-      FROM SEL_ChequeoCalidad c
-      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = c.id_ejecucion
-      LEFT JOIN SEL_ChequeoCalidadDetalle d ON d.IdChequeo = c.IdChequeo
-      LEFT JOIN PRDOperarios op ON op.Codigo = c.Operario
-      WHERE ej.IdOrden = @idOrden ORDER BY c.FechaHora ASC, d.IdDetalle ASC
-    `);
-    calidad = dtCalidad.recordset;
-  } catch (err) {
-    console.error('Reporte: no se pudo leer SEL_ChequeoCalidad en esta base:', err.message);
-  }
-
-  // La tabla de temperatura puede no existir todavia (el script SQL se ejecuta aparte, a mano):
-  // en ese caso el reporte sale igual con la columna vacia en vez de reventar.
-  let temperaturas = [];
-  try {
-    const dtTemp = await p.request().input('idOrden', idOrden).query(`
-      SELECT t.Porcentaje, t.FechaHora
-      FROM SEL_TemperaturaPerilla t
-      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = t.id_ejecucion
-      WHERE ej.IdOrden = @idOrden ORDER BY t.FechaHora ASC
-    `);
-    temperaturas = dtTemp.recordset;
-  } catch (err) {
-    console.error('Reporte: no se pudo leer SEL_TemperaturaPerilla (¿falta ejecutar agregar_temperatura_perilla.sql?):', err.message);
-  }
-
-  // Respuestas del protocolo de arranque (peligro quimico, estado del rollo, peligro fisico) --
-  // mismo blindaje que las dos de arriba: si todavia no se corrio agregar_protocolo_arranque.sql
-  // en esta base, el reporte sale sin ese bloque en vez de reventar.
-  let protocolo = [];
-  try {
-    const dtProtocolo = await p.request().input('idOrden', idOrden).query(`
-      SELECT pa.Paso, pa.Respuesta, pa.Serial, pa.Observaciones, pa.FechaHora, op.Nombre AS OperarioNombre
-      FROM SEL_ProtocoloArranque pa
-      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = pa.id_ejecucion
-      LEFT JOIN PRDOperarios op ON op.Codigo = pa.Operario
-      WHERE ej.IdOrden = @idOrden ORDER BY pa.Id ASC
-    `);
-    protocolo = dtProtocolo.recordset;
-  } catch (err) {
-    console.error('Reporte: no se pudo leer SEL_ProtocoloArranque (¿falta ejecutar agregar_protocolo_arranque.sql?):', err.message);
-  }
-
-  return {
-    orden: dtOrden.recordset[0],
-    numeroPlanilla: dtOP.recordset.length ? String(dtOP.recordset[0].OrdenProduccion).trim() : String(idOrden),
-    ejecucion: dtEjecucion.recordset[0] || null,
-    paquetes: dtPaquetes.recordset,
-    bultos: dtBultos.recordset,
-    // Si ya hay linea de tiempo de rollos se usa esa (trae la hora); si no, la lista plana de
-    // materia prima, que sirve para enumerarlos pero no para ubicarlos en el tiempo.
-    rollos: rollosConHora.length ? rollosConHora : dtRollos.recordset,
-    hayHoraDeRollos: rollosConHora.length > 0,
-    actividades: dtActividades.recordset,
-    calidad,
-    temperaturas,
-    protocolo
-  };
-}
-
-// "Ancho 8 Largo 16 Calibre 4  [PUL]" sale del Nombre del elemento en INVElementos -- no hay
-// columnas numericas de medida en la base, el dato solo vive dentro de ese texto (y codificado en
-// la Referencia, ej. BBDTRSTA8L16C4L0). Se recorta a la parte de la medida para el encabezado.
-function medidaDeBolsa(nombreElemento) {
-  const texto = String(nombreElemento || '');
-  const m = texto.match(/Ancho\s+[\d.]+\s+Largo\s+[\d.]+\s+Calibre\s+[\d.]+\s*(\[[^\]]+\])?/i);
-  return m ? m[0].replace(/\s+/g, ' ').trim() : '—';
-}
-
-// OJO CON LA ZONA HORARIA (comprobado 09/09/2026 contra la base): SQL Server guarda y devuelve
-// hora LOCAL de Colombia (GETDATE() = 14:39 cuando aca son las 14:39), pero el driver mssql la
-// entrega como Date de JS interpretandola como UTC. Si se formatea con toLocaleTimeString a secas,
-// el navegador le vuelve a restar 5 horas y un paquete pesado a las 14:39 se imprime "09:39".
-// Por eso se formatea con timeZone 'UTC': asi se muestran los campos tal como estan guardados, que
-// es justo la hora de pared que vio el operario. Las comparaciones y el orden de la bitacora no se
-// ven afectados -- todos los valores estan corridos por igual.
-// (Lo mismo le pasa a formatearFechaHora(), que usa la cola de ordenes; ahi el error existe desde
-// antes y no se toca en este cambio.)
-function horaCorta(fecha) {
-  if (!fecha) return '—';
-  return new Date(fecha).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' });
-}
-
-// Fecha + hora de un campo de la base, con el mismo cuidado de zona horaria que horaCorta().
-function fechaHoraLocalBD(fecha) {
-  if (!fecha) return '';
-  return new Date(fecha).toLocaleString('es-CO', {
-    day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
-    hour12: false, timeZone: 'UTC'
-  });
-}
-
-const ETIQUETA_ACTIVIDAD = {
-  descanso: 'Descanso', mantenimiento: 'Mantenimiento', alistamiento: 'Alistamiento',
-  orden_aseo: 'Orden y aseo', limpieza: 'Limpieza', otro: 'Otro'
-};
-
-// Planilla horizontal de produccion y seguimiento -- Sellado. Reproduce el formato en papel que ya
-// se usa en planta (foto del formato diligenciado, 10/09/2026): mismos bloques, mismas columnas y
-// el mismo orden, para que quien la lea no tenga que reaprender nada y se pueda archivar junto a
-// las que estan llenas a mano.
-//
-// Decisiones que vienen del papel, no del sistema:
-//   - UNA FILA POR BULTO, no por paquete, y los tiempos muertos ocupan una fila propia con un punto
-//     en "No. BULTOS" y la descripcion en "MEDIDA PROGRAMADA" -- igual que "Limpieza y desinfeccion"
-//     o "Cambio de rollo" escritos a mano en el formato original.
-//   - Las columnas de caracteristicas son FIJAS (las 11 preguntas, 22 casillas C/NC), no dependen de
-//     si la referencia lleva impresion o troquelado. En el papel siempre estan las mismas columnas y
-//     el operario tacha con "/" las que no aplican; una planilla con columnas variables no se podria
-//     archivar junto a las demas.
-//   - Lo que el sistema NO registra se deja en blanco para diligenciar a mano: medida verificada,
-//     retales, temperaturas en °C y los cuadros de recibo/entrega de turno.
-function renderReporteProduccion(datos, maquinaCodigo) {
-  const {
-    orden, numeroPlanilla, ejecucion, paquetes, bultos, rollos,
-    actividades, calidad, temperaturas, protocolo
-  } = datos;
-  const esc = (t) => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-  const pistas = ejecucion && ejecucion.BolsasxGolpe ? ejecucion.BolsasxGolpe : '';
-  // En el papel la medida se anota corta ("12x18x2 - 60 - transp"), no con las palabras completas
-  // que trae el nombre del elemento -- la columna es angosta y asi es como la escribe el operario.
-  const medidaLarga = medidaDeBolsa(orden.NombreElemento);
-  const m = medidaLarga.match(/Ancho\s+([\d.]+)\s+Largo\s+([\d.]+)\s+Calibre\s+([\d.]+)/i);
-  const medida = m ? `${m[1]} x ${m[2]} · cal ${m[3]}` : medidaLarga;
-
-  // Bloque de caracteristicas: SIEMPRE las mismas columnas (ver comentario de arriba), por eso se
-  // pide construirApartadosCalidad con todas las banderas en true.
-  const apartados = construirApartadosCalidad({
-    tieneImpresion: true, tieneAccesorios: true, tieneTroquelado: true, tienePerforaciones: true
-  });
-  const preguntasTodas = apartados.flatMap(ap => ap.preguntas.map(pr => ({ ...pr, apartado: ap.titulo })));
-
-  // Resultado por bulto y pregunta: C / NC / vacio. Se marca por PREGUNTA (no por apartado) porque
-  // el formato tiene una pareja de casillas por cada pregunta.
-  const respuestaPorBultoPregunta = new Map();
-  for (const c of calidad) {
-    if (c.id_bulto == null || !c.Pregunta) continue;
-    respuestaPorBultoPregunta.set(c.id_bulto + '|' + c.Pregunta, c.Respuesta);
-  }
-  function celdasCNC(idBulto) {
-    return preguntasTodas.map(pr => {
-      const r = respuestaPorBultoPregunta.get(idBulto + '|' + pr.clave);
-      return `<td class="cnc">${r != null && r !== 'NoConforme' ? 'X' : ''}</td>` +
-             `<td class="cnc ${r === 'NoConforme' ? 'malo' : ''}">${r === 'NoConforme' ? 'X' : ''}</td>`;
-    }).join('');
-  }
-  const CELDAS_CNC_VACIAS = preguntasTodas.map(() => '<td class="cnc"></td><td class="cnc"></td>').join('');
-
-  // Rollos: en el papel el tiquete se escribe en la fila donde ese rollo entra a la maquina, no en
-  // todas. Sin SEL_RolloEjecucion (ordenes anteriores a ese registro) no se sabe en que momento
-  // entro cada uno: en ese caso se listan todos en la primera fila de produccion, que es donde el
-  // operario los habria anotado.
-  const rollosConHora = rollos.filter(r => r.FechaHora);
-  const rollosSinHora = rollos.filter(r => !r.FechaHora);
-
-  const paquetesPorBulto = new Map();
-  const kilosPorBulto = new Map();
-  for (const pq of paquetes) {
-    paquetesPorBulto.set(pq.IdBulto, (paquetesPorBulto.get(pq.IdBulto) || 0) + 1);
-    kilosPorBulto.set(pq.IdBulto, (kilosPorBulto.get(pq.IdBulto) || 0) + (pq.PesoPaqueGr != null ? Number(pq.PesoPaqueGr) : 0));
-  }
-
-  // Filas: bultos, tiempos muertos y montajes de rollo, todo en una sola secuencia cronologica.
-  const filasCronologicas = [
-    ...bultos.map(b => ({ ms: new Date(b.HoraInicio).getTime(), orden: 1, tipo: 'bulto', b })),
-    ...actividades.map(a => ({ ms: new Date(a.HoraInicio).getTime(), orden: 2, tipo: 'parada', a })),
-    ...rollosConHora.map(r => ({ ms: new Date(r.FechaHora).getTime(), orden: 0, tipo: 'rollo', r }))
-  ].sort((x, y) => x.ms - y.ms || x.orden - y.orden);
-
-  let primeraProduccion = true;
-  const filas = filasCronologicas.map(f => {
-    if (f.tipo === 'rollo') {
-      // Montaje de rollo: en el papel es la fila donde se anota el tiquete y se repite la medida.
-      return `
-      <tr class="fila-rollo">
-        <td class="tiquete">${esc(f.r.Tiquete)}</td>
-        <td class="medida-prog">${esc(medida)}${f.r.Cantidad != null ? ' · ' + Number(f.r.Cantidad).toFixed(2) + ' kg' : ''}</td>
-        <td class="cen">•</td>
-        <td></td><td></td>
-        <td class="cen">${horaCorta(f.r.FechaHora)}</td>
-        <td></td><td></td>
-        ${CELDAS_CNC_VACIAS}
-        <td></td><td></td><td></td><td></td><td></td><td></td>
-      </tr>`;
-    }
-    if (f.tipo === 'parada') {
-      const a = f.a;
-      const etiqueta = ETIQUETA_ACTIVIDAD[a.Tipo] || a.Tipo;
-      return `
-      <tr class="parada">
-        <td></td>
-        <td class="medida-prog">${esc(etiqueta)}${a.Subtipo ? ' · ' + esc(a.Subtipo) : ''}${a.Observaciones ? ' · ' + esc(a.Observaciones) : ''}${a.Minutos != null ? ' (' + a.Minutos + ' min)' : ''}</td>
-        <td class="cen">•</td>
-        <td></td><td></td>
-        <td class="cen">${horaCorta(a.HoraInicio)}</td>
-        <td class="cen">${a.HoraFin ? horaCorta(a.HoraFin) : ''}</td>
-        <td></td>
-        ${CELDAS_CNC_VACIAS}
-        <td></td><td></td><td></td><td></td><td></td><td></td>
-      </tr>`;
-    }
-    const b = f.b;
-    const nPaquetes = paquetesPorBulto.get(b.id) || b.Paquetes || 0;
-    // El tiquete y la medida se escriben una sola vez, al empezar la referencia (igual que en el
-    // papel); si no hay linea de tiempo de rollos, ahi mismo van todos los que se consumieron.
-    const tiquete = primeraProduccion && rollosConHora.length === 0
-      ? rollosSinHora.map(r => esc(r.Tiquete)).join('<br>') : '';
-    const medidaCelda = primeraProduccion ? esc(medida) : '';
-    primeraProduccion = false;
-    return `
-      <tr>
-        <td class="tiquete">${tiquete}</td>
-        <td class="medida-prog">${medidaCelda}</td>
-        <td class="cen">${b.num_bulto}</td>
-        <td class="cen">${pistas}</td>
-        <td class="num">${(nPaquetes * UNIDADES_POR_PAQUETE).toLocaleString('es-CO')}</td>
-        <td class="cen">${horaCorta(b.HoraInicio)}</td>
-        <td class="cen">${b.HoraFin ? horaCorta(b.HoraFin) : ''}</td>
-        <td></td>
-        ${celdasCNC(b.id)}
-        <td class="cen">${nPaquetes ? UNIDADES_POR_PAQUETE : ''}</td>
-        <td></td><td></td>
-        <td></td><td></td><td></td>
-      </tr>`;
-  }).join('');
-
-  // Renglones libres: una planilla siempre sale con espacio para seguir escribiendo, aunque se
-  // imprima a mitad del turno.
-  const FILAS_EN_BLANCO = 8;
-  const filasVacias = Array.from({ length: FILAS_EN_BLANCO }, () => `
-      <tr class="vacia">
-        <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
-        ${CELDAS_CNC_VACIAS}
-        <td></td><td></td><td></td><td></td><td></td><td></td>
-      </tr>`).join('');
-
-  const totalPaquetes = paquetes.length;
-  const totalUnidades = totalPaquetes * UNIDADES_POR_PAQUETE;
-  const totalKg = paquetes.reduce((s, p) => s + (p.PesoPaqueGr != null ? Number(p.PesoPaqueGr) : 0), 0);
-
-  // ---- Controles de inocuidad: los cinco items del formato, en el mismo orden del papel ----
-  // Cada uno se cruza con el paso del protocolo de arranque que lo registra (ver
-  // agregar_protocolo_arranque.sql). Ojo con el sentido de la respuesta: en las preguntas de
-  // peligro el hallazgo malo es "Si"; en "¿el rollo esta en buen estado?" el bueno es "Si".
-  const ITEMS_INOCUIDAD = [
-    { texto: 'Verificación del estado de los rollos', paso: 'rollo_estado', malaSi: 'No' },
-    { texto: 'Verificación de temperatura', paso: 'temperatura' },
-    { texto: 'Limpieza y desinfección de superficies en contacto directo (Rodillos, Cuerdas, Mesa de Recepción, Tapete, Utensilios)', paso: 'limpieza' },
-    { texto: 'Inspección de peligros físicos (Cabellos, Insectos, Material Extraño, Material Particulado)', paso: 'peligro_fisico', malaSi: 'Si' },
-    { texto: 'Inspección de peligros químicos (Aceites y Lubricantes)', paso: 'peligro_quimico', malaSi: 'Si' }
-  ];
-  const filasInocuidad = ITEMS_INOCUIDAD.map(item => {
-    // Un paso puede repetirse (ej. se rechazo un rollo y se escaneo otro): manda el ultimo.
-    const registros = protocolo.filter(x => x.Paso === item.paso);
-    const r = registros.length ? registros[registros.length - 1] : null;
-    const cumple = r == null ? null : (item.malaSi ? r.Respuesta !== item.malaSi : true);
-    const detalle = r == null ? ''
-      : (item.paso === 'temperatura' ? esc(String(r.Respuesta || '')) + ' %' : horaCorta(r.FechaHora));
-    return `
-      <tr>
-        <td class="item-inoc">${esc(item.texto)}</td>
-        <td class="cnc">${cumple === true ? '✓' : ''}</td>
-        <td class="cnc ${cumple === false ? 'malo' : ''}">${cumple === false ? 'X' : ''}</td>
-        <td class="cen chico">${detalle}</td>
-      </tr>`;
-  }).join('');
-
-  // Turno: el formato marca con X una de las cinco casillas (D V M T N). La orden guarda el turno
-  // como numero (SEL_OrdenProduccion.Turno), asi que se marca la que corresponda a ese numero.
-  const TURNOS = [['D', 1], ['V', 2], ['M', 3], ['T', 4], ['N', 5]];
-  const turnoOrden = orden.Turno != null ? Number(orden.Turno) : null;
-
-  // Fecha del formato, partida en DD / MM / AA como las casillas del papel.
-  const fechaBase = ejecucion && ejecucion.HoraInicioReal ? new Date(ejecucion.HoraInicioReal)
-    : (orden.FechaProgramada ? new Date(orden.FechaProgramada) : null);
-  const dd = fechaBase ? String(fechaBase.getUTCDate()).padStart(2, '0') : '';
-  const mm = fechaBase ? String(fechaBase.getUTCMonth() + 1).padStart(2, '0') : '';
-  const aa = fechaBase ? String(fechaBase.getUTCFullYear()) : '';
-
-  // Nombre con el que el navegador propone guardar el PDF (ver el <title> mas abajo).
-  const hoy = new Date();
-  const fechaArchivo = String(hoy.getDate()).padStart(2, '0') + '-' +
-                       String(hoy.getMonth() + 1).padStart(2, '0') + '-' + hoy.getFullYear();
-  const nombreArchivo = `Planilla ${numeroPlanilla} - pedido ${(orden.NumeroPedido || 'sin pedido')} - ${fechaArchivo}`
-    .replace(/[\\/:*?"<>|]/g, '-');
-
-  return `<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- El titulo es tambien el NOMBRE DEL ARCHIVO que propone el navegador al guardar como PDF, por
-eso lleva planilla/pedido/fecha y no un titulo bonito: asi el digitador no termina con veinte
-"documento.pdf". Se evitan / \\ : * ? " < > | porque Windows no los admite en un nombre. -->
-<title>${esc(nombreArchivo)}</title>
-<style>
-  /* Hoja carta HORIZONTAL, como el formato en papel: solo el bloque de caracteristicas ya son 22
-  casillas C/NC, imposible de pie. */
-  @page { size: letter landscape; margin: 6mm; }
-  * { box-sizing: border-box; }
-  body {
-    font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
-    margin: 0; padding: 12px; background: #eceff1; color: #000; font-size: 11px;
-  }
-  .hoja { max-width: 1500px; margin: 0 auto; background: #fff; padding: 8px; }
-  .barra { display: flex; gap: 10px; justify-content: flex-end; margin: 0 auto 12px; max-width: 1500px; }
-  .btn {
-    appearance: none; border: none; border-radius: 8px; padding: 11px 18px; font-size: 14px;
-    font-weight: 600; font-family: inherit; color: #fff; background: #71bf44; cursor: pointer;
-  }
-  .btn.gris { background: #64748b; text-decoration: none; display: inline-block; }
-  .btn.azul { background: #006984; }
-  .ayuda-pdf {
-    max-width: 1500px; margin: 0 auto 12px; background: #e2eff3; border-left: 4px solid #006984;
-    padding: 10px 14px; font-size: 13px; border-radius: 6px;
-  }
-
-  table { border-collapse: collapse; width: 100%; }
-  td, th { border: 1px solid #000; padding: 1px 3px; vertical-align: middle; }
-  th { font-size: 7.5px; text-transform: uppercase; text-align: center; font-weight: 700; line-height: 1.1; }
-  .cen { text-align: center; }
-  .num { text-align: right; font-variant-numeric: tabular-nums; }
-  .chico { font-size: 8px; }
-  .cnc { text-align: center; width: 15px; font-weight: 700; font-size: 9px; }
-  .malo { background: #f0d2d2; }
-
-  /* --- Encabezado --- */
-  .cab-sup td { vertical-align: middle; }
-  .marca { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; line-height: 1; }
-  .marca .azul { color: #29a3d4; }
-  .marca .verde { color: #7ac143; }
-  .marca .lema { display: block; font-size: 8px; font-weight: 400; color: #555; letter-spacing: 0.02em; }
-  .logo { height: 38px; display: block; }
-  .titulo-form { text-align: center; font-size: 17px; font-weight: 700; letter-spacing: 0.01em; }
-  .n-planilla { text-align: center; font-size: 15px; font-weight: 700; color: #1b4f8a; }
-  .et { font-size: 7.5px; text-transform: uppercase; letter-spacing: 0.02em; }
-  .va { font-weight: 700; }
-  .campo-linea { font-size: 11px; }
-  .tabla-fecha td, .tabla-fecha th { padding: 0 3px; font-size: 9px; text-align: center; }
-
-  /* --- Tabla principal --- */
-  .principal th { padding: 1px 2px; }
-  .principal td { height: 15px; font-size: 9.5px; }
-  .principal tr.vacia td { height: 17px; }
-  .principal tr.parada td, .principal tr.fila-rollo td { background: #f1f1f1; }
-  .principal tr.parada .medida-prog { font-style: italic; }
-  .tiquete { font-size: 8px; font-family: ui-monospace, Consolas, monospace; }
-  .medida-prog { font-size: 9px; }
-  .vert {
-    writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap;
-    font-size: 7px; font-weight: 700; height: 118px; padding: 2px 0; letter-spacing: 0;
-  }
-  .grupo { font-size: 8px; }
-
-  /* --- Bloques inferiores --- */
-  .inferior { display: grid; grid-template-columns: 1fr 1fr 1.5fr 2.1fr; gap: 0; margin-top: 4px; }
-  .inferior > div { border: 1px solid #000; border-left: none; }
-  .inferior > div:first-child { border-left: 1px solid #000; }
-  .titulo-bloque {
-    background: #e8eaec; text-align: center; font-size: 9px; font-weight: 700; text-transform: uppercase;
-    border-bottom: 1px solid #000; padding: 2px;
-  }
-  .bloque-turno table { border: none; }
-  .bloque-turno td { border: none; border-bottom: 1px solid #bbb; font-size: 9px; height: 17px; }
-  .sub-bloque { text-align: center; font-size: 8.5px; font-weight: 700; background: #f3f4f5; border-top: 1px solid #000; border-bottom: 1px solid #000; padding: 1px; }
-  .item-inoc { font-size: 8px; line-height: 1.15; }
-  .area-libre { height: 100%; min-height: 96px; }
-  .notas { display: flex; justify-content: space-between; gap: 12px; font-size: 7.5px; margin-top: 3px; }
-  .notas b { font-weight: 700; }
-
-  @media print {
-    body { background: #fff; padding: 0; font-size: 10px; }
-    .hoja { max-width: none; padding: 0; }
-    .barra, .ayuda-pdf { display: none !important; }
-    thead { display: table-header-group; }
-    tr { break-inside: avoid; }
-    th, .titulo-bloque, .sub-bloque, .principal tr.parada td, .principal tr.fila-rollo td, .malo {
-      -webkit-print-color-adjust: exact; print-color-adjust: exact;
-    }
-  }
-</style>
-</head>
-<body>
-  <div class="barra">
-    <a class="btn gris" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}">← Volver</a>
-    <button type="button" class="btn azul" onclick="guardarPdf()">📄 Guardar PDF</button>
-    <button type="button" class="btn" onclick="window.print()">🖨️ Imprimir</button>
-  </div>
-  <div class="ayuda-pdf" id="ayuda-pdf" hidden>
-    En la ventana que se abre, elija <strong>“Guardar como PDF”</strong> en <em>Destino</em>
-    (en la tableta: <strong>“Guardar como PDF”</strong> en la lista de impresoras), confirme que la
-    orientación sea <strong>horizontal</strong> y acepte.
-    El archivo se propone como <strong>${esc(nombreArchivo)}</strong>.
-  </div>
-
-  <div class="hoja">
-    <!-- ==================== Encabezado de identificacion ==================== -->
-    <table class="cab-sup">
-      <tr>
-        <td style="width:190px" rowspan="2">
-          <img class="logo" src="/logo-carlixplast.png" alt=""
-               onerror="this.style.display='none';document.getElementById('marca-texto').style.display='block'">
-          <span class="marca" id="marca-texto" style="display:none">
-            <span class="azul">Carlix</span><span class="verde">plast</span>
-            <span class="lema">Soluciones Amigables</span>
-          </span>
-        </td>
-        <td class="titulo-form" rowspan="2">PLANILLA PRODUCCIÓN Y SEGUIMIENTO - SELLADO</td>
-        <td style="width:110px" class="cen"><span class="et">N.º</span><div class="n-planilla">${esc(numeroPlanilla)}</div></td>
-        <td style="width:150px" class="cen">
-          <span class="et">Fecha</span>
-          <table class="tabla-fecha">
-            <tr><th>DD</th><th>MM</th><th>AA</th></tr>
-            <tr><td>${esc(dd)}</td><td>${esc(mm)}</td><td>${esc(aa)}</td></tr>
-          </table>
-        </td>
-      </tr>
-      <tr>
-        <td class="cen" colspan="2">
-          <span class="et">Turno</span>
-          <table class="tabla-fecha">
-            <tr>${TURNOS.map(([letra]) => `<th>${letra}</th>`).join('')}</tr>
-            <tr>${TURNOS.map(([, num]) => `<td>${turnoOrden === num ? 'X' : num}</td>`).join('')}</tr>
-          </table>
-        </td>
-      </tr>
-      <tr>
-        <td class="campo-linea"><span class="et">Máquina No.</span> <span class="va">${esc(orden.MaquinaNombre)}</span></td>
-        <td class="campo-linea"><span class="et">Operario</span> <span class="va">${esc(ejecucion && ejecucion.OperarioNombre || '')}</span></td>
-        <td class="campo-linea"><span class="et">Letra</span></td>
-        <td class="campo-linea"><span class="et">Pedido</span> <span class="va">${esc(orden.NumeroPedido || '')}</span></td>
-      </tr>
-    </table>
-
-    <!-- ==================== Tabla principal ==================== -->
-    <table class="principal">
-      <thead>
-        <tr>
-          <th colspan="8" class="grupo">Listado de producción</th>
-          <th colspan="${preguntasTodas.length * 2}" class="grupo">Seguimiento y medición al producto · Características - parámetros de aceptación</th>
-          <th colspan="6" class="grupo">Registro final</th>
-        </tr>
-        <tr>
-          <th rowspan="2" style="width:74px">No. tiquete rollo</th>
-          <th rowspan="2" style="width:130px">Medida programada</th>
-          <th rowspan="2" style="width:26px">No. bultos</th>
-          <th rowspan="2" style="width:26px">No. pistas</th>
-          <th rowspan="2" style="width:48px">Cantidad unds x bulto</th>
-          <th colspan="2">Hora</th>
-          <th rowspan="2" style="width:74px">Medida verificada (ancho/largo/#pliegues/calibre)</th>
-          ${apartados.map(ap => `<th colspan="${ap.preguntas.length * 2}" class="grupo">${esc(ap.titulo)}</th>`).join('')}
-          <th rowspan="2" style="width:40px">Cantidad unidades por paquete</th>
-          <th colspan="2">Retales</th>
-          <th colspan="3">Temperatura (°C)</th>
-        </tr>
-        <tr>
-          <th style="width:34px">Inicio</th>
-          <th style="width:34px">Final</th>
-          ${preguntasTodas.map(pr => `<th class="vert" colspan="2">${esc(pr.titulo)}</th>`).join('')}
-          <th class="vert" style="height:60px">Retal</th>
-          <th class="vert" style="height:60px">Salida no conforme</th>
-          <th class="vert" style="height:60px">Mordaza superior</th>
-          <th class="vert" style="height:60px">Mordaza inferior</th>
-          <th class="vert" style="height:60px">Sello longitudinal</th>
-        </tr>
-        <tr>
-          <th colspan="8"></th>
-          ${preguntasTodas.map(() => '<th>C</th><th>NC</th>').join('')}
-          <th colspan="6"></th>
-        </tr>
-      </thead>
-      <tbody>
-        ${filas}
-        ${filasVacias}
-      </tbody>
-    </table>
-
-    <!-- ==================== Bloques inferiores ==================== -->
-    <div class="inferior">
-      <div class="bloque-turno">
-        <div class="titulo-bloque">Recibo turno</div>
-        <table>
-          <tr><td>BOLSAS:</td></tr>
-          <tr><td>KILOS:</td></tr>
-          <tr><td>MEDIDA:</td></tr>
-          <tr><td>No. DE PEDIDO:</td></tr>
-        </table>
-        <div class="sub-bloque">Sin planillar</div>
-        <table>
-          <tr><td>BOLSAS:</td></tr>
-          <tr><td>MEDIDA:</td></tr>
-          <tr><td>No. DE PEDIDO:</td></tr>
-        </table>
-      </div>
-      <div class="bloque-turno">
-        <div class="titulo-bloque">Entrego turno</div>
-        <table>
-          <tr><td>BOLSAS:</td></tr>
-          <tr><td>KILOS:</td></tr>
-          <tr><td>MEDIDA:</td></tr>
-          <tr><td>No. DE PEDIDO:</td></tr>
-        </table>
-        <div class="sub-bloque">Sin planillar</div>
-        <table>
-          <tr><td>BOLSAS:</td></tr>
-          <tr><td>MEDIDA:</td></tr>
-          <tr><td>No. DE PEDIDO:</td></tr>
-        </table>
-      </div>
-      <div>
-        <div class="titulo-bloque">Controles de calidad</div>
-        <div class="area-libre"></div>
-      </div>
-      <div>
-        <div class="titulo-bloque">Controles de inocuidad</div>
-        <table>
-          <thead>
-            <tr>
-              <th>Ítem verificado</th>
-              <th style="width:16px">C</th>
-              <th style="width:16px">NC</th>
-              <th style="width:52px">Verificado por</th>
-            </tr>
-          </thead>
-          <tbody>${filasInocuidad}</tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="notas">
-      <span><b>NOTA:</b> AL FINALIZAR CADA REFERENCIA ANOTAR EL RETAL Y/O SALIDA NO CONFORME.</span>
-      <span><b>NOTA:</b> TU-TULA, MN-MANIJA, RF-REFUERZO, CA-CINTA ADHESIVA, CH-CIERRE HERMÉTICO, C-CUMPLE, NC-NO CUMPLE.</span>
-      <span>Producido: <b>${totalPaquetes}</b> paq · <b>${totalUnidades.toLocaleString('es-CO')}</b> bolsas · <b>${totalKg.toFixed(2)}</b> kg · Impreso ${new Date().toLocaleString('es-CO', { hour12: false })}</span>
-    </div>
-  </div>
-<script>
-  // Guardar como PDF sale del MISMO dialogo de impresion (destino "Guardar como PDF"), no de una
-  // libreria: el servidor de planta corre en una red local sin salida a internet y sin Chrome
-  // headless instalado, asi que meter puppeteer/jsPDF seria cargarle al proyecto cientos de MB (o
-  // una imagen rasterizada, con el texto de la tabla ilegible) para hacer lo que el navegador ya
-  // hace nativo y con texto seleccionable. Lo unico que aporta este boton sobre "Imprimir" es
-  // recordar donde esta la opcion -- el nombre del archivo ya lo resuelve el <title>.
-  function guardarPdf() {
-    var ayuda = document.getElementById('ayuda-pdf');
-    if (ayuda) ayuda.hidden = false;
-    // Un respiro para que el aviso alcance a pintarse antes de que el dialogo bloquee la pagina.
-    setTimeout(function() { window.print(); }, 60);
-  }
-</script>
-</body>
-</html>`;
-}
-
-app.get('/selladora/:codigo/orden/:idOrden/reporte', requireLogin, async (req, res) => {
-  const { codigo, idOrden } = req.params;
-  try {
-    const p = await getPool();
-    const datos = await obtenerDatosReporte(p, idOrden);
-    if (!datos) return res.status(404).send(renderErrorSimple('Orden no encontrada.', `/selladora/${codigo}`));
-    res.send(renderReporteProduccion(datos, codigo));
-  } catch (err) {
-    res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}/orden/${idOrden}`));
-  }
-});
-
 // Temperatura de la perilla que digita el operario (ver agregar_temperatura_perilla.sql). Se
-// guarda con la hora para que el reporte pueda decir que valor estaba puesto en cada paquete.
+// guarda con la hora, para saber que valor estaba puesto en cada momento de la orden.
 app.post('/api/selladora/orden/:idOrden/temperatura', requireLogin, async (req, res) => {
   const idOrden = Number(req.params.idOrden);
   const porcentaje = Number(req.body && req.body.porcentaje);
@@ -6621,24 +6521,25 @@ app.post('/api/comando', requireLogin, async (req, res) => {
       usuario: req.session.usuario.codigo,
       datos: datos || null
     });
-    // Al responder Calidad, se reprograma el proximo chequeo (otros 20-30 min desde ahora, ver
-    // calcularProximaCalidad) y se guarda lo respondido en SEL_ChequeoCalidad/Detalle (ver
-    // registrarChequeoCalidad, 03/09/2026) -- si cualquiera de las dos cosas fallara no se revienta
-    // el comando ya enviado a Node-RED, solo se registra en consola.
+    // Al responder Calidad se guarda lo respondido en SEL_ChequeoCalidad/Detalle (ver
+    // registrarChequeoCalidad, 03/09/2026) -- si eso fallara no se revienta el comando ya enviado a
+    // Node-RED, solo se registra en consola.
+    // Desde el 11/09/2026 ya no hay nada mas que reprogramar: la fila de SEL_ChequeoCalidad que
+    // escribe registrarChequeoCalidad ES lo que marca el bulto como revisado, y es justo lo que
+    // /calidad-pendiente consulta para no volver a pedirlo. Ojo con eso: si el chequeo no se
+    // guarda, la tableta lo vuelve a pedir a los 5 minutos (asi debe ser -- el bulto sigue sin
+    // registro de calidad).
     if (comando === 'calidad') {
       try {
         const p = await getPool();
-        await p.request().input('idOrden', Number(idOrden)).input('proximaCalidad', calcularProximaCalidad()).query(
-          `UPDATE SEL_EjecucionOrden SET ProximaCalidad = @proximaCalidad WHERE IdOrden = @idOrden`
-        );
         const operarioCodigo = req.session.usuario.codigoOperarioPRD;
         if (operarioCodigo) {
           await registrarChequeoCalidad(p, { idOrden: Number(idOrden), operarioCodigo, respuestas: datos });
         } else {
           console.error('No se guardo el chequeo de Calidad: el usuario no tiene codigoOperarioPRD.');
         }
-      } catch (errReprogramar) {
-        console.error('Error reprogramando ProximaCalidad / guardando chequeo de Calidad:', errReprogramar.message);
+      } catch (errGuardar) {
+        console.error('Error guardando el chequeo de Calidad:', errGuardar.message);
       }
     }
     res.json({ ok: true });
