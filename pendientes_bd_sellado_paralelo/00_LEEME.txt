@@ -1,0 +1,61 @@
+Carpeta armada el 13/09/2026 -- junta TODO lo que quedo pendiente de correr contra la base de
+datos (Sellado en Paralelo + Modificar cantidad de bolsas), partido en archivos chicos SIN "GO"
+para que cada uno se pueda ejecutar solo (Ctrl+Enter en DBeaver), en vez de correr un script
+grande con varios lotes de una sola vez.
+
+POR QUE SIN GO: "GO" no es SQL real, es un separador de lotes de SSMS/sqlcmd. Algunos pasos
+(agregar una columna y despues usarla, o crear/alterar un trigger o procedimiento) SI necesitan
+ser lotes separados de verdad -- eso no es un capricho de DBeaver, es una regla real de SQL
+Server (el lote completo se compila ANTES de ejecutar cualquier sentencia, así que una columna
+agregada en la sentencia anterior todavía "no existe" para la siguiente si están en el mismo
+lote). Por eso, en vez de GO, cada paso quedo en su PROPIO archivo -- correr un archivo entero de
+punta a punta ya es un solo lote válido.
+
+ORDEN PARA CORRER (contra la base que corresponda -- normalmente PRODUCCION, salvo que quieras
+probar primero en Prueba):
+
+  01_verificar_estado_actual.sql
+      Primero que nada. Es de SOLO LECTURA (no cambia nada) -- te dice, contra la base a la que
+      estés conectado, qué de esto ya existe y qué falta. Volvé a correrlo después de cada paso
+      para confirmar que quedó bien.
+
+  -- Sellado en Paralelo (una entrada, varias referencias de salida) --
+  02_columna_linea_ordenproduccion.sql
+  03_crear_grupoetapascompartidas.sql
+  04_migrar_elemento_grupoetapascompartidaslineas_paso1_columna.sql   (solo si la tabla YA existía con la PK vieja sobre Linea -- si la creaste recién con 03, no hace nada)
+  05_migrar_elemento_grupoetapascompartidaslineas_paso2_backfill.sql  (revisa que la consulta de verificación no devuelva filas antes de seguir al paso 3)
+  06_migrar_elemento_grupoetapascompartidaslineas_paso3_cambiar_pk.sql
+  07_crear_sel_rolloejecucion.sql
+  08_trigger_generarentradainventario_grupo_stub.sql   (crea el trigger vacío si todavía no existe -- no hace nada si ya existe)
+  09_trigger_generarentradainventario_grupo.sql        (el cuerpo real -- resuelve Bodega de una referencia hermana sin materia prima propia)
+  10_sp_anularbultovacio_stub.sql
+  11_sp_anularbultovacio.sql                            (bulto vaciado por un traslado vuelve a 'Temporal' en vez de anularse)
+
+  -- Modificar cantidad de bolsas (independiente de lo anterior) --
+  12_columna_unidadespaquete_pesajeelemento.sql
+  13_backfill_unidadespaquete_pesajeelemento.sql
+
+REQUISITO ANTES DEL PASO 03/04-06: los grupos (PRDGrupoEtapasCompartidas/...Lineas) los crea
+Mirane de escritorio desde Liberación de Pedidos. La versión de Mirane que esté corriendo tiene
+que ser la que ya llena "Elemento" al agrupar (ya está en el código actual, confirmado).
+
+LO QUE **NO** ESTÁ EN ESTA CARPETA A PROPÓSITO:
+
+  - trg_SEL_Bultos_CierreBulto: SIGUE PENDIENTE DE FUSIONAR A MANO. Confirmado que carlixplast
+    (producción) y carlixplastPrueba tienen versiones DISTINTAS de este trigger (Unidades,
+    HoraFinal, TipoPedido dinámico -- cada base tiene algunos fixes y no otros). No arme el
+    script de fusión todavía porque hace falta decidir con vos, mirando 01_verificar_estado_actual.sql
+    contra CADA una de las dos bases, cuál fix tiene cada una antes de combinarlos sin perder nada.
+
+  - Node/corregir_trigger_hermanas_por_linea.sql -- OBSOLETO, no lo corras. Lo había armado yo
+    antes usando "Línea" como llave del grupo, pero la llave real (confirmado 09/09/2026) es
+    "Elemento" -- reemplazado por los pasos 08/09 de esta carpeta.
+
+  - Node/corregir_trigger_cierrebulto_unidades.sql -- OBSOLETO, no lo corras. Lo armé sobre una
+    versión vieja del trigger que no tenía en cuenta los cambios de HoraFinal/TipoPedido que
+    ya existen en las bases reales. Reemplazado por la fusión pendiente de arriba.
+
+  - Node/subir_a_produccion_sellado_paralelo.sql / arreglar_traslado_bulto_vacio.sql -- son el
+    ORIGEN de varios de estos archivos (ya separados acá sin GO); esos dos archivos originales
+    con GO se quedan donde estaban, no hace falta borrarlos, pero para EJECUTAR usá los de esta
+    carpeta.

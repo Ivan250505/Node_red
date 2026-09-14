@@ -83,14 +83,17 @@ async function finalizarOrden(pool, idOrden, generadoPor, operarioFinal) {
   // no tiene nada que ver con este grupo). Elemento por sí solo NO es llave suficiente -- dos
   // pedidos DISTINTOS pueden usar la misma referencia de salida en momentos distintos. Exige
   // también el mismo NumeroPedido en ambos lados (ord1 Y ord2 contra g.Numero).
+  // FIX 13/09/2026 (a pedido del usuario, mismo patrón ya corregido en server.js/scan-rollo.js/
+  // frmLiberacionProduccion.vb para el bug del pedido 11243): la llave real es ord.Linea, no
+  // ord.Elemento -- ver el comentario largo en scan-rollo.js:confirmarRollo.
   const dtGrupo = await pool.request().input('idOrden', idOrden).query(`
     SELECT ord2.IdOrden
     FROM SEL_OrdenProduccion ord1
-    INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Elemento = ord1.Elemento
+    INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Linea = ord1.Linea
     INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl1.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
       AND g.Numero = ord1.NumeroPedido
     INNER JOIN PRDGrupoEtapasCompartidasLineas gl2 ON gl2.IdGrupo = g.IdGrupo
-    INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Elemento = gl2.Elemento AND ord2.NumeroPedido = g.Numero
+    INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gl2.Linea AND ord2.NumeroPedido = g.Numero
     WHERE ord1.IdOrden = @idOrden
   `);
   const idsGrupo = dtGrupo.recordset.length > 0

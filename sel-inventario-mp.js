@@ -421,15 +421,18 @@ async function resolverTipoPedido(db, elemento, codCliente) {
 // arrancó con "Iniciar") para que TODOS los miembros usen el Elemento+LineaAncla de la ANCLA al
 // pedir la OP -- así conviven bajo la misma OP, sin tocar el esquema de PRDOrdenesProduccion.
 // Devuelve null si idOrden no pertenece a ningún grupo SELLADORA (caso normal, sin cambios).
+// FIX 13/09/2026 (a pedido del usuario, mismo patrón ya corregido en server.js/scan-rollo.js/
+// ejecucion-selladora.js/frmLiberacionProduccion.vb para el bug del pedido 11243): la llave real
+// es ord.Linea, no ord.Elemento -- ver el comentario largo en scan-rollo.js:confirmarRollo.
 async function obtenerAnclaGrupoSellado(db, idOrden) {
   const dt = await db.request().input('idOrden', idOrden).query(`
     SELECT TOP 1 ord2.IdOrden, ord2.Elemento
     FROM SEL_OrdenProduccion ord1
-    INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Elemento = ord1.Elemento
+    INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Linea = ord1.Linea
     INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl1.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
       AND g.Numero = ord1.NumeroPedido
     INNER JOIN PRDGrupoEtapasCompartidasLineas gl2 ON gl2.IdGrupo = g.IdGrupo
-    INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Elemento = gl2.Elemento AND ord2.NumeroPedido = g.Numero
+    INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gl2.Linea AND ord2.NumeroPedido = g.Numero
     WHERE ord1.IdOrden = @idOrden
     ORDER BY ord2.IdOrden ASC
   `);
@@ -512,10 +515,16 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
     const nMaquina = dr.id_maquina;
     const nOperario = dr.Operario != null ? Number(dr.Operario) : 0;
     const nBolsasxGolpe = dr.BolsasxGolpe;
-    // FIX 24/08/2026: ver mismo fix en SEL_InventarioMP.vb -- Unidades = bolsas TOTALES del bulto
-    // (constante fija confirmada: 100 bolsas por paquete, no confundir con BolsasxGolpe).
-    const BOLSAS_POR_PAQUETE = 100;
-    const nUnidades = dr.NumPaqu * BOLSAS_POR_PAQUETE;
+    // FIX 24/08/2026 (REVERTIDO 13/09/2026, a pedido del usuario -- "Modificar cantidad de
+    // bolsas"): antes Unidades = NumPaqu x 100 fijo (mismo criterio que SEL_InventarioMP.vb en el
+    // escritorio, que también hay que corregir aparte). Ahora suma el UnidadesPaquete real de cada
+    // paquete del bulto (SEL_PesajeElemento.UnidadesPaquete, DEFAULT 100 -- ver
+    // agregar_unidadespaquete_pesajeelemento.sql) -- sigue dando exactamente NumPaqu x 100 para
+    // cualquier bulto donde nadie corrigió nada, solo deja de ser una multiplicación ciega.
+    const dtUnidadesBulto = await db.request().input('idBulto', dr.id).query(
+      `SELECT ISNULL(SUM(ISNULL(UnidadesPaquete, 100)), 0) AS Total FROM SEL_PesajeElemento WHERE id_bulto = @idBulto`
+    );
+    const nUnidades = Number(dtUnidadesBulto.recordset[0].Total);
     const fHoraIni = dr.HoraInicio;
     const fHoraFin = dr.HoraFin;
     const fHoraTurno = fHoraFin || fHoraIni || new Date();
@@ -657,6 +666,156 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
   // el escritorio.
 }
 
+// ============================ Bitacora de turno ============================
+// MOVIDO de server.js a este modulo el 13/09/2026 (a pedido del usuario -- "debería tambien no
+// solo al retomar, al iniciar, porque ahi es donde se toma el alistamiento") para que
+// scan-rollo.js:crearBultoInicial (el flujo de "Iniciar") tambien pueda abrir la bitacora, no solo
+// tomar-control-ejecucion (server.js, el flujo de "retomar/ceder la maquina entre operarios") --
+// server.js no se puede requerir desde scan-rollo.js sin crear un require circular (server.js ya
+// requiere scan-rollo.js), asi que el punto en comun tiene que vivir aca abajo en la cadena. Nada
+// de la logica cambio en el traslado -- ver agregar_bitacora_turno.sql para el porque de la tabla.
+
+// Turnos que se usan cuando la maquina no tiene ninguno cargado en TURHorariosMaquinas (en
+// produccion pasa con 4 de las 16 selladoras: 03, 08, 09 y 12 -- comprobado el 12/09/2026). Son los
+// tres de 8 horas que si tienen asignados las otras 12, todas con las mismas cinco franjas.
+// Ver la NOTA SOBRE EL TURNO en agregar_bitacora_turno.sql.
+const TURNOS_BASE_SELLADORA = [6, 7, 8];
+
+// 'HH:MM' -> minutos desde medianoche. NOMTurnos.HoraInicial/HoraFinal y
+// TURHorariosMaquinas.HoraInicio/HoraFin son varchar, no time.
+function minutosDelDia(hhmm) {
+  const m = /^\s*(\d{1,2}):(\d{2})/.exec(String(hhmm || ''));
+  if (!m) return null;
+  const minutos = Number(m[1]) * 60 + Number(m[2]);
+  return minutos >= 0 && minutos < 1440 ? minutos : null;
+}
+
+// Fecha local en 'YYYY-MM-DD'. Se manda como TEXTO a la columna DATE: pasar un Date de JS deja que
+// el driver lo convierta a UTC y un turno abierto a las 21:30 terminaria imputado al dia siguiente.
+function fechaISOLocal(fecha) {
+  const d = new Date(fecha);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Turno en el que cae `momento` para una maquina, deducido de su horario (decision del usuario,
+// 12/09/2026). Devuelve { turno, descripcion, fechaTurno } -- turno/descripcion en null si no hay
+// ninguna franja que contenga esa hora (la bitacora igual se abre: tiene operario, maquina y horas).
+//
+// Las DOS reglas que no salen de ninguna tabla y que hay que conocer antes de tocar esto:
+//   - Los horarios SE SOLAPAN (la SELLADORA 04 tiene Tarde 14:00-22:00 y Pleno Noche 18:00-05:45 a
+//     la vez). Desempata la franja MAS CORTA: los turnos "Pleno" son jornadas extendidas montadas
+//     encima de los tres turnos normales de 8 horas, y el ordinario es el que la planta usa por
+//     defecto.
+//   - Si la maquina no tiene horarios, se usan los tres turnos base (TURNOS_BASE_SELLADORA).
+// Si alguna de las dos no es lo que quiere la planta, lo correcto es arreglar los DATOS antes que
+// este codigo -- ver agregar_bitacora_turno.sql.
+async function resolverTurnoMaquina(p, maquinaCodigo, momento) {
+  const cuando = momento ? new Date(momento) : new Date();
+  const dtHorarios = await p.request().input('maquina', maquinaCodigo).query(`
+    SELECT th.CodigoTurno AS Codigo, t.Descripcion, th.HoraInicio, th.HoraFin
+    FROM TURHorariosMaquinas th
+    INNER JOIN NOMTurnos t ON t.Codigo = th.CodigoTurno
+    WHERE th.CodigoMaquina = @maquina
+  `);
+  let franjas = dtHorarios.recordset;
+  if (franjas.length === 0) {
+    const dtBase = await p.request().query(`
+      SELECT Codigo, Descripcion, HoraInicial AS HoraInicio, HoraFinal AS HoraFin
+      FROM NOMTurnos WHERE Codigo IN (${TURNOS_BASE_SELLADORA.join(',')})
+    `);
+    franjas = dtBase.recordset;
+  }
+
+  const minutosAhora = cuando.getHours() * 60 + cuando.getMinutes();
+  const candidatas = franjas.map(f => {
+    const ini = minutosDelDia(f.HoraInicio);
+    const fin = minutosDelDia(f.HoraFin);
+    if (ini == null || fin == null) return null;
+    // fin <= ini => la franja cruza medianoche (22:00-06:00).
+    const cruzaMedianoche = fin <= ini;
+    const contiene = cruzaMedianoche ? (minutosAhora >= ini || minutosAhora < fin) : (minutosAhora >= ini && minutosAhora < fin);
+    if (!contiene) return null;
+    return {
+      codigo: f.Codigo,
+      descripcion: f.Descripcion,
+      duracion: cruzaMedianoche ? (1440 - ini + fin) : (fin - ini),
+      // Estamos en el pedazo DESPUES de medianoche de un turno que empezo ayer.
+      despuesDeMedianoche: cruzaMedianoche && minutosAhora < fin
+    };
+  }).filter(Boolean);
+
+  if (candidatas.length === 0) {
+    return { turno: null, descripcion: null, fechaTurno: fechaISOLocal(cuando) };
+  }
+  candidatas.sort((a, b) => a.duracion - b.duracion);
+  const elegida = candidatas[0];
+
+  // El turno de la noche que arranco ayer se imputa a AYER, no al dia del reloj: los bultos de las
+  // 2 a.m. son del turno de anoche, que es como los cuenta la planta.
+  const fechaBase = new Date(cuando);
+  if (elegida.despuesDeMedianoche) fechaBase.setDate(fechaBase.getDate() - 1);
+
+  return { turno: elegida.codigo, descripcion: elegida.descripcion, fechaTurno: fechaISOLocal(fechaBase) };
+}
+
+async function cerrarBitacora(p, idBitacora, motivo) {
+  await p.request().input('id', idBitacora).input('motivo', motivo).query(
+    `UPDATE SEL_BitacoraTurno SET HoraCierre = GETDATE(), MotivoCierre = @motivo
+     WHERE IdBitacora = @id AND HoraCierre IS NULL`
+  );
+}
+
+// Abre la bitacora del turno, o REUSA la que ya este abierta si es del mismo operario y del mismo
+// turno. Se llama desde "Iniciar" (crearBultoInicial, scan-rollo.js) y desde "tomar control de la
+// maquina" (tomar-control-ejecucion, server.js) -- los dos puntos donde el operario pasa a ser el
+// dueño de la maquina.
+//
+// Lo de reusar es un requisito explicito del usuario (12/09/2026): "no cuando el operario cierra
+// sesion porque puede pasar que se vaya el internet o retome la orden". Un corte de red, un
+// re-login o volver a tomar control a mitad del turno NO pueden partir la bitacora en dos.
+// Por eso tampoco hay nada que cierre la bitacora en /logout: solo la cierra un RELEVO (otro
+// operario toma la maquina) o el CAMBIO DE TURNO.
+//
+// Nunca revienta hacia afuera: si algo falla, se registra en consola y el operario igual toma
+// control de la maquina. La bitacora es un registro, no puede bloquear la produccion.
+async function abrirOReanudarBitacora(p, maquinaCodigo, operarioCodigo) {
+  try {
+    const turnoAhora = await resolverTurnoMaquina(p, maquinaCodigo);
+
+    const dtAbierta = await p.request().input('maquina', maquinaCodigo).query(`
+      SELECT TOP 1 IdBitacora, Operario, Turno, CONVERT(varchar(10), FechaTurno, 23) AS FechaTurno
+      FROM SEL_BitacoraTurno WHERE Maquina = @maquina AND HoraCierre IS NULL
+      ORDER BY IdBitacora DESC
+    `);
+
+    if (dtAbierta.recordset.length > 0) {
+      const abierta = dtAbierta.recordset[0];
+      const mismoOperario = abierta.Operario === operarioCodigo;
+      // Turno en null a los dos lados tambien cuenta como "el mismo" -- si no, una maquina sin
+      // horarios abriria una bitacora nueva en cada toma de control.
+      const mismoTurno = (abierta.Turno == null ? null : Number(abierta.Turno)) === turnoAhora.turno
+        && abierta.FechaTurno === turnoAhora.fechaTurno;
+      if (mismoOperario && mismoTurno) return abierta.IdBitacora;  // retome: la misma bitacora sigue
+      await cerrarBitacora(p, abierta.IdBitacora, mismoOperario ? 'cambio_turno' : 'relevo');
+    }
+
+    const dtNueva = await p.request()
+      .input('maquina', maquinaCodigo).input('operario', operarioCodigo)
+      .input('turno', turnoAhora.turno).input('fechaTurno', turnoAhora.fechaTurno)
+      .query(`
+        DECLARE @Insertados TABLE (Id INT);
+        INSERT INTO SEL_BitacoraTurno (Maquina, Operario, Turno, FechaTurno)
+        OUTPUT INSERTED.IdBitacora INTO @Insertados
+        VALUES (@maquina, @operario, @turno, @fechaTurno);
+        SELECT Id FROM @Insertados;
+      `);
+    return dtNueva.recordset[0].Id;
+  } catch (err) {
+    console.error('No se pudo abrir/reanudar la bitacora de turno (¿falta ejecutar agregar_bitacora_turno.sql?):', err.message);
+    return null;
+  }
+}
+
 module.exports = {
   obtenerBodegaDeRollo,
   obtenerLoteRollo,
@@ -674,5 +833,8 @@ module.exports = {
   obtenerAnclaGrupoSellado,
   obtenerOCrearOrdenProduccion,
   finalizarControlParcialSellado,
-  valNumerico
+  valNumerico,
+  resolverTurnoMaquina,
+  cerrarBitacora,
+  abrirOReanudarBitacora
 };

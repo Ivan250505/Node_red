@@ -10,7 +10,9 @@ const { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO } = require('./au
 const { registrarEvento } = require('./accesos');
 const { consultarSerial, confirmarRollo, alternarReferenciaGrupo } = require('./scan-rollo');
 const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
-const { obtenerLineaOriginalControlSellado } = require('./sel-inventario-mp');
+const {
+  obtenerLineaOriginalControlSellado, resolverTurnoMaquina, cerrarBitacora, abrirOReanudarBitacora
+} = require('./sel-inventario-mp');
 
 const dbConfig = {
   server: process.env.DB_SERVER,
@@ -767,6 +769,7 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
         <div class="header-info">
           <div class="sub">Máquinas con producción activa en este momento</div>
           ${esAdmin ? `<a class="volver" href="/admin/tablet-fija">📌 Tablet fija a máquina</a>` : ''}
+          ${esAdmin ? `<a class="volver" href="/admin/simulador-plc">🧪 Simulador de PLC</a>` : ''}
         </div>
         <div class="header-salir-grupo">
           <div class="header-usuario">👤 ${usuario}</div>
@@ -2987,7 +2990,7 @@ function colorReferenciaGrupo(indice) {
   return COLORES_REFERENCIA_GRUPO[indice % COLORES_REFERENCIA_GRUPO.length];
 }
 
-function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente) {
+function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin) {
   // Sellado en paralelo (ver DISENO_SELLADO_PARALELO_08092026.md): si esta orden comparte máquina
   // con otras (mismo rollo, hasta 3 referencias de salida distintas), grupoSellado trae TODAS las
   // referencias del grupo (incluida esta misma) -- solo se usa para saber si hay que ocultar
@@ -3126,6 +3129,10 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
           <h1>Pedido ${orden.NumeroPedido || '—'} ${badgeEstadoOrden(orden.Estado)}</h1>
           <div class="sub">${orden.Elemento}</div>
           <a class="volver" href="/selladora/${maquinaCodigo}">‹ ${orden.MaquinaNombre}</a>
+          ${/* TEMPORAL (13/09/2026, a pedido del usuario) -- acceso directo al Simulador de PLC
+               desde esta misma pantalla para probar sin PLC real conectado. QUITAR cuando se
+               termine de probar (o volver a dejarlo solo en la pantalla de Selladoras). */ ''}
+          ${esAdmin ? `<a class="volver" href="/admin/simulador-plc?maquina=${maquinaCodigo}">🧪 Simulador de PLC (temporal)</a>` : ''}
         </div>
         ${avanceCard}
         <div class="header-salir-grupo">
@@ -3242,7 +3249,7 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto, opcione
         const filasGrupo = grupo.map(pe => `
           <div class="pesaje-fila">
             <a href="javascript:void(0)" class="link-reimprimir" title="Reimprimir etiqueta o volver a pesar este paquete"
-              onclick="abrirAccionesPaquete(this, ${JSON.stringify(pe.id_paquete)}, ${JSON.stringify(b.id)}, ${JSON.stringify(pe.ConsecutivoPaquete)}, ${JSON.stringify(Number(pe.PesoPaqueGr))}, ${jsString(b.serialPadre).replace(/"/g, '&quot;')}, ${jsString(b.estado).replace(/"/g, '&quot;')}, ${JSON.stringify(idOrdenTarjetas)})">📦 Paquete ${pe.ConsecutivoPaquete}</a>
+              onclick="abrirAccionesPaquete(this, ${JSON.stringify(pe.id_paquete)}, ${JSON.stringify(b.id)}, ${JSON.stringify(pe.ConsecutivoPaquete)}, ${JSON.stringify(Number(pe.PesoPaqueGr))}, ${jsString(b.serialPadre).replace(/"/g, '&quot;')}, ${jsString(b.estado).replace(/"/g, '&quot;')}, ${JSON.stringify(idOrdenTarjetas)}, ${JSON.stringify(Number(pe.UnidadesPaquete))})">📦 Paquete ${pe.ConsecutivoPaquete}</a>
             <span>${pe.Hora}</span>
             <span>${Number(pe.PesoPaqueGr).toString()}</span>
           </div>`).join('');
@@ -3370,18 +3377,78 @@ function scriptReimprimir(idOrden, maquinaCodigo) {
     // salida, cada bulto pertenece a UNA de ellas -- la reimpresion tiene que ir contra esa orden y
     // no contra la que quedo fija en el closure. En la pagina de una sola orden llega null y se usa
     // la de siempre.
-    function abrirAccionesPaquete(enlace, idPaquete, idBulto, consecutivoPaquete, pesoGr, serialBulto, estadoBulto, idOrdenBulto) {
+    // FIX 13/09/2026 (a pedido del usuario -- "Modificar cantidad de paquetes"): SweetAlert2 solo
+    // trae 3 botones nativos (confirm/deny/cancel), y ya estaban los 3 ocupados (Reimprimir/Volver
+    // a pesar/Cancelar) -- para el 4to se pasa a botones HTML propios dentro del modal en vez de
+    // pelear con los roles nativos. Mismo look (apilados, ancho completo, un color por acción).
+    function abrirAccionesPaquete(enlace, idPaquete, idBulto, consecutivoPaquete, pesoGr, serialBulto, estadoBulto, idOrdenBulto, unidadesPaquete) {
+      var estiloBoton = 'display:block;width:100%;padding:13px;margin:0 0 10px;border:none;border-radius:10px;color:#fff;font-size:15px;font-weight:600;cursor:pointer;';
       Swal.fire({
         title: 'Paquete ' + consecutivoPaquete,
-        html: '<div style="font-size:14px;color:#64748b;">Peso registrado: <b>' + pesoGr + ' kg</b></div>',
+        html:
+          '<div style="font-size:14px;color:#64748b;margin-bottom:16px;">Peso registrado: <b>' + pesoGr + ' kg</b>' +
+            ' — Bolsas: <b>' + unidadesPaquete + '</b></div>' +
+          '<button type="button" id="btn-pq-reimprimir" style="' + estiloBoton + 'background:#71bf44;">🖨️ Reimprimir etiqueta</button>' +
+          '<button type="button" id="btn-pq-repesar" style="' + estiloBoton + 'background:#006984;">⚖️ Volver a pesar</button>' +
+          '<button type="button" id="btn-pq-modcant" style="' + estiloBoton + 'background:#b46200;">🔢 Modificar cantidad de bolsas</button>' +
+          '<button type="button" id="btn-pq-cancelar" style="' + estiloBoton + 'margin-bottom:0;background:#c0392b;">Cancelar</button>',
+        showConfirmButton: false, showCancelButton: false, showDenyButton: false,
+        didOpen: function() {
+          document.getElementById('btn-pq-reimprimir').onclick = function() {
+            Swal.close();
+            reimprimirPaquete(enlace, idBulto, consecutivoPaquete, pesoGr, serialBulto, idOrdenBulto);
+          };
+          document.getElementById('btn-pq-repesar').onclick = function() {
+            Swal.close();
+            volverAPesarPaquete(enlace, idPaquete, idBulto, consecutivoPaquete, pesoGr, serialBulto, estadoBulto, idOrdenBulto);
+          };
+          document.getElementById('btn-pq-modcant').onclick = function() {
+            Swal.close();
+            modificarCantidadPaquete(enlace, idPaquete, consecutivoPaquete, unidadesPaquete, estadoBulto, idOrdenBulto);
+          };
+          document.getElementById('btn-pq-cancelar').onclick = function() { Swal.close(); };
+        }
+      });
+    }
+
+    // Ventana simple (sin báscula, es un número que el operario digita) para corregir cuántas
+    // unidades representa ESTE paquete puntual -- caso real: un paquete con menos de 100 bolsas
+    // (un resto/ajuste). Guarda en SEL_PesajeElemento.UnidadesPaquete; el servidor recalcula
+    // PRDProduccion.Unidades del bulto si ya estaba Cerrado (mismo criterio que "Volver a pesar"
+    // con el peso -- ver /api/selladora/paquete/modificar-cantidad).
+    function modificarCantidadPaquete(enlace, idPaquete, consecutivoPaquete, unidadesActual, estadoBulto, idOrdenBulto) {
+      var avisoCerrado = (estadoBulto === 'Cerrado')
+        ? '<div style="text-align:left;font-size:12px;color:#b46200;background:#fff7ed;border-radius:8px;padding:8px 10px;margin-top:12px;">' +
+          '⚠️ Este bulto ya está cerrado. Se corrigen las bolsas de este paquete y el total de ' +
+          'unidades del bulto, pero <b>el saldo de inventario no se toca</b>.</div>'
+        : '';
+      Swal.fire({
+        title: 'Cantidad de bolsas -- paquete ' + consecutivoPaquete,
+        html: '<div style="font-size:13px;color:#64748b;margin-bottom:10px;">Bolsas registradas hoy: <b>' + unidadesActual + '</b>. Por defecto cada paquete trae 100 bolsas -- solo cambie esto si este paquete puntual trae menos (o más).</div>' + avisoCerrado,
+        input: 'number',
+        inputValue: unidadesActual,
+        inputAttributes: { min: 0, step: 1 },
         showCancelButton: true,
-        showDenyButton: true,
-        confirmButtonText: '🖨️ Reimprimir etiqueta', confirmButtonColor: '#71bf44',
-        denyButtonText: '⚖️ Volver a pesar', denyButtonColor: '#006984',
-        cancelButtonText: 'Cancelar', cancelButtonColor: '#c0392b'
+        confirmButtonText: '🔢 Guardar cantidad', confirmButtonColor: '#b46200',
+        cancelButtonText: 'Cancelar', cancelButtonColor: '#c0392b',
+        preConfirm: function(valor) {
+          var unidades = parseInt(valor, 10);
+          if (isNaN(unidades) || unidades < 0) { Swal.showValidationMessage('Ingrese una cantidad válida.'); return false; }
+          return fetch('/api/selladora/paquete/modificar-cantidad', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ idPaquete: idPaquete, unidades: unidades })
+          }).then(function(r) { return r.json(); }).then(function(datos) {
+            if (!datos.ok) { Swal.showValidationMessage(datos.error); return false; }
+            return datos;
+          }).catch(function(err) {
+            Swal.showValidationMessage('Error de conexión: ' + err.message);
+            return false;
+          });
+        }
       }).then(function(resultado) {
-        if (resultado.isConfirmed) { reimprimirPaquete(enlace, idBulto, consecutivoPaquete, pesoGr, serialBulto, idOrdenBulto); return; }
-        if (resultado.isDenied) { volverAPesarPaquete(enlace, idPaquete, idBulto, consecutivoPaquete, pesoGr, serialBulto, estadoBulto, idOrdenBulto); }
+        if (!resultado.isConfirmed) return;
+        Swal.fire({ icon: 'success', title: 'Cantidad de bolsas actualizada', confirmButtonColor: '#71bf44', timer: 1400, showConfirmButton: false })
+          .then(function() { location.reload(); });
       });
     }
 
@@ -3872,8 +3939,14 @@ async function obtenerColaOrdenes(p, codigo) {
   // IdGrupoSellado (08/09/2026, Sellado en paralelo -- ver DISENO_SELLADO_PARALELO_08092026.md):
   // NULL si esta orden no comparte máquina con otras -- ver renderColaOrdenes, que fusiona en una
   // sola tarjeta las órdenes de un mismo grupo que TODAS sigan 'Pendiente' (nadie las ha iniciado).
-  // FIX 08/09/2026: la llave real del grupo es ord.Elemento (la referencia), no ord.Linea -- si se
-  // reasigna la referencia de una línea ya agrupada, esa línea deja de pertenecer al grupo solo.
+  // FIX 13/09/2026 (bug real, mismo patrón ya corregido en frmLiberacionProduccion.vb para pedido
+  // 11243 -- REVIERTE el criterio del 08/09/2026: "la llave real del grupo es ord.Elemento, no
+  // ord.Linea"): esa razón resultó ser la misma causa raíz del bug -- dos LÍNEAS DISTINTAS del
+  // mismo pedido pueden vender la misma referencia sin ser la misma agrupación física, y con
+  // Elemento como llave esas dos líneas se confundían entre sí. Ahora la llave es ord.Linea; con
+  // el grupo identificado por Línea, reasignar la referencia de una línea agrupada YA NO la deja
+  // huérfana (el grupo sigue apuntando a la misma línea, sin importar qué producto tenga asignado
+  // ahora).
   const colaResult = await p.request().input('codigo', codigo).query(`
     SELECT ord.IdOrden, ord.Estado, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento,
            ej.Estado AS EstadoEjecucion, ej.Operario AS OperarioEjecucionCodigo, op.Nombre AS OperarioEjecucionNombre,
@@ -3881,11 +3954,13 @@ async function obtenerColaOrdenes(p, codigo) {
            (SELECT TOP 1 g.IdGrupo FROM PRDGrupoEtapasCompartidasLineas gl
             INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
             -- FIX 09/09/2026 (bug real: Pedido 11085 se coló en el grupo del Pedido 11408 porque
-            -- ambos usan el mismo Elemento de salida en fechas distintas) -- Elemento por sí solo
-            -- NO es llave suficiente: dos pedidos DISTINTOS pueden compartir la misma referencia de
-            -- salida en momentos distintos. Hay que exigir también que sea el MISMO pedido (g.Numero
-            -- es el Numero del pedido para el que se armó ese grupo, ver crear_grupoetapascompartidas.sql).
-            WHERE gl.Elemento = ord.Elemento AND g.Numero = ord.NumeroPedido) AS IdGrupoSellado
+            -- ambos usan el mismo Elemento de salida en fechas distintas) -- Línea por sí sola
+            -- TAMPOCO alcanza: dos pedidos DISTINTOS pueden compartir el mismo número de línea, así
+            -- que se sigue exigiendo también el MISMO pedido (g.Numero es el Numero del pedido para
+            -- el que se armó ese grupo, ver crear_grupoetapascompartidas.sql). NULL = NULL nunca es
+            -- verdadero en SQL, así que una orden sin ord.Linea guardada (creada antes de este
+            -- cambio) simplemente no matchea nada -- no hace falta filtro aparte.
+            WHERE gl.Linea = ord.Linea AND g.Numero = ord.NumeroPedido) AS IdGrupoSellado
     FROM SEL_OrdenProduccion ord
     INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
     LEFT JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
@@ -4033,6 +4108,207 @@ app.post('/admin/tablet-fija/quitar', requireLogin, requireAdmin, async (req, re
   res.redirect('/admin/tablet-fija');
 });
 
+// ============================================================================================
+// SIMULADOR DE PLC (13/09/2026, a pedido del usuario -- "no tengo el PLC, necesito botones que
+// hagan lo mismo para poder probar"). Restringido a administrador (requireAdmin), igual que
+// tablet-fija. Hace A MANO exactamente lo que en producción dispara la máquina/Node-RED sola:
+//   - "Simular paquete pesado": lo que hace Node-RED cada vez que la báscula pesa un paquete --
+//     INSERT en SEL_PesajeElemento sobre el bulto Activo/Temporal más reciente de la máquina
+//     (mismo criterio que el script SQL que ya venía probando el usuario a mano).
+//   - "Simular cierre de bulto": lo que hace trg_SEL_Bultos_CierreBulto al cerrar un bulto --
+//     UPDATE SEL_Bultos SET estado='Cerrado' (el trigger real se encarga de generar la entrada de
+//     inventario, PRDProduccion, etc. -- este botón solo dispara ESE UPDATE, no lo duplica).
+// NO reemplaza nada de producción -- es una herramienta de prueba que evita tener que correr SQL a
+// mano cada vez, para cuando no hay PLC conectado.
+// ============================================================================================
+
+function renderSimuladorPLC(usuario, maquinas, maquinaSel, error, mensaje) {
+  const opciones = maquinas.map(m =>
+    `<option value="${m.Codigo}" ${String(maquinaSel) === String(m.Codigo) ? 'selected' : ''}>${m.Nombre}</option>`
+  ).join('');
+
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Simulador de PLC — Admin</title>
+  <style>${estilosBase()}</style>
+</head>
+<body>
+  <header>
+    <div class="header-top">
+      <div class="logo-wrap"><img class="logo" src="/logo-carlixplast.png" alt="Carlixplast"></div>
+    </div>
+    <div class="header-inner">
+      <div class="usuario-bar">
+        <span>👤 ${usuario}</span>
+        <a class="salir" href="/logout">Cerrar sesión</a>
+      </div>
+      <a class="volver" href="/">‹ Selladoras</a>
+      <h1>🧪 Simulador de PLC</h1>
+      <div class="sub">Solo para pruebas sin PLC conectado -- hace a mano lo que la máquina dispara sola.</div>
+    </div>
+  </header>
+  <main>
+    <div class="ejecucion-box">
+      <div class="label" style="margin-bottom:6px;">Máquina</div>
+      <form id="form-maquina">
+        <select name="maquina" id="maquina" required>
+          <option value="">-- Selecciona --</option>
+          ${opciones}
+        </select>
+      </form>
+    </div>
+
+    <div class="ejecucion-box">
+      <div class="label" style="margin-bottom:6px;">1) Simular paquete pesado</div>
+      <p style="margin:0 0 14px;color:var(--texto-suave);">Agrega un paquete al bulto Activo/Temporal más reciente de la máquina elegida -- mismo efecto que un pesaje real de báscula.</p>
+      <form method="post" action="/admin/simulador-plc/paquete" onsubmit="return copiarMaquina(this)">
+        <input type="hidden" name="maquina" value="">
+        <label for="peso">Peso (Kg)</label>
+        <input type="number" step="0.001" min="0" name="peso" id="peso" value="18" required>
+        <label for="potencia" style="margin-top:10px;">Potencia</label>
+        <input type="number" step="0.001" name="potencia" id="potencia" value="10">
+        <label for="temperatura" style="margin-top:10px;">Temperatura</label>
+        <input type="number" step="0.001" name="temperatura" id="temperatura" value="10">
+        <label for="golpes" style="margin-top:10px;">Golpes (vacío = NULL)</label>
+        <input type="number" step="1" min="0" name="golpes" id="golpes">
+        <button type="submit" style="margin-top:14px;">Simular paquete pesado</button>
+      </form>
+    </div>
+
+    <div class="ejecucion-box">
+      <div class="label" style="margin-bottom:6px;">2) Simular cierre de bulto</div>
+      <p style="margin:0 0 14px;color:var(--texto-suave);">Cierra el bulto Activo/Temporal más reciente de la máquina elegida (Golpes/Potencia = promedio de sus paquetes) -- dispara el mismo trigger que un cierre real.</p>
+      <form method="post" action="/admin/simulador-plc/cerrar-bulto" onsubmit="return copiarMaquina(this)">
+        <input type="hidden" name="maquina" value="">
+        <button type="submit" style="background:#c0392b;">Simular cierre de bulto</button>
+      </form>
+    </div>
+  </main>
+  <script src="/sweetalert2.min.js"></script>
+  <script>
+    // El selector de máquina es UNA sola vez arriba -- cada form copia su valor a su propio campo
+    // oculto justo antes de enviarse, para no repetir el <select> tres veces en la página.
+    function copiarMaquina(form) {
+      var maquina = document.getElementById('maquina').value;
+      if (!maquina) { alert('Selecciona una máquina primero.'); return false; }
+      form.querySelector('input[name="maquina"]').value = maquina;
+      return true;
+    }
+  </script>
+  ${mensaje ? `<script>Swal.fire({ icon: 'success', title: 'Listo', text: ${jsString(mensaje)}, confirmButtonColor: '#71bf44' });</script>` : ''}
+  ${error ? `<script>Swal.fire({ icon: 'error', title: 'Error', text: ${jsString(error)}, confirmButtonColor: '#71bf44' });</script>` : ''}
+</body>
+</html>`;
+}
+
+async function cargarMaquinasSimulador() {
+  const p = await getPool();
+  const maquinas = await p.request().query(
+    `SELECT Codigo, Nombre FROM PRDMaquinas WHERE Tipo = 'SELLADORA' ORDER BY Nombre`
+  );
+  return maquinas.recordset;
+}
+
+app.get('/admin/simulador-plc', requireLogin, requireAdmin, async (req, res) => {
+  try {
+    const maquinas = await cargarMaquinasSimulador();
+    res.send(renderSimuladorPLC(req.session.usuario.nombre, maquinas, req.query.maquina || '', req.query.error || null, req.query.ok || null));
+  } catch (err) {
+    res.send(renderSimuladorPLC(req.session.usuario.nombre, [], '', err.message, null));
+  }
+});
+
+// Mismo criterio que el script SQL que ya venía probando el usuario a mano: toma el bulto
+// Activo/Temporal MÁS RECIENTE (MAX id) de la máquina, le sube number_paqu en 1, e inserta el
+// paquete. Se hace con UPDLOCK/ROWLOCK + en una transacción para no pisarse con un pesaje real
+// del PLC si llegara a estar corriendo al mismo tiempo.
+app.post('/admin/simulador-plc/paquete', requireLogin, requireAdmin, async (req, res) => {
+  const maquina = Number(req.body.maquina);
+  const peso = Number(req.body.peso);
+  const potencia = req.body.potencia !== '' ? Number(req.body.potencia) : null;
+  const temperatura = req.body.temperatura !== '' ? Number(req.body.temperatura) : null;
+  const golpes = req.body.golpes !== '' ? Number(req.body.golpes) : null;
+
+  if (!maquina) return res.redirect('/admin/simulador-plc?error=' + encodeURIComponent('Falta la máquina.'));
+  if (!peso || peso <= 0) return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent('Ingrese un peso válido.'));
+
+  try {
+    const p = await getPool();
+    const tx = new sql.Transaction(p);
+    await tx.begin();
+    try {
+      const dtBulto = await tx.request().input('maquina', maquina).query(`
+        SELECT TOP 1 b.id, b.number_paqu
+        FROM SEL_Bultos b WITH (UPDLOCK, ROWLOCK)
+        WHERE b.id_maquina = @maquina AND b.estado IN ('Activo', 'Temporal')
+        ORDER BY b.id DESC
+      `);
+      if (dtBulto.recordset.length === 0) {
+        await tx.rollback();
+        return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent('No hay bulto Activo/Temporal para esta máquina.'));
+      }
+      const idBulto = dtBulto.recordset[0].id;
+      const nuevoConsecutivo = dtBulto.recordset[0].number_paqu + 1;
+
+      await tx.request().input('idBulto', idBulto).input('consec', nuevoConsecutivo).query(
+        `UPDATE SEL_Bultos SET number_paqu = @consec WHERE id = @idBulto`
+      );
+      await tx.request()
+        .input('peso', peso).input('idBulto', idBulto).input('consec', nuevoConsecutivo)
+        .input('potencia', potencia).input('temperatura', temperatura).input('golpes', golpes)
+        .query(`
+          INSERT INTO SEL_PesajeElemento (PesoPaqueGr, id_bulto, ConsecutivoPaquete, FechaHora, Potencia, Temperatura, Golpes)
+          VALUES (@peso, @idBulto, @consec, GETDATE(), @potencia, @temperatura, @golpes)
+        `);
+      await tx.commit();
+      res.redirect('/admin/simulador-plc?maquina=' + maquina + '&ok=' + encodeURIComponent('Paquete #' + nuevoConsecutivo + ' agregado al bulto ' + idBulto + '.'));
+    } catch (errTx) {
+      await tx.rollback();
+      throw errTx;
+    }
+  } catch (err) {
+    res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent(err.message));
+  }
+});
+
+// Mismo criterio que el segundo script SQL del usuario: cierra el bulto Activo/Temporal más
+// reciente de la máquina, con Golpes/Potencia = promedio de sus propios paquetes. El resto
+// (INVExistencias, PRDProduccion, apertura del siguiente Temporal) lo hace SOLO
+// trg_SEL_Bultos_GenerarEntradaInventario/trg_SEL_Bultos_CierreBulto al reaccionar a este UPDATE --
+// este endpoint no los duplica.
+app.post('/admin/simulador-plc/cerrar-bulto', requireLogin, requireAdmin, async (req, res) => {
+  const maquina = Number(req.body.maquina);
+  if (!maquina) return res.redirect('/admin/simulador-plc?error=' + encodeURIComponent('Falta la máquina.'));
+
+  try {
+    const p = await getPool();
+    const dtBulto = await p.request().input('maquina', maquina).query(`
+      SELECT TOP 1 id FROM SEL_Bultos WHERE id_maquina = @maquina AND estado IN ('Activo', 'Temporal') ORDER BY id DESC
+    `);
+    if (dtBulto.recordset.length === 0) {
+      return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent('No hay bulto Activo/Temporal para esta máquina.'));
+    }
+    const idBulto = dtBulto.recordset[0].id;
+
+    await p.request().input('idBulto', idBulto).query(`
+      UPDATE b
+      SET b.estado = 'Cerrado', b.HoraFin = GETDATE(), b.Golpes = agg.GolpesProm, b.Potencia = agg.PotenciaProm
+      FROM SEL_Bultos b
+      CROSS APPLY (
+        SELECT ISNULL(AVG(pe.Golpes), 0) AS GolpesProm, CAST(AVG(pe.Potencia) AS DECIMAL(10,3)) AS PotenciaProm
+        FROM SEL_PesajeElemento pe WHERE pe.id_bulto = b.id
+      ) agg
+      WHERE b.id = @idBulto
+    `);
+    res.redirect('/admin/simulador-plc?maquina=' + maquina + '&ok=' + encodeURIComponent('Bulto ' + idBulto + ' cerrado.'));
+  } catch (err) {
+    res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent(err.message));
+  }
+});
+
 // Detalle de una orden puntual: bultos (indice relativo 1,2,3... no el num_bulto crudo -- mismo
 // criterio que EjecucionSelladora.vb:CargarBultos), pesajes/paquetes de cada bulto (SEL_PesajeElemento,
 // igual que CargarPesajes) e historial de materia prima (Serial/Referencia/Lote, igual que
@@ -4046,19 +4322,23 @@ app.post('/admin/tablet-fija/quitar', requireLogin, requireAdmin, async (req, re
 // solo el IdGrupo (lo necesita también la nueva página /selladora/:codigo/grupo/:idGrupo y el
 // endpoint de alternar, para saber a dónde redirigir), obtenerMiembrosGrupoSellado trae los
 // miembros de un IdGrupo ya conocido (evita repetir el primer lookup cuando el grupo ya se tiene).
-// FIX 09/09/2026 (bug real, Pedido 11085 colado en el grupo del Pedido 11408): Elemento por sí solo
-// NO es llave suficiente para expandir un grupo -- dos pedidos DISTINTOS pueden usar la misma
-// referencia de salida en momentos distintos, y sin exigir también el mismo Numero de pedido
-// (g.Numero, el pedido para el que se armó ESE grupo puntual), la expansión "todos los miembros de
-// este IdGrupo" termina trayendo órdenes de OTRO pedido que nunca tuvo nada que ver -- eso bloqueaba
-// Finalizar (contaba un bulto Activo ajeno) y corrompía la página de grupo/alternar. Todas las
-// consultas de aquí para abajo que expanden un IdGrupo a sus miembros reales exigen
-// `ord.NumeroPedido = g.Numero`.
+// FIX 09/09/2026 (bug real, Pedido 11085 colado en el grupo del Pedido 11408): Línea por sí sola
+// TAMPOCO es llave suficiente para expandir un grupo -- dos pedidos DISTINTOS pueden compartir el
+// mismo número de línea, y sin exigir también el mismo Numero de pedido (g.Numero, el pedido para
+// el que se armó ESE grupo puntual), la expansión "todos los miembros de este IdGrupo" termina
+// trayendo órdenes de OTRO pedido que nunca tuvo nada que ver -- eso bloqueaba Finalizar (contaba
+// un bulto Activo ajeno) y corrompía la página de grupo/alternar. Todas las consultas de aquí para
+// abajo que expanden un IdGrupo a sus miembros reales exigen `ord.NumeroPedido = g.Numero`.
+// FIX 13/09/2026 (bug real, mismo patrón ya corregido en frmLiberacionProduccion.vb para pedido
+// 11243 -- REVIERTE el criterio del 08/09/2026: la llave real es ord.Elemento): esa razón resultó
+// ser la misma causa raíz del bug -- dos LÍNEAS DISTINTAS del mismo pedido pueden vender la misma
+// referencia sin ser la misma agrupación física, y con Elemento como llave esas dos líneas se
+// confundían entre sí. Ahora la llave es ord.Linea.
 async function obtenerIdGrupoSelladoDeOrden(p, idOrden) {
   const dtGrupo = await p.request().input('idOrden', idOrden).query(`
     SELECT TOP 1 g.IdGrupo
     FROM SEL_OrdenProduccion ord
-    INNER JOIN PRDGrupoEtapasCompartidasLineas gl ON gl.Elemento = ord.Elemento
+    INNER JOIN PRDGrupoEtapasCompartidasLineas gl ON gl.Linea = ord.Linea
     INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
       AND g.Numero = ord.NumeroPedido
     WHERE ord.IdOrden = @idOrden
@@ -4088,7 +4368,10 @@ async function obtenerMiembrosGrupoSellado(p, idGrupo) {
             WHERE ej.IdOrden = ord.IdOrden ORDER BY b.id DESC) AS EstadoBultoActual
     FROM PRDGrupoEtapasCompartidasLineas gl
     INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl.IdGrupo
-    INNER JOIN SEL_OrdenProduccion ord ON ord.Elemento = gl.Elemento AND ord.NumeroPedido = g.Numero
+    -- FIX 13/09/2026 (mismo patrón que obtenerIdGrupoSelladoDeOrden -- ver comentario arriba):
+    -- Línea, no Elemento, para no confundir dos líneas distintas del mismo pedido que vendan la
+    -- misma referencia.
+    INNER JOIN SEL_OrdenProduccion ord ON ord.Linea = gl.Linea AND ord.NumeroPedido = g.Numero
     INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
     INNER JOIN PRDMaquinas maq ON maq.Codigo = ord.Maquina
     LEFT JOIN INVElementosReferencia er12 ON er12.Elemento = ord.Elemento AND er12.Categoria = 12
@@ -5013,7 +5296,8 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
     // apaga el modal de pausa normal (ver renderOrdenDetalle) para no encimar dos ventanas.
     const protocoloPendiente = await obtenerProtocoloPendiente(p, Number(idOrden));
 
-    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente));
+    const esAdmin = req.session.usuario.codigo === ADMIN_CODIGO;
+    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
@@ -5066,7 +5350,8 @@ async function obtenerBultosYPesajes(p, idOrden) {
     // paquete puntual al trasladarlo (ver /api/selladora/paquete/trasladar) -- ConsecutivoPaquete
     // solo es único DENTRO de un bulto, no en toda la orden.
     const pesajesResult = await p.request().input('idOrden', idOrden).query(`
-      SELECT pe.id_paquete, pe.id_bulto, pe.ConsecutivoPaquete, FORMAT(pe.FechaHora,'dd/MM/yyyy HH:mm:ss') AS Hora, pe.PesoPaqueGr
+      SELECT pe.id_paquete, pe.id_bulto, pe.ConsecutivoPaquete, FORMAT(pe.FechaHora,'dd/MM/yyyy HH:mm:ss') AS Hora, pe.PesoPaqueGr,
+             ISNULL(pe.UnidadesPaquete, 100) AS UnidadesPaquete
       FROM SEL_PesajeElemento pe
       INNER JOIN SEL_Bultos b ON b.id = pe.id_bulto
       INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
@@ -5103,8 +5388,13 @@ async function obtenerBultosYPesajes(p, idOrden) {
   return { bultos, pesajesPorBulto, residuosPorBulto };
 }
 
-// Cada paquete producido cuenta como 100 unidades cuando la orden se mide en unidades (regla de
-// negocio dada por el usuario, 02/09/2026 -- no sale de ninguna columna, es fija).
+// Cada paquete producido cuenta 100 unidades POR DEFECTO cuando la orden se mide en unidades
+// (regla de negocio dada por el usuario, 02/09/2026). Se mantiene como constante de RESPALDO --
+// FIX 13/09/2026 (a pedido del usuario -- "Modificar cantidad de paquetes"): ya no se multiplica
+// a ciegas por esta constante, se suma el UnidadesPaquete real de cada paquete
+// (SEL_PesajeElemento.UnidadesPaquete, ver agregar_unidadespaquete_pesajeelemento.sql) -- que por
+// default SIGUE siendo 100 (el PLC no cambia), pero el operario puede corregirlo paquete por
+// paquete desde Bultos. Este valor solo queda de referencia si algún día hace falta un fallback.
 const UNIDADES_POR_PAQUETE = 100;
 
 // Avance de produccion de una orden: lo producido contra lo pedido (tarjeta del encabezado de
@@ -5115,7 +5405,8 @@ const UNIDADES_POR_PAQUETE = 100;
 //  - Lo producido es el acumulado de TODOS los bultos Activo + Cerrado de la orden (no solo el
 //    bulto activo, a diferencia de /resumen-bulto-activo): en kg, la suma de PesoPaqueGr, que pese
 //    a llamarse "Gr" guarda KILOGRAMOS (ver FIX 02/09/2026 en scriptResumenBultoActivo); en
-//    unidades, la cantidad de paquetes x UNIDADES_POR_PAQUETE.
+//    unidades, la SUMA de UnidadesPaquete de cada paquete (FIX 13/09/2026 -- antes era paquetes x
+//    UNIDADES_POR_PAQUETE fijo, ver comentario de esa constante).
 //    'Temporal' queda fuera a proposito -- son bultos sin ningun paquete pesado (ver finalizarOrden).
 //  - El valor cambia solo a medida que se registran paquetes nuevos, por eso la pagina lo refresca
 //    con polling (scriptAvanceProduccion), igual que el resumen del bulto activo.
@@ -5135,7 +5426,8 @@ async function obtenerAvanceProduccion(p, idOrden) {
   // fuera de esta suma, así que su % de avance en la página de grupo salía en 0 aunque sí tuviera
   // producción real. 'Temporal' se agrega por si acaso (normalmente nunca tiene paquetes).
   const dtProducido = await p.request().input('idOrden', idOrden).query(`
-    SELECT ISNULL(SUM(pe.PesoPaqueGr), 0) AS PesoTotalKg, COUNT(*) AS Paquetes
+    SELECT ISNULL(SUM(pe.PesoPaqueGr), 0) AS PesoTotalKg, COUNT(*) AS Paquetes,
+           ISNULL(SUM(ISNULL(pe.UnidadesPaquete, 100)), 0) AS UnidadesTotal
     FROM SEL_PesajeElemento pe
     INNER JOIN SEL_Bultos b ON b.id = pe.id_bulto
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
@@ -5144,7 +5436,7 @@ async function obtenerAvanceProduccion(p, idOrden) {
   const paquetes = Number(dtProducido.recordset[0].Paquetes);
   const producido = tipo === 'kg'
     ? Number(dtProducido.recordset[0].PesoTotalKg)
-    : paquetes * UNIDADES_POR_PAQUETE;
+    : Number(dtProducido.recordset[0].UnidadesTotal);
   const programado = tipo === 'kg' ? kilosSolicitados : unidadesSolicitadas;
 
   return { tipo, producido, programado, porcentaje: (producido / programado) * 100, paquetes };
@@ -5360,6 +5652,92 @@ app.post('/api/selladora/paquete/repesar', requireLogin, async (req, res) => {
   } catch (err) {
     const falta = /Invalid object name/i.test(err.message);
     res.json({ ok: false, error: falta ? 'Falta crear la tabla SEL_RepesajePaquete (ejecute agregar_repesaje_paquete.sql).' : err.message });
+  }
+});
+
+// "Modificar cantidad de paquetes" (13/09/2026, a pedido del usuario) -- por defecto CADA paquete
+// pesado representa 100 unidades (SEL_PesajeElemento.UnidadesPaquete, DEFAULT 100 -- ver
+// agregar_unidadespaquete_pesajeelemento.sql), pero hay paquetes puntuales que traen menos (un
+// resto/ajuste) y el operario necesita corregirlo desde la tableta, sin que el PLC sepa nada de
+// esto. Mismo criterio que "Volver a pesar" (mismo endpoint hermano, arriba): si el bulto ya
+// estaba Cerrado, recalcula PRDProduccion.Unidades sumando TODOS los paquetes del bulto con su
+// UnidadesPaquete real -- si sigue abierto, no hay nada que rehacer (trg_SEL_Bultos_CierreBulto lo
+// calculará bien al cerrar, una vez esa trigger también sume UnidadesPaquete en vez de multiplicar
+// por 100 -- ver la nota PENDIENTE en agregar_unidadespaquete_pesajeelemento.sql).
+app.post('/api/selladora/paquete/modificar-cantidad', requireLogin, async (req, res) => {
+  const idPaquete = Number(req.body && req.body.idPaquete);
+  const unidades = Number(req.body && req.body.unidades);
+  if (!Number.isFinite(idPaquete) || idPaquete <= 0) {
+    return res.json({ ok: false, error: 'Falta idPaquete.' });
+  }
+  if (!Number.isInteger(unidades) || unidades < 0) {
+    return res.json({ ok: false, error: 'La cantidad de bolsas debe ser un número entero mayor o igual a cero.' });
+  }
+  try {
+    const p = await getPool();
+    const dtPaquete = await p.request().input('idPaquete', idPaquete).query(`
+      SELECT TOP 1 pe.id_paquete, pe.id_bulto, pe.ConsecutivoPaquete, ISNULL(pe.UnidadesPaquete, 100) AS UnidadesPaquete,
+             b.estado AS EstadoBulto, b.serialPadre, b.CantidadTotal, ord.Estado AS EstadoOrden
+      FROM SEL_PesajeElemento pe
+      LEFT JOIN SEL_Bultos b ON b.id = pe.id_bulto
+      LEFT JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+      LEFT JOIN SEL_OrdenProduccion ord ON ord.IdOrden = ej.IdOrden
+      WHERE pe.id_paquete = @idPaquete
+    `);
+    if (dtPaquete.recordset.length === 0) {
+      return res.json({ ok: false, error: 'No se encontró ese paquete.' });
+    }
+    const paq = dtPaquete.recordset[0];
+    const unidadesAnterior = Number(paq.UnidadesPaquete);
+
+    // Mismo tope que "Volver a pesar" -- ver esa nota arriba (merma ya calculada por el digitador).
+    if (paq.EstadoOrden === 'Finalizada') {
+      return res.json({
+        ok: false,
+        error: 'Esta orden ya fue cerrada definitivamente por el digitador y su merma ya está calculada. La cantidad de bolsas de este paquete solo se puede corregir desde el escritorio.'
+      });
+    }
+
+    let unidadesTotalBulto = null;
+    const tx = new sql.Transaction(p);
+    await tx.begin();
+    try {
+      await tx.request().input('idPaquete', idPaquete).input('unidades', unidades)
+        .query(`UPDATE SEL_PesajeElemento SET UnidadesPaquete = @unidades WHERE id_paquete = @idPaquete`);
+
+      // Igual que "Volver a pesar": solo hay algo que rehacer si el bulto YA estaba Cerrado
+      // (CantidadTotal ya calculado por trg_SEL_Bultos_CierreBulto). En un bulto abierto no se
+      // toca PRDProduccion todavía -- se escribe recién al cerrar.
+      if (paq.id_bulto != null && paq.CantidadTotal != null) {
+        const dtTotal = await tx.request().input('idBulto', paq.id_bulto).query(
+          `SELECT ISNULL(SUM(ISNULL(UnidadesPaquete, 100)), 0) AS Total FROM SEL_PesajeElemento WHERE id_bulto = @idBulto`
+        );
+        unidadesTotalBulto = Number(dtTotal.recordset[0].Total);
+
+        await tx.request().input('serialPadre', paq.serialPadre).input('total', unidadesTotalBulto).query(`
+          UPDATE PRDProduccion SET Unidades = @total, FechaModificado = GETDATE()
+          WHERE Detalle = @serialPadre
+        `);
+        // INVExistencias no guarda unidades por separado (solo Cantidad en kg) -- nada más que tocar.
+      }
+      await tx.commit();
+    } catch (errTx) {
+      await tx.rollback();
+      throw errTx;
+    }
+
+    res.json({
+      ok: true,
+      unidadesAnterior,
+      unidadesNuevo: unidades,
+      idBulto: paq.id_bulto,
+      consecutivoPaquete: paq.ConsecutivoPaquete,
+      bultoCerrado: paq.CantidadTotal != null,
+      unidadesTotalBulto
+    });
+  } catch (err) {
+    const falta = /Invalid column name 'UnidadesPaquete'/i.test(err.message);
+    res.json({ ok: false, error: falta ? 'Falta la columna SEL_PesajeElemento.UnidadesPaquete (ejecute agregar_unidadespaquete_pesajeelemento.sql).' : err.message });
   }
 });
 
@@ -5701,144 +6079,11 @@ function fechaHoraLocalBD(fecha) {
   });
 }
 
-// Turnos que se usan cuando la maquina no tiene ninguno cargado en TURHorariosMaquinas (en
-// produccion pasa con 4 de las 16 selladoras: 03, 08, 09 y 12 -- comprobado el 12/09/2026). Son los
-// tres de 8 horas que si tienen asignados las otras 12, todas con las mismas cinco franjas.
-// Ver la NOTA SOBRE EL TURNO en agregar_bitacora_turno.sql.
-const TURNOS_BASE_SELLADORA = [6, 7, 8];
-
-// 'HH:MM' -> minutos desde medianoche. NOMTurnos.HoraInicial/HoraFinal y
-// TURHorariosMaquinas.HoraInicio/HoraFin son varchar, no time.
-function minutosDelDia(hhmm) {
-  const m = /^\s*(\d{1,2}):(\d{2})/.exec(String(hhmm || ''));
-  if (!m) return null;
-  const minutos = Number(m[1]) * 60 + Number(m[2]);
-  return minutos >= 0 && minutos < 1440 ? minutos : null;
-}
-
-// Fecha local en 'YYYY-MM-DD'. Se manda como TEXTO a la columna DATE: pasar un Date de JS deja que
-// el driver lo convierta a UTC y un turno abierto a las 21:30 terminaria imputado al dia siguiente.
-function fechaISOLocal(fecha) {
-  const d = new Date(fecha);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-
-// Turno en el que cae `momento` para una maquina, deducido de su horario (decision del usuario,
-// 12/09/2026). Devuelve { turno, descripcion, fechaTurno } -- turno/descripcion en null si no hay
-// ninguna franja que contenga esa hora (la bitacora igual se abre: tiene operario, maquina y horas).
-//
-// Las DOS reglas que no salen de ninguna tabla y que hay que conocer antes de tocar esto:
-//   - Los horarios SE SOLAPAN (la SELLADORA 04 tiene Tarde 14:00-22:00 y Pleno Noche 18:00-05:45 a
-//     la vez). Desempata la franja MAS CORTA: los turnos "Pleno" son jornadas extendidas montadas
-//     encima de los tres turnos normales de 8 horas, y el ordinario es el que la planta usa por
-//     defecto.
-//   - Si la maquina no tiene horarios, se usan los tres turnos base (TURNOS_BASE_SELLADORA).
-// Si alguna de las dos no es lo que quiere la planta, lo correcto es arreglar los DATOS antes que
-// este codigo -- ver agregar_bitacora_turno.sql.
-async function resolverTurnoMaquina(p, maquinaCodigo, momento) {
-  const cuando = momento ? new Date(momento) : new Date();
-  const dtHorarios = await p.request().input('maquina', maquinaCodigo).query(`
-    SELECT th.CodigoTurno AS Codigo, t.Descripcion, th.HoraInicio, th.HoraFin
-    FROM TURHorariosMaquinas th
-    INNER JOIN NOMTurnos t ON t.Codigo = th.CodigoTurno
-    WHERE th.CodigoMaquina = @maquina
-  `);
-  let franjas = dtHorarios.recordset;
-  if (franjas.length === 0) {
-    const dtBase = await p.request().query(`
-      SELECT Codigo, Descripcion, HoraInicial AS HoraInicio, HoraFinal AS HoraFin
-      FROM NOMTurnos WHERE Codigo IN (${TURNOS_BASE_SELLADORA.join(',')})
-    `);
-    franjas = dtBase.recordset;
-  }
-
-  const minutosAhora = cuando.getHours() * 60 + cuando.getMinutes();
-  const candidatas = franjas.map(f => {
-    const ini = minutosDelDia(f.HoraInicio);
-    const fin = minutosDelDia(f.HoraFin);
-    if (ini == null || fin == null) return null;
-    // fin <= ini => la franja cruza medianoche (22:00-06:00).
-    const cruzaMedianoche = fin <= ini;
-    const contiene = cruzaMedianoche ? (minutosAhora >= ini || minutosAhora < fin) : (minutosAhora >= ini && minutosAhora < fin);
-    if (!contiene) return null;
-    return {
-      codigo: f.Codigo,
-      descripcion: f.Descripcion,
-      duracion: cruzaMedianoche ? (1440 - ini + fin) : (fin - ini),
-      // Estamos en el pedazo DESPUES de medianoche de un turno que empezo ayer.
-      despuesDeMedianoche: cruzaMedianoche && minutosAhora < fin
-    };
-  }).filter(Boolean);
-
-  if (candidatas.length === 0) {
-    return { turno: null, descripcion: null, fechaTurno: fechaISOLocal(cuando) };
-  }
-  candidatas.sort((a, b) => a.duracion - b.duracion);
-  const elegida = candidatas[0];
-
-  // El turno de la noche que arranco ayer se imputa a AYER, no al dia del reloj: los bultos de las
-  // 2 a.m. son del turno de anoche, que es como los cuenta la planta.
-  const fechaBase = new Date(cuando);
-  if (elegida.despuesDeMedianoche) fechaBase.setDate(fechaBase.getDate() - 1);
-
-  return { turno: elegida.codigo, descripcion: elegida.descripcion, fechaTurno: fechaISOLocal(fechaBase) };
-}
-
-async function cerrarBitacora(p, idBitacora, motivo) {
-  await p.request().input('id', idBitacora).input('motivo', motivo).query(
-    `UPDATE SEL_BitacoraTurno SET HoraCierre = GETDATE(), MotivoCierre = @motivo
-     WHERE IdBitacora = @id AND HoraCierre IS NULL`
-  );
-}
-
-// Abre la bitacora del turno, o REUSA la que ya este abierta si es del mismo operario y del mismo
-// turno. Se llama desde "tomar control de la maquina".
-//
-// Lo de reusar es un requisito explicito del usuario (12/09/2026): "no cuando el operario cierra
-// sesion porque puede pasar que se vaya el internet o retome la orden". Un corte de red, un
-// re-login o volver a tomar control a mitad del turno NO pueden partir la bitacora en dos.
-// Por eso tampoco hay nada que cierre la bitacora en /logout: solo la cierra un RELEVO (otro
-// operario toma la maquina) o el CAMBIO DE TURNO.
-//
-// Nunca revienta hacia afuera: si algo falla, se registra en consola y el operario igual toma
-// control de la maquina. La bitacora es un registro, no puede bloquear la produccion.
-async function abrirOReanudarBitacora(p, maquinaCodigo, operarioCodigo) {
-  try {
-    const turnoAhora = await resolverTurnoMaquina(p, maquinaCodigo);
-
-    const dtAbierta = await p.request().input('maquina', maquinaCodigo).query(`
-      SELECT TOP 1 IdBitacora, Operario, Turno, CONVERT(varchar(10), FechaTurno, 23) AS FechaTurno
-      FROM SEL_BitacoraTurno WHERE Maquina = @maquina AND HoraCierre IS NULL
-      ORDER BY IdBitacora DESC
-    `);
-
-    if (dtAbierta.recordset.length > 0) {
-      const abierta = dtAbierta.recordset[0];
-      const mismoOperario = abierta.Operario === operarioCodigo;
-      // Turno en null a los dos lados tambien cuenta como "el mismo" -- si no, una maquina sin
-      // horarios abriria una bitacora nueva en cada toma de control.
-      const mismoTurno = (abierta.Turno == null ? null : Number(abierta.Turno)) === turnoAhora.turno
-        && abierta.FechaTurno === turnoAhora.fechaTurno;
-      if (mismoOperario && mismoTurno) return abierta.IdBitacora;  // retome: la misma bitacora sigue
-      await cerrarBitacora(p, abierta.IdBitacora, mismoOperario ? 'cambio_turno' : 'relevo');
-    }
-
-    const dtNueva = await p.request()
-      .input('maquina', maquinaCodigo).input('operario', operarioCodigo)
-      .input('turno', turnoAhora.turno).input('fechaTurno', turnoAhora.fechaTurno)
-      .query(`
-        DECLARE @Insertados TABLE (Id INT);
-        INSERT INTO SEL_BitacoraTurno (Maquina, Operario, Turno, FechaTurno)
-        OUTPUT INSERTED.IdBitacora INTO @Insertados
-        VALUES (@maquina, @operario, @turno, @fechaTurno);
-        SELECT Id FROM @Insertados;
-      `);
-    return dtNueva.recordset[0].Id;
-  } catch (err) {
-    console.error('No se pudo abrir/reanudar la bitacora de turno (¿falta ejecutar agregar_bitacora_turno.sql?):', err.message);
-    return null;
-  }
-}
+// MOVIDO a sel-inventario-mp.js el 13/09/2026 (TURNOS_BASE_SELLADORA, minutosDelDia,
+// fechaISOLocal, resolverTurnoMaquina, cerrarBitacora, abrirOReanudarBitacora): scan-rollo.js
+// (el flujo de "Iniciar") tambien necesita abrir la bitacora, no solo tomar-control-ejecucion
+// aca abajo -- y scan-rollo.js no puede requerir este archivo (server.js YA lo requiere a el,
+// séria circular). Quedan importadas desde el require de sel-inventario-mp.js, arriba del todo.
 
 // Cabecera + renglones de una bitacora. `idBitacora` opcional: sin el se toma la que este ABIERTA
 // en esa maquina y, si no hay ninguna, la ultima que se cerro.
@@ -5879,7 +6124,8 @@ async function obtenerBitacora(p, maquinaCodigo, idBitacora) {
       INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
       OUTER APPLY (
         SELECT MIN(pe.FechaHora) AS PrimerPaquete, MAX(pe.FechaHora) AS UltimoPaquete,
-               COUNT(*) AS Paquetes, SUM(pe.PesoPaqueGr) AS PesoPaquetes
+               COUNT(*) AS Paquetes, SUM(pe.PesoPaqueGr) AS PesoPaquetes,
+               SUM(ISNULL(pe.UnidadesPaquete, 100)) AS UnidadesPaquetes
         FROM SEL_PesajeElemento pe WHERE pe.id_bulto = b.id
       ) pk
       OUTER APPLY (
@@ -5940,8 +6186,10 @@ function renderBitacora(datos, recientes, maquinaCodigo, usuario) {
   const esc = (x) => String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const { cabecera: c, renglones, rollos } = datos;
 
-  // Unidades: misma regla que el resto de la app (100 bolsas por paquete, ver UNIDADES_POR_PAQUETE).
-  const unidadesDe = (r) => (r.number_paqu || 0) * UNIDADES_POR_PAQUETE;
+  // FIX 13/09/2026: ya no es number_paqu x 100 fijo -- suma el UnidadesPaquete real de cada
+  // paquete del bulto (ver agregar_unidadespaquete_pesajeelemento.sql / "Modificar cantidad de
+  // paquetes"), que sigue siendo 100 por defecto salvo que el operario lo haya corregido.
+  const unidadesDe = (r) => Number(r.UnidadesPaquetes || 0);
   const totalPaquetes = renglones.reduce((s, r) => s + (r.number_paqu || 0), 0);
   const totalUnidades = renglones.reduce((s, r) => s + unidadesDe(r), 0);
   // PesoPaqueGr guarda KILOGRAMOS pese al nombre (ver FIX 02/09/2026 en scriptResumenBultoActivo).

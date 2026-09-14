@@ -10,7 +10,8 @@ const {
   registrarMateriaPrimaRollo, generarSalidaRollo, registrarControlParcialSellado,
   resolverTurnoPorHora, resolverClienteDestino, resolverDestinoOrden,
   obtenerLineaOriginalControlSellado, obtenerFechaLoteOriginalControlSellado,
-  obtenerOCrearOrdenProduccion, valNumerico, resolverTipoPedido, obtenerAnclaGrupoSellado
+  obtenerOCrearOrdenProduccion, valNumerico, resolverTipoPedido, obtenerAnclaGrupoSellado,
+  abrirOReanudarBitacora
 } = require('./sel-inventario-mp');
 
 function formatMMDD(d) {
@@ -119,6 +120,13 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
       WHEN MATCHED THEN UPDATE SET Operario = @operario, FechaHora = GETDATE()
       WHEN NOT MATCHED THEN INSERT (Maquina, Operario, FechaHora) VALUES (@maquina, @operario, GETDATE());
     `);
+    // FIX 13/09/2026 (a pedido del usuario): este es el mismo punto de "toma de control" que
+    // tomar-control-ejecucion (server.js) -- ahi ya se abria la bitacora de turno, pero al
+    // Iniciar (primer rollo de una orden nueva) nunca se llamaba, asi que un operario que
+    // arrancaba un proceso de cero (el caso mas comun, es donde se toma el alistamiento) se
+    // quedaba sin bitacora. Mismo criterio de "nunca revienta hacia afuera" que ya tiene
+    // abrirOReanudarBitacora -- si algo falla, Iniciar sigue su curso normal.
+    await abrirOReanudarBitacora(tx, nMaquina, codOperario);
   }
 
   const fHoy = new Date();
@@ -374,14 +382,21 @@ async function confirmarRollo(pool, { idOrden, idEjecucionActivo, serial, esNuev
       // Elemento por sí solo NO es llave suficiente -- dos pedidos DISTINTOS pueden compartir la
       // misma referencia de salida en momentos distintos. Exige también el mismo NumeroPedido en
       // ambos lados (ord1 Y ord2 contra g.Numero, el pedido para el que se armó ese grupo).
+      // FIX 13/09/2026 (a pedido del usuario, mismo patrón ya corregido en server.js/
+      // frmLiberacionProduccion.vb para el bug del pedido 11243): la llave real es ord.Linea, no
+      // ord.Elemento -- dos LÍNEAS DISTINTAS del mismo pedido pueden vender la misma referencia
+      // sin ser la misma agrupación física, y con Elemento como llave esas dos líneas se
+      // confundían entre sí. Server.js ya quedó así (obtenerColaOrdenes/obtenerIdGrupoSelladoDeOrden/
+      // obtenerMiembrosGrupoSellado); esta consulta se había quedado atrás, por eso la cola fusionaba
+      // la tarjeta pero Iniciar nunca activaba de verdad los hermanos.
       const dtHermanos = await tx.request().input('idOrden', idOrden).query(`
         SELECT ord2.IdOrden
         FROM SEL_OrdenProduccion ord1
-        INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Elemento = ord1.Elemento
+        INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Linea = ord1.Linea
         INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl1.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
           AND g.Numero = ord1.NumeroPedido
         INNER JOIN PRDGrupoEtapasCompartidasLineas gl2 ON gl2.IdGrupo = g.IdGrupo
-        INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Elemento = gl2.Elemento AND ord2.NumeroPedido = g.Numero
+        INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gl2.Linea AND ord2.NumeroPedido = g.Numero
         WHERE ord1.IdOrden = @idOrden AND ord2.IdOrden <> @idOrden AND ord2.Estado = 'Pendiente'
       `);
       for (const filaHermano of dtHermanos.recordset) {
