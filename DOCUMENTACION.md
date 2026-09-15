@@ -225,3 +225,37 @@ tienen 2. Un total de 18.949 se guarda como 18.95 en esas tres — igual que hac
   calcula merma.
 
 Requiere ejecutar **`agregar_repesaje_paquete.sql`** una sola vez contra la base.
+
+## 12. `SEL_TiempoMuerto.DuracionMinutos` (15/09/2026)
+
+Las dos bases tenían definida distinto esta columna, y en producción llevaba desde el 03/09/2026
+guardando NULL:
+
+| Base | Cómo estaba | Resultado |
+|---|---|---|
+| `carlixplastPrueba` | columna **calculada** `AS DATEDIFF(MINUTE, HoraInicio, HoraFin) PERSISTED` | se llenaba sola |
+| `carlixplast` | columna `INT` normal, que no escribe nadie | **NULL en las 77 filas** |
+
+El origen: `POST /reanudar` la llenaba a mano, eso reventaba contra `carlixplastPrueba` (*"cannot be
+modified because it is either a computed column..."*), se quitó la asignación de `server.js` — y en
+producción, donde no era calculada, quedó sin nadie que la llenara.
+
+**No se perdió información:** `HoraInicio` y `HoraFin` están completos, así que la duración siempre
+se puede derivar con `DATEDIFF(MINUTE, HoraInicio, HoraFin)`. El problema era otro: una columna que
+existe, tiene nombre creíble y devuelve NULL es una trampa para cualquier Excel o Power BI que haga
+`SUM(DuracionMinutos)` — lee "cero tiempo muerto", o sea eficiencia perfecta.
+
+Lo corrige **`corregir_duracionminutos_tiempomuerto.sql`**, que deja las dos bases con la columna
+calculada. Ejecutar una sola vez contra la base. Es idempotente: si ya es calculada, no hace nada.
+
+Notas:
+
+- La columna **no se asigna nunca desde la aplicación**. Al ser calculada, SQL Server la resuelve
+  sola cuando `/reanudar` guarda `HoraFin`. Volver a escribirla a mano reproduce el error de arriba.
+- Una columna normal no se puede convertir en calculada en sitio: hay que soltarla y recrearla. Por
+  eso el script **aborta** si encuentra valores escritos, en vez de borrarlos. Al correrlo en
+  producción no había ninguno, así que el cambio no costó datos.
+- Ojo con la unidad: `DATEDIFF(MINUTE, ...)` cuenta cruces de frontera, no duración real — de
+  10:00:59 a 10:01:01 da 1 minuto y de 10:00:00 a 10:00:59 da 0 (hoy 9 de las 77 filas dan 0). Sirve
+  para paradas de planta; si algún día alimenta un OEE que necesite segundos, hay que soltar y
+  recrear la columna otra vez en las dos bases.

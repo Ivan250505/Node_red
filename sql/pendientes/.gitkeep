@@ -1,0 +1,2 @@
+# Carpeta para migraciones escritas pero TODAVIA NO ejecutadas.
+# Cuando una se aplique en todas las bases, se mueve a ../aplicados/ y se marca en ../LEEME.md.
