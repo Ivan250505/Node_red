@@ -981,7 +981,16 @@ function scriptPesoEnVivo() {
           var texto = '—';
           try {
             var json = JSON.parse(evento.data);
-            if (json && typeof json.peso === 'number') texto = json.peso.toFixed(2);
+            if (json && typeof json.peso === 'number') {
+              texto = json.peso.toFixed(2);
+              // Ultimo peso recibido, en window para que lo pueda CAPTURAR la verificacion de
+              // bascula del protocolo (14/09/2026). Hasta ahora este numero solo se pintaba en el
+              // HTML y no quedaba en ninguna variable, asi que no habia forma de leerlo desde otro
+              // script. Se guarda tambien CUANDO llego: una lectura vieja (la bascula se
+              // desconecto hace rato) no sirve para verificar nada y hay que rechazarla.
+              window.ultimoPesoBascula = json.peso;
+              window.ultimoPesoBasculaEn = Date.now();
+            }
           } catch (e) { /* mensaje no valido -- se deja el guion */ }
           pesoNumeros.forEach(function(el) { el.textContent = texto; });
         };
@@ -2029,6 +2038,38 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, calid
       setInterval(revisarCalidadDelBulto, CALIDAD_SONDEO_MS);
     }
 
+    // Verificacion periodica de la bascula (14/09/2026). Mismo molde que el sondeo de Calidad de
+    // aca abajo: lo decide el servidor, no un setTimeout del navegador, asi que recargar la pagina
+    // o cambiar de pestana no reinicia la cuenta ni la duplica. Y tampoco se encima a otra ventana
+    // bloqueante: si hay una abierta se salta ese sondeo y reintenta al siguiente.
+    //
+    // Reusa verificarBascula() de scriptProtocoloArranque, que es la misma ventana del paso 6 del
+    // protocolo -- por eso esto solo corre en las paginas que cargan ese script. Si no estuviera
+    // (una pagina que no lo incluya), el sondeo se queda quieto en vez de reventar.
+    var PESO_PATRON_SONDEO_MS = 60000;
+    var pesoPatronEnPantalla = false;
+
+    function vigilarPesoPatron() {
+      revisarPesoPatron();
+      setInterval(revisarPesoPatron, PESO_PATRON_SONDEO_MS);
+    }
+
+    function revisarPesoPatron() {
+      if (pesoPatronEnPantalla || typeof verificarBascula !== 'function') return;
+      fetch('/selladora/' + ${jsString(maquinaCodigo)} + '/peso-patron-pendiente')
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function(datos) {
+          if (!datos || !datos.ok || !datos.pendiente) return;
+          if (pesoPatronEnPantalla || Swal.isVisible()) return;
+          pesoPatronEnPantalla = true;
+          verificarBascula(${JSON.stringify(idOrden)}, {
+            paso: 'peso_patron_periodico',
+            alTerminar: function() { pesoPatronEnPantalla = false; }
+          });
+        })
+        .catch(function() { /* red intermitente -- se reintenta en el proximo sondeo */ });
+    }
+
     function revisarCalidadDelBulto() {
       if (calidadEnPantalla || Date.now() < calidadReintentarDesde) return;
       fetch('/selladora/' + ${jsString(maquinaCodigo)} + '/orden/' + ${JSON.stringify(idOrden)} + '/calidad-pendiente')
@@ -2046,6 +2087,7 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, calid
     // -- llamar a vigilarCalidadDelBulto() desde el principio dejaba un setInterval(fn, undefined),
     // que es un setInterval de 0 ms sondeando sin parar.
     ${calidadHabilitada ? `vigilarCalidadDelBulto();` : ''}
+    ${calidadHabilitada ? `vigilarPesoPatron();` : ''}
   `;
 }
 
@@ -2474,7 +2516,7 @@ function scriptProtocoloArranque(maquinaCodigo) {
                 '<b>2.</b> Chequeo de peligro químico<br>' +
                 '<b>3.</b> Escaneo del rollo<br>' +
                 '<b>4.</b> Chequeo del rollo y de peligro físico<br>' +
-                '<b>5.</b> Alistamiento y temperatura de la perilla' +
+                '<b>5.</b> Alistamiento, verificación de la báscula y temperatura de la perilla' +
               '</div>' +
               '<div style="text-align:left;font-size:13px;color:#64748b;margin-top:12px;">' +
                 'Al continuar, la limpieza y desinfección queda registrada como actividad y empieza a contar el tiempo.' +
@@ -2648,7 +2690,131 @@ function scriptProtocoloArranque(maquinaCodigo) {
         subtitulo: 'Protocolo de arranque · paso 5 de 5',
         horaInicio: horaInicio,
         textoBoton: '■ Terminar alistamiento',
-        alTerminar: function() { pasoTemperaturaProtocolo(idOrden); }
+        // CAMBIO 14/09/2026: entre el alistamiento y la temperatura se intercalo la verificacion
+        // de la bascula. La temperatura sigue siendo el ultimo paso porque es la que redirige a
+        // producir.
+        alTerminar: function() {
+          verificarBascula(idOrden, { paso: 'peso_patron', alTerminar: function() { pasoTemperaturaProtocolo(idOrden); } });
+        }
+      });
+    }
+
+    // ---------------- Paso 6: verificacion de la bascula ----------------
+    // A pedido del usuario (14/09/2026). Al terminar el alistamiento, ANTES de la temperatura, se
+    // verifica que la bascula este midiendo bien: el operario pone el elemento patron, dice cuanto
+    // deberia pesar, y la tableta CAPTURA el peso que la bascula esta reportando en ese instante
+    // (window.ultimoPesoBascula, lo mantiene scriptPesoEnVivo desde el WebSocket /ws/peso).
+    //
+    // Decisiones del usuario, para que no se cambien sin querer:
+    //   - El elemento patron es FIJO: 5 kg para toda la planta (PESO_PATRON_KG en el servidor). El
+    //     operario no lo digita -- solo pone la pesa y captura.
+    //   - Tolerancia por PORCENTAJE (TOLERANCIA_PESO_PATRON_PCT, +-1%), que llega desde el servidor.
+    //   - Si NO concuerda, BLOQUEA: no se puede seguir hasta que de dentro de tolerancia. Por eso
+    //     la ventana no tiene boton de cancelar.
+    //   - Del peso capturado NO queda rastro: "se guarda temporal". En SEL_ProtocoloArranque solo
+    //     queda el veredicto (Conforme / NoConforme), como en los demas pasos.
+    // Cada INTENTO fallido se registra como NoConforme antes de dejar reintentar: saber cuantas
+    // veces hubo que tarar antes de que cuadrara es justo lo que hace util esta verificacion.
+    //
+    // La misma ventana la usa la revision periodica de cada 30-40 min (ver vigilarPesoPatron en
+    // scriptComandos); lo unico que cambia es el paso con que se guarda y a donde se vuelve.
+    var TOLERANCIA_PESO_PATRON_PCT = ${TOLERANCIA_PESO_PATRON_PCT};
+    var PESO_PATRON_KG = ${PESO_PATRON_KG};
+    // Una lectura de mas de 15s es de una bascula que ya no esta reportando: no sirve para verificar.
+    var PESO_BASCULA_VENCE_MS = 15000;
+
+    function pesoBasculaActual() {
+      if (typeof window.ultimoPesoBascula !== 'number') return null;
+      if (!window.ultimoPesoBasculaEn || (Date.now() - window.ultimoPesoBasculaEn) > PESO_BASCULA_VENCE_MS) return null;
+      return window.ultimoPesoBascula;
+    }
+
+    // opciones: { paso, alTerminar } -- paso es 'peso_patron' (arranque) o
+    // 'peso_patron_periodico' (la revision de cada 30-40 min).
+    function verificarBascula(idOrden, opciones) {
+      var paso = opciones.paso;
+      var alTerminar = opciones.alTerminar || function() {};
+
+      // Rango aceptado, calculado aca mismo para que el operario lo tenga a la vista y sepa contra
+      // que se le esta comparando en vez de recibir un "no concuerda" a secas.
+      var margen = PESO_PATRON_KG * TOLERANCIA_PESO_PATRON_PCT / 100;
+      var html =
+        '<div style="text-align:left;font-size:14px;">' +
+          '<div style="background:#fff4e5;border-left:5px solid #f39c12;padding:10px 12px;border-radius:8px;margin-bottom:14px;">' +
+            '<b>Antes de pesar:</b> oprima <b>TARA</b> en el transmisor de peso y espere a que marque cero. ' +
+            'Luego coloque el elemento patrón sobre la báscula.' +
+          '</div>' +
+          '<div style="display:flex;gap:12px;flex-wrap:wrap;">' +
+            '<div style="flex:1 1 160px;">' +
+              '<div class="label">Elemento patrón</div>' +
+              '<div style="font-size:24px;font-weight:800;">' + PESO_PATRON_KG.toFixed(3) + '<span style="font-size:15px;font-weight:600;"> kg</span></div>' +
+              '<div style="font-size:12px;color:#64748b;">Se acepta entre ' + (PESO_PATRON_KG - margen).toFixed(3) +
+                ' y ' + (PESO_PATRON_KG + margen).toFixed(3) + ' kg (±' + TOLERANCIA_PESO_PATRON_PCT + ' %)</div>' +
+            '</div>' +
+            '<div style="flex:1 1 160px;">' +
+              '<div class="label">Leyendo la báscula</div>' +
+              '<div style="font-size:30px;font-weight:800;" id="peso-patron-leido">—<span style="font-size:16px;font-weight:600;"> kg</span></div>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+
+      Swal.fire({
+        icon: 'info',
+        title: 'Verificación de báscula',
+        html: html,
+        width: 520,
+        confirmButtonText: '⚖️ Capturar peso',
+        confirmButtonColor: '#0078d7',
+        showCancelButton: false, showCloseButton: false,
+        allowOutsideClick: false, allowEscapeKey: false,
+        didOpen: function() {
+          // El peso de la ventana se refresca solo mientras esta abierta, para que el operario vea
+          // cuando la bascula se estabiliza antes de capturar.
+          var elLeido = document.getElementById('peso-patron-leido');
+          var tick = setInterval(function() {
+            if (!document.getElementById('peso-patron-leido')) { clearInterval(tick); return; }
+            var p = pesoBasculaActual();
+            elLeido.innerHTML = (p == null ? '—' : p.toFixed(3)) + '<span style="font-size:16px;font-weight:600;"> kg</span>';
+          }, 400);
+        },
+        preConfirm: function() {
+          var esperado = PESO_PATRON_KG;
+          var leido = pesoBasculaActual();
+          if (leido == null) {
+            Swal.showValidationMessage('La báscula no está reportando peso. Revise la conexión e intente de nuevo.');
+            return false;
+          }
+          var diferenciaPct = Math.abs(leido - esperado) / esperado * 100;
+          return { esperado: esperado, leido: leido, diferenciaPct: diferenciaPct,
+                   conforme: diferenciaPct <= TOLERANCIA_PESO_PATRON_PCT };
+        }
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed || !resultado.value) return;
+        var v = resultado.value;
+        var respuesta = v.conforme ? 'Conforme' : 'NoConforme';
+
+        // El veredicto se guarda SIEMPRE, tambien cuando no concuerda: el rastro de los intentos
+        // fallidos es lo que despues permite ver que esa bascula venia dando problemas.
+        guardarPasoProtocolo(idOrden, { paso: paso, respuesta: respuesta }, function() {
+          if (v.conforme) {
+            Swal.fire({
+              icon: 'success', title: 'Báscula verificada',
+              html: 'Leído <b>' + v.leido.toFixed(3) + ' kg</b> contra <b>' + v.esperado.toFixed(3) + ' kg</b>.<br>' +
+                    'Diferencia ' + v.diferenciaPct.toFixed(2) + ' %, dentro del ±' + TOLERANCIA_PESO_PATRON_PCT + ' % permitido.',
+              timer: 2400, showConfirmButton: false
+            }).then(alTerminar);
+            return;
+          }
+          // No concuerda -> se bloquea. La unica salida es tarar y volver a capturar.
+          Swal.fire({
+            icon: 'error', title: 'El peso NO concuerda',
+            html: 'Leído <b>' + v.leido.toFixed(3) + ' kg</b> contra <b>' + v.esperado.toFixed(3) + ' kg</b>.<br>' +
+                  'Diferencia <b>' + v.diferenciaPct.toFixed(2) + ' %</b>, por encima del ±' + TOLERANCIA_PESO_PATRON_PCT + ' % permitido.<br><br>' +
+                  'Oprima <b>TARA</b> en el transmisor de peso, verifique el elemento patrón y vuelva a capturar.',
+            confirmButtonText: 'Volver a capturar', confirmButtonColor: '#c0392b',
+            allowOutsideClick: false, allowEscapeKey: false
+          }).then(function() { verificarBascula(idOrden, opciones); });
+        });
       });
     }
 
@@ -2721,11 +2887,16 @@ function scriptProtocoloArranque(maquinaCodigo) {
       var idOrden = pendiente.idOrden;
       if (pendiente.paso === 'limpieza') { cronometroLimpieza(idOrden, pendiente.horaInicio); return; }
       if (pendiente.paso === 'alistamiento') { cronometroAlistamiento(idOrden, pendiente.horaInicio); return; }
+      if (pendiente.paso === 'peso_patron') {
+        verificarBascula(idOrden, { paso: 'peso_patron', alTerminar: function() { pasoTemperaturaProtocolo(idOrden); } });
+        return;
+      }
       if (pendiente.paso === 'temperatura') { pasoTemperaturaProtocolo(idOrden); return; }
 
       var textos = {
         peligro_quimico: 'Falta responder el chequeo de peligro químico para poder seguir.',
-        rollo: 'Falta escanear el rollo y responder su chequeo para poder seguir.'
+        rollo: 'Falta escanear el rollo y responder su chequeo para poder seguir.',
+        peso_patron: 'Falta verificar la báscula contra el elemento patrón para poder seguir.'
       };
       var continuar = function() {
         if (pendiente.paso === 'peligro_quimico') preguntarPeligroQuimico(idOrden);
@@ -5842,6 +6013,43 @@ app.get('/selladora/:codigo/orden/:idOrden/calidad-pendiente', requireLogin, asy
   }
 });
 
+// ¿Toca ya la verificacion periodica de la bascula? (a pedido del usuario, 14/09/2026: "esta
+// actividad tambien debe salir aleatoriamente cada 30-40 minutos"). Lo sondea la tableta, ver
+// vigilarPesoPatron() en scriptComandos.
+//
+// La verificacion es de la BASCULA, o sea de la MAQUINA: se mira la ultima hecha en esa maquina
+// sin importar por que orden paso el operario. Vale tanto la del arranque como una periodica
+// anterior (Paso LIKE 'peso_patron%'), porque las dos comprueban lo mismo -- no tiene sentido
+// pedirla a los 5 minutos de haberla hecho en el protocolo.
+//
+// El intervalo lo calcula proximaVerificacionBascula(), que es aleatorio pero DETERMINISTA para
+// una misma ultima verificacion: si se sorteara en cada sondeo, la ventana saldria antes o despues
+// segun el azar de cada consulta.
+app.get('/selladora/:codigo/peso-patron-pendiente', requireLogin, async (req, res) => {
+  const { codigo } = req.params;
+  try {
+    const p = await getPool();
+    const dtUltima = await p.request().input('maquina', codigo).query(`
+      SELECT TOP 1 pa.Id, pa.FechaHora
+      FROM SEL_ProtocoloArranque pa
+      INNER JOIN SEL_OrdenProduccion ord ON ord.IdOrden = pa.IdOrden
+      WHERE ord.Maquina = @maquina AND pa.Paso LIKE 'peso_patron%'
+      ORDER BY pa.Id DESC
+    `);
+    // Nunca se ha verificado en esta maquina (ordenes anteriores a este cambio): toca ya.
+    if (dtUltima.recordset.length === 0) return res.json({ ok: true, pendiente: true, ultima: null });
+
+    const { Id, FechaHora } = dtUltima.recordset[0];
+    const proxima = proximaVerificacionBascula(Id, FechaHora);
+    res.json({ ok: true, pendiente: Date.now() >= proxima.getTime(), ultima: FechaHora, proxima });
+  } catch (err) {
+    // Mismo blindaje que el resto: sin SEL_ProtocoloArranque no hay forma de saber cuando fue la
+    // ultima, y pedir la verificacion en cada sondeo seria peor que no pedirla.
+    console.error('No se pudo revisar la verificacion de bascula (¿falta ejecutar agregar_protocolo_arranque.sql?):', err.message);
+    res.json({ ok: true, pendiente: false, ultima: null });
+  }
+});
+
 // Tomar control de la EJECUCION (SEL_EjecucionOrden) -- vive en la cola de ordenes de la maquina
 // (renderColaOrdenes), no en Informacion (a pedido del usuario, 31/08/2026: el viejo boton "Tomar
 // control" de Informacion, que solo tocaba SEL_OperarioActualMaquina, se elimino -- esta ruta
@@ -6548,7 +6756,16 @@ app.post('/api/selladora/orden/:idOrden/reanudar', requireLogin, async (req, res
 // queden en SEL_TiempoMuerto exactamente igual que cualquier otra actividad -- que era justo lo
 // pedido ("queda registrado de la misma manera como actividad").
 const PASOS_PROTOCOLO_VALIDOS = new Set([
-  'limpieza', 'peligro_quimico', 'rollo_estado', 'peligro_fisico', 'alistamiento', 'temperatura'
+  'limpieza', 'peligro_quimico', 'rollo_estado', 'peligro_fisico', 'alistamiento', 'temperatura',
+  // Verificacion de la bascula contra el elemento patron (14/09/2026). Son DOS pasos y no uno
+  // porque se disparan distinto y hay que poder distinguirlos:
+  //   peso_patron            -> el del protocolo de arranque. obtenerProtocoloPendiente lo busca
+  //                             para saber si el arranque quedo a medias.
+  //   peso_patron_periodico  -> el que sale solo cada 30-40 min mientras se produce. Si usara la
+  //                             misma clave, una verificacion periodica haria creer al retome que
+  //                             el paso del arranque ya se hizo.
+  // Para un reporte que las quiera juntas: Paso LIKE 'peso_patron%'.
+  'peso_patron', 'peso_patron_periodico'
 ]);
 
 app.post('/api/selladora/orden/:idOrden/protocolo/respuesta', requireLogin, async (req, res) => {
@@ -6635,6 +6852,16 @@ async function obtenerProtocoloPendiente(p, idOrden) {
       return { idOrden: Number(idOrden), paso: 'rollo' };
     }
 
+    // Verificacion de bascula del ARRANQUE: va antes que la temperatura, y por eso se pregunta
+    // antes. Se mira solo 'peso_patron' y NO 'peso_patron_periodico' a proposito -- si se miraran
+    // las dos, una verificacion periodica de otra orden haria creer que el paso del arranque ya se
+    // hizo. Solo cuenta como hecha si quedo CONFORME: una que fallo deja el arranque a medias,
+    // que es justo lo que el usuario pidio al elegir que bloquee.
+    if (pasos.some(x => x.Paso === 'alistamiento')
+        && !pasos.some(x => x.Paso === 'peso_patron' && x.Respuesta === 'Conforme')) {
+      return { idOrden: Number(idOrden), paso: 'peso_patron' };
+    }
+
     if (pasos.some(x => x.Paso === 'alistamiento') && !pasos.some(x => x.Paso === 'temperatura')) {
       return { idOrden: Number(idOrden), paso: 'temperatura' };
     }
@@ -6643,6 +6870,44 @@ async function obtenerProtocoloPendiente(p, idOrden) {
     console.error('No se pudo leer el protocolo de arranque (¿falta ejecutar agregar_protocolo_arranque.sql?):', err.message);
     return null;
   }
+}
+
+// Tolerancia con la que se acepta que el peso de la bascula "concuerda" con el elemento patron
+// (decision del usuario, 14/09/2026: por porcentaje, +-1%). ES EL UNICO SITIO donde vive ese
+// numero: la tableta lo recibe de aca, no lo trae escrito.
+//
+// Ojo con subirlo o bajarlo a la ligera: el usuario decidio que una verificacion fallida BLOQUEA
+// hasta que concuerde, asi que una tolerancia muy estrecha deja la maquina parada y una muy
+// holgada deja pasar una bascula descalibrada.
+const TOLERANCIA_PESO_PATRON_PCT = 1;
+
+// Peso del elemento patron, en kilogramos (dato del usuario, 14/09/2026: "son 5 kg fijos"). Es la
+// misma pesa para toda la planta, por eso es una constante y no una tabla.
+//
+// CAMBIO respecto al diseno inicial: primero se decidio que el operario digitara cuanto pesaba la
+// pesa, y eso tenia un hueco -- quien ponia la referencia era la misma persona a la que se estaba
+// auditando. Con el valor fijo ese hueco desaparece: el operario solo pone la pesa en la bascula y
+// captura; no puede escribir el numero que haga cuadrar la lectura.
+//
+// Si algun dia cada maquina usa una pesa distinta, esto es lo que hay que convertir en tabla de
+// configuracion (maquina -> peso patron), y de paso la tolerancia de arriba.
+const PESO_PATRON_KG = 5;
+
+// Cada cuanto vuelve a salir la verificacion durante la produccion (a pedido del usuario:
+// "aleatoriamente cada 30-40 minutos").
+const PESO_PATRON_MIN_MS = 30 * 60 * 1000;
+const PESO_PATRON_MAX_MS = 40 * 60 * 1000;
+
+// Momento en que toca la proxima verificacion, a partir de la ultima que se hizo en esa MAQUINA.
+// El intervalo es aleatorio pero DETERMINISTA: sale del Id de la ultima verificacion, no de
+// Math.random(). Si se sorteara en cada sondeo, el "faltan 33 minutos" cambiaria cada 5 segundos y
+// la ventana saldria antes o despues segun el azar de cada consulta -- con esto, para una misma
+// ultima verificacion la hora siguiente es siempre la misma, la calcule quien la calcule.
+function proximaVerificacionBascula(idUltima, fechaUltima) {
+  const rango = PESO_PATRON_MAX_MS - PESO_PATRON_MIN_MS;
+  // Mezcla barata del Id para que ids consecutivos no den intervalos casi iguales.
+  const revuelto = ((Number(idUltima) * 2654435761) >>> 0) % rango;
+  return new Date(new Date(fechaUltima).getTime() + PESO_PATRON_MIN_MS + revuelto);
 }
 
 // Lo consulta el boton "▶ Iniciar" antes de arrancar el protocolo desde cero (ver
