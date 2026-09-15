@@ -121,6 +121,29 @@ function conectarNodeRed() {
 // -- solo un error de conexion real (Node-RED caido) se reporta como fallo al boton.
 const NODERED_HTTP_URL = process.env.NODERED_HTTP_URL || 'http://localhost:1880';
 
+// Simulador de PLC: sus enlaces estan ESCONDIDOS por defecto (a pedido del usuario, 15/09/2026).
+// Era un apoyo para probar sin PLC conectado y no tiene por que estar a la vista en planta.
+//
+// Se esconde con una bandera y no borrando el codigo porque la herramienta sigue sirviendo: para
+// volver a verla basta poner SIMULADOR_PLC_VISIBLE=1 en el .env y reiniciar, sin tocar nada.
+//
+// OJO: esto solo controla que se VEAN los enlaces. Las rutas /admin/simulador-plc siguen
+// existiendo y siguen protegidas por requireAdmin, asi que un administrador que escriba la URL a
+// mano puede seguir entrando. Si se quiere cerrar del todo, hay que guardar tambien las rutas con
+// esta misma bandera.
+const SIMULADOR_PLC_VISIBLE = process.env.SIMULADOR_PLC_VISIBLE === '1';
+
+// Bitacora de turno: su isla esta ESCONDIDA por defecto (a pedido del usuario, 15/09/2026), con el
+// mismo criterio que el simulador de PLC. Para volver a mostrarla: BITACORA_VISIBLE=1 en el .env.
+//
+// Lo que se esconde es SOLO la isla de la pantalla de la maquina. La ruta /selladora/:codigo/bitacora
+// sigue existiendo y sigue pidiendo sesion, asi que quien tenga el enlace puede entrar. Y, sobre
+// todo, la bitacora SE SIGUE ABRIENDO Y CERRANDO SOLA: abrirOReanudarBitacora() corre al tomar
+// control de la maquina pase lo que pase con esta bandera. Eso es a proposito -- si dejara de
+// registrarse, los turnos que pasen mientras este escondida quedarian sin bitacora y ese hueco no
+// se puede rellenar despues.
+const BITACORA_VISIBLE = process.env.BITACORA_VISIBLE === '1';
+
 async function enviarComandoANodeRed(cuerpo) {
   const controlador = new AbortController();
   const timeout = setTimeout(() => controlador.abort(), 4000);
@@ -769,7 +792,7 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
         <div class="header-info">
           <div class="sub">Máquinas con producción activa en este momento</div>
           ${esAdmin ? `<a class="volver" href="/admin/tablet-fija">📌 Tablet fija a máquina</a>` : ''}
-          ${esAdmin ? `<a class="volver" href="/admin/simulador-plc">🧪 Simulador de PLC</a>` : ''}
+          ${esAdmin && SIMULADOR_PLC_VISIBLE ? `<a class="volver" href="/admin/simulador-plc">🧪 Simulador de PLC</a>` : ''}
         </div>
         <div class="header-salir-grupo">
           <div class="header-usuario">👤 ${usuario}</div>
@@ -2416,8 +2439,10 @@ function scriptPreguntaActividadInicial() {
 //      "¿Identifica algun peligro fisico?". Si el rollo esta mal o hay peligro fisico, se vuelve a
 //      pedir otro serial; solo con rollo bueno y sin peligro se confirma y arranca la ejecucion.
 //   5) Arranca el cronometro del alistamiento (SEL_TiempoMuerto, Tipo alistamiento/arranque).
-//   6) Al terminarlo se pide la temperatura de la perilla -- por eso ya no existe el boton
-//      "🌡️ Temperatura perilla" de la pagina de Informacion, este paso lo reemplaza.
+//   6) Verificacion de la bascula contra el elemento patron (15/09/2026).
+//   7) Al terminarlo se pide el amperaje del ferroniquel -- hasta el 15/09/2026 este paso pedia el
+//      % de la perilla de temperatura; ver agregar_amperaje_ferroniquel.sql para el porque del
+//      cambio y de la tabla nueva.
 //
 // Nada de esto vive en el navegador: cada paso queda en la BASE apenas se responde (actividades en
 // SEL_TiempoMuerto, respuestas en SEL_ProtocoloArranque). Por eso si la tableta se recarga, se
@@ -2516,7 +2541,7 @@ function scriptProtocoloArranque(maquinaCodigo) {
                 '<b>2.</b> Chequeo de peligro químico<br>' +
                 '<b>3.</b> Escaneo del rollo<br>' +
                 '<b>4.</b> Chequeo del rollo y de peligro físico<br>' +
-                '<b>5.</b> Alistamiento, verificación de la báscula y temperatura de la perilla' +
+                '<b>5.</b> Alistamiento, verificación de la báscula y amperaje del ferroníquel' +
               '</div>' +
               '<div style="text-align:left;font-size:13px;color:#64748b;margin-top:12px;">' +
                 'Al continuar, la limpieza y desinfección queda registrada como actividad y empieza a contar el tiempo.' +
@@ -2694,7 +2719,7 @@ function scriptProtocoloArranque(maquinaCodigo) {
         // de la bascula. La temperatura sigue siendo el ultimo paso porque es la que redirige a
         // producir.
         alTerminar: function() {
-          verificarBascula(idOrden, { paso: 'peso_patron', alTerminar: function() { pasoTemperaturaProtocolo(idOrden); } });
+          verificarBascula(idOrden, { paso: 'peso_patron', alTerminar: function() { pasoAmperajeProtocolo(idOrden); } });
         }
       });
     }
@@ -2818,41 +2843,48 @@ function scriptProtocoloArranque(maquinaCodigo) {
       });
     }
 
-    // ---------------- Paso 6: temperatura de la perilla ----------------
-    // Reemplaza al boton "🌡️ Temperatura perilla" que vivia en la pagina de Informacion: la
-    // temperatura se pide una sola vez, al terminar el alistamiento, antes de empezar a producir.
-    function pasoTemperaturaProtocolo(idOrden) {
+    // ---------------- Paso 7: amperaje del ferroniquel ----------------
+    // CAMBIO 15/09/2026 (a pedido del usuario): este paso pedia el "% de la perilla de temperatura"
+    // y ahora pide el AMPERAJE que consume el ferroniquel. Es otra magnitud, no un cambio de
+    // nombre: por eso va a su propia tabla (SEL_AmperajeFerroniquel) y no a la de temperatura, que
+    // se queda con su historico intacto. Ver agregar_amperaje_ferroniquel.sql.
+    //
+    // Sigue siendo el ULTIMO paso del protocolo y el que redirige a producir.
+    function pasoAmperajeProtocolo(idOrden) {
       Swal.fire({
         icon: 'question',
-        title: 'Temperatura de trabajo',
+        title: 'Amperaje del ferroníquel',
         input: 'number',
-        inputLabel: '¿A qué porcentaje de la perilla va a trabajar? (0 a 100)',
-        inputAttributes: { min: '0', max: '100', step: '1', inputmode: 'numeric' },
+        inputLabel: '¿Cuántos amperios está consumiendo el ferroníquel?',
+        inputAttributes: { min: '0', max: '999', step: '0.01', inputmode: 'decimal' },
         confirmButtonText: 'Guardar y empezar a producir', confirmButtonColor: '#71bf44',
         showCancelButton: false, showCloseButton: false,
         allowOutsideClick: false, allowEscapeKey: false,
         inputValidator: function(valor) {
-          if (valor === '' || valor === null) return 'Escriba el porcentaje.';
+          if (valor === '' || valor === null) return 'Escriba el amperaje.';
           var n = Number(valor);
-          if (!isFinite(n) || n < 0 || n > 100) return 'Debe ser un número entre 0 y 100.';
+          // Rango holgado a proposito -- ver la NOTA SOBRE EL RANGO en
+          // agregar_amperaje_ferroniquel.sql. Este paso es obligatorio para arrancar: un rango
+          // apretado dejaria la maquina parada por no poder registrar un valor legitimo.
+          if (!isFinite(n) || n <= 0 || n > 999) return 'Debe ser un número de amperios mayor que 0.';
           return null;
         }
       }).then(function(resultado) {
         if (!resultado.isConfirmed) return;
         var valor = Number(resultado.value);
-        // A proposito NO se guarda desde un preConfirm: esta ventana no tiene boton de cancelar (la
-        // temperatura es obligatoria para arrancar), y con preConfirm un error que se repita -- por
-        // ejemplo que falte ejecutar agregar_temperatura_perilla.sql en esta base -- dejaria al
+        // A proposito NO se guarda desde un preConfirm: esta ventana no tiene boton de cancelar (el
+        // amperaje es obligatorio para arrancar), y con preConfirm un error que se repita -- por
+        // ejemplo que falte ejecutar agregar_amperaje_ferroniquel.sql en esta base -- dejaria al
         // operario encerrado en una ventana que no se puede cerrar. Con protocoloIntentar el error
         // sale con "Reintentar" y con "Salir"; si sale, el paso queda pendiente y se vuelve a pedir
         // al entrar de nuevo a la orden (la maquina ya esta produciendo, no hay nada trancado).
         protocoloIntentar(
-          function() { return protocoloPost('/api/selladora/orden/' + idOrden + '/temperatura', { porcentaje: valor }); },
+          function() { return protocoloPost('/api/selladora/orden/' + idOrden + '/amperaje', { amperaje: valor }); },
           function(datosTemp) {
-            guardarPasoProtocolo(idOrden, { paso: 'temperatura', respuesta: String(valor) }, function() {
+            guardarPasoProtocolo(idOrden, { paso: 'amperaje', respuesta: String(valor) }, function() {
               Swal.fire({
                 icon: 'success', title: 'Protocolo de arranque completo',
-                text: 'Temperatura registrada: ' + valor + ' %. Ya puede producir.',
+                text: 'Amperaje registrado: ' + valor + ' A. Ya puede producir.',
                 timer: 2200, showConfirmButton: false
               }).then(function() {
                 // El servidor decide el destino: si esta orden es de un grupo de sellado en
@@ -2888,10 +2920,10 @@ function scriptProtocoloArranque(maquinaCodigo) {
       if (pendiente.paso === 'limpieza') { cronometroLimpieza(idOrden, pendiente.horaInicio); return; }
       if (pendiente.paso === 'alistamiento') { cronometroAlistamiento(idOrden, pendiente.horaInicio); return; }
       if (pendiente.paso === 'peso_patron') {
-        verificarBascula(idOrden, { paso: 'peso_patron', alTerminar: function() { pasoTemperaturaProtocolo(idOrden); } });
+        verificarBascula(idOrden, { paso: 'peso_patron', alTerminar: function() { pasoAmperajeProtocolo(idOrden); } });
         return;
       }
-      if (pendiente.paso === 'temperatura') { pasoTemperaturaProtocolo(idOrden); return; }
+      if (pendiente.paso === 'amperaje') { pasoAmperajeProtocolo(idOrden); return; }
 
       var textos = {
         peligro_quimico: 'Falta responder el chequeo de peligro químico para poder seguir.',
@@ -2945,7 +2977,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
     </div>
   </header>
   <main>
-    <div class="islas-fila">
+    ${BITACORA_VISIBLE ? `<div class="islas-fila">
       <div class="isla isla-con-boton">
         <div class="isla-texto">
           <div class="label">Bitácora de turno</div>
@@ -2953,7 +2985,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
         </div>
         <a class="btn-accion btn-isla btn-info" href="/selladora/${maquinaCodigo}/bitacora">📋 Bitácora</a>
       </div>
-    </div>
+    </div>` : ''}
     <div class="barra">
       <span class="actualizado" id="cola-actualizado">Actualizado: ${new Date().toLocaleTimeString('es-CO')}</span>
     </div>
@@ -3300,10 +3332,11 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
           <h1>Pedido ${orden.NumeroPedido || '—'} ${badgeEstadoOrden(orden.Estado)}</h1>
           <div class="sub">${orden.Elemento}</div>
           <a class="volver" href="/selladora/${maquinaCodigo}">‹ ${orden.MaquinaNombre}</a>
-          ${/* TEMPORAL (13/09/2026, a pedido del usuario) -- acceso directo al Simulador de PLC
-               desde esta misma pantalla para probar sin PLC real conectado. QUITAR cuando se
-               termine de probar (o volver a dejarlo solo en la pantalla de Selladoras). */ ''}
-          ${esAdmin ? `<a class="volver" href="/admin/simulador-plc?maquina=${maquinaCodigo}">🧪 Simulador de PLC (temporal)</a>` : ''}
+          ${/* Acceso directo al Simulador de PLC desde esta misma pantalla (13/09/2026). Nacio
+               marcado como TEMPORAL "hasta terminar de probar"; el 15/09/2026 el usuario pidio
+               esconder el apartado, asi que ahora depende de SIMULADOR_PLC_VISIBLE igual que el
+               de la pantalla de Selladoras. */ ''}
+          ${esAdmin && SIMULADOR_PLC_VISIBLE ? `<a class="volver" href="/admin/simulador-plc?maquina=${maquinaCodigo}">🧪 Simulador de PLC</a>` : ''}
         </div>
         ${avanceCard}
         <div class="header-salir-grupo">
@@ -6592,13 +6625,26 @@ app.get('/selladora/:codigo/bitacora/:idBitacora?', requireLogin, async (req, re
 // antes de enviarse; idBulto es el bulto Activo en ese momento (window.idBultoActivo, lo mantiene
 // scriptResumenBultoActivo -- puede ser null si no hay bulto Activo). Ambos van para que Node-RED
 // sepa a que bulto pertenece e imprima la etiqueta del residuo/salida no conforme.
-// Temperatura de la perilla que digita el operario (ver agregar_temperatura_perilla.sql). Se
-// guarda con la hora, para saber que valor estaba puesto en cada momento de la orden.
-app.post('/api/selladora/orden/:idOrden/temperatura', requireLogin, async (req, res) => {
+// Rango con el que se valida el amperaje del ferroniquel. Holgado A PROPOSITO: el paso es
+// obligatorio para empezar a producir, asi que un rango apretado deja la maquina parada porque el
+// operario no puede registrar un valor legitimo, mientras que uno holgado solo deja pasar un error
+// de digitacion. Cuando se sepa el rango real del equipo, se ajusta aca y en el inputValidator de
+// pasoAmperajeProtocolo. Ver la NOTA SOBRE EL RANGO en agregar_amperaje_ferroniquel.sql.
+const AMPERAJE_MIN = 0;
+const AMPERAJE_MAX = 999;
+
+// Amperaje del ferroniquel que digita el operario (ver agregar_amperaje_ferroniquel.sql). Se
+// guarda con la hora, para saber que consumo habia en cada momento de la orden.
+//
+// CAMBIO 15/09/2026: este endpoint pedia el % de la perilla de temperatura y escribia en
+// SEL_TemperaturaPerilla. Ahora recibe amperios y escribe en SEL_AmperajeFerroniquel. La tabla
+// vieja NO se toca: un porcentaje y una corriente no son la misma magnitud, no hay nada que
+// convertir, y su unica fila historica sigue significando lo que significaba.
+app.post('/api/selladora/orden/:idOrden/amperaje', requireLogin, async (req, res) => {
   const idOrden = Number(req.params.idOrden);
-  const porcentaje = Number(req.body && req.body.porcentaje);
-  if (!Number.isFinite(porcentaje) || porcentaje < 0 || porcentaje > 100) {
-    return res.json({ ok: false, error: 'La temperatura debe ser un porcentaje entre 0 y 100.' });
+  const amperaje = Number(req.body && req.body.amperaje);
+  if (!Number.isFinite(amperaje) || amperaje <= AMPERAJE_MIN || amperaje > AMPERAJE_MAX) {
+    return res.json({ ok: false, error: `El amperaje debe ser un número mayor que ${AMPERAJE_MIN} y hasta ${AMPERAJE_MAX} A.` });
   }
   try {
     const p = await getPool();
@@ -6611,11 +6657,11 @@ app.post('/api/selladora/orden/:idOrden/temperatura', requireLogin, async (req, 
     await p.request()
       .input('idEjecucion', dtEj.recordset[0].IdEjecucion)
       .input('operario', req.session.usuario.codigoOperarioPRD || null)
-      .input('porcentaje', porcentaje)
-      .query(`INSERT INTO SEL_TemperaturaPerilla (id_ejecucion, Operario, Porcentaje) VALUES (@idEjecucion, @operario, @porcentaje)`);
+      .input('amperaje', amperaje)
+      .query(`INSERT INTO SEL_AmperajeFerroniquel (id_ejecucion, Operario, Amperaje) VALUES (@idEjecucion, @operario, @amperaje)`);
 
     // A donde mandar al operario cuando este es el ULTIMO paso del protocolo de arranque (ver
-    // pasoTemperaturaProtocolo). Se resuelve aca y no en la tableta porque solo el servidor sabe si
+    // pasoAmperajeProtocolo). Se resuelve aca y no en la tableta porque solo el servidor sabe si
     // esta orden pertenece a un grupo de sellado en paralelo: si pertenece, el sitio correcto es la
     // pagina del GRUPO (que lista las 3 referencias con Alternar/Finalizar), no la de la referencia
     // suelta -- si no, seria imposible alternar despues de arrancar.
@@ -6628,7 +6674,7 @@ app.post('/api/selladora/orden/:idOrden/temperatura', requireLogin, async (req, 
   } catch (err) {
     // Mensaje util si todavia no se ejecuto el script SQL en esta base.
     const falta = /Invalid object name/i.test(err.message);
-    res.json({ ok: false, error: falta ? 'Falta crear la tabla SEL_TemperaturaPerilla (ejecute agregar_temperatura_perilla.sql).' : err.message });
+    res.json({ ok: false, error: falta ? 'Falta crear la tabla SEL_AmperajeFerroniquel (ejecute agregar_amperaje_ferroniquel.sql).' : err.message });
   }
 });
 
@@ -6756,7 +6802,11 @@ app.post('/api/selladora/orden/:idOrden/reanudar', requireLogin, async (req, res
 // queden en SEL_TiempoMuerto exactamente igual que cualquier otra actividad -- que era justo lo
 // pedido ("queda registrado de la misma manera como actividad").
 const PASOS_PROTOCOLO_VALIDOS = new Set([
-  'limpieza', 'peligro_quimico', 'rollo_estado', 'peligro_fisico', 'alistamiento', 'temperatura',
+  'limpieza', 'peligro_quimico', 'rollo_estado', 'peligro_fisico', 'alistamiento',
+  // 'temperatura' es el nombre VIEJO del ultimo paso (el % de la perilla). Se deja en la lista a
+  // proposito aunque la tableta ya no lo mande: si no, un protocolo que quedo a medias antes del
+  // 15/09/2026 no podria ni terminar de guardar sus pasos. Lo nuevo es 'amperaje'.
+  'temperatura', 'amperaje',
   // Verificacion de la bascula contra el elemento patron (14/09/2026). Son DOS pasos y no uno
   // porque se disparan distinto y hay que poder distinguirlos:
   //   peso_patron            -> el del protocolo de arranque. obtenerProtocoloPendiente lo busca
@@ -6862,8 +6912,12 @@ async function obtenerProtocoloPendiente(p, idOrden) {
       return { idOrden: Number(idOrden), paso: 'peso_patron' };
     }
 
-    if (pasos.some(x => x.Paso === 'alistamiento') && !pasos.some(x => x.Paso === 'temperatura')) {
-      return { idOrden: Number(idOrden), paso: 'temperatura' };
+    // Ultimo paso. Cuenta como hecho tanto 'amperaje' (lo actual) como 'temperatura' (el % de la
+    // perilla, hasta el 15/09/2026): una orden que ya respondio el paso viejo NO tiene que volver a
+    // responderlo solo porque cambio la magnitud que se pide.
+    if (pasos.some(x => x.Paso === 'alistamiento')
+        && !pasos.some(x => x.Paso === 'amperaje' || x.Paso === 'temperatura')) {
+      return { idOrden: Number(idOrden), paso: 'amperaje' };
     }
     return null;
   } catch (err) {
