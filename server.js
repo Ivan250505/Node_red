@@ -666,6 +666,25 @@ function estilosBase() {
       cursor: pointer;
     }
     .calidad-opcion input { width: auto; margin: 0; }
+    /* ===== Calidad, un apartado por pantalla (15/09/2026, a pedido del usuario) =====
+       Al mostrar un solo apartado a la vez sobra sitio, y eso se gasta en agrandar el texto y los
+       checkbox: la tableta se opera de pie, con guantes y a un brazo de distancia, asi que el
+       tamano de toque es lo que decide si el operario acierta a la primera. */
+    .calidad-paso .calidad-pregunta { padding: 16px 4px; }
+    .calidad-paso .calidad-titulo { font-size: 18px; margin-bottom: 14px; line-height: 1.35; }
+    .calidad-paso .calidad-opciones { gap: 12px; }
+    .calidad-paso .calidad-opcion {
+      flex: 1 1 0; justify-content: center; gap: 10px; font-size: 17px; font-weight: 600;
+      border: 2px solid #cfd4da; border-radius: 12px; padding: 14px 10px; background: white;
+    }
+    /* El recuadro entero se pinta al marcarlo: a distancia se ve el color, no el checkbox. */
+    .calidad-paso .calidad-opcion:has(input:checked) { border-color: var(--verde); background: var(--verde-fondo); color: var(--verde); }
+    .calidad-paso .calidad-opcion.no-conforme:has(input:checked) { border-color: #c0392b; background: #fdecea; color: #c0392b; }
+    .calidad-paso .calidad-opcion input { width: 26px; height: 26px; accent-color: currentColor; }
+    /* Cuantos apartados van y cual es este. */
+    .calidad-progreso { font-size: 13px; color: var(--texto-suave); font-weight: 600; margin-bottom: 10px; }
+    .calidad-progreso-barra { height: 6px; border-radius: 999px; background: #e6e9ee; margin-top: 6px; overflow: hidden; }
+    .calidad-progreso-relleno { height: 100%; background: var(--verde); border-radius: 999px; transition: width .2s; }
     /* ===== Sellado en paralelo: tarjeta interactiva por referencia de salida (10/09/2026) =====
        Un pedido con VARIAS referencias de salida (ej. el 11410) tiene su propio apartado de
        informacion (ver renderGrupoSelladoDetalle): cada referencia es una tarjeta que se abre y
@@ -1448,6 +1467,20 @@ const UNIDADES_MEDIDA_BOLSA = {
   KG: ['kilogramo', 'kilogramos']
 };
 
+// Tolerancia de las medidas, EN LA UNIDAD DE CADA UNA (a pedido del usuario, 15/09/2026: "+-7mm o
+// +-1/4 pulg"). No se pregunta por un valor exacto sino por un RANGO: una bolsa sellada nunca sale
+// clavada al milimetro y exigir el valor justo obligaria a marcar No conforme casi siempre.
+//
+// Son la misma tolerancia expresada en cada sistema, no dos criterios distintos: 1/4 de pulgada son
+// 6.35 mm, que es el equivalente practico de los 7 mm del sistema metrico.
+//   PUL -> 0.25 pulgadas (1/4")
+//   CM  -> 0.7 cm  (7 mm)
+//   MT  -> 0.007 m (7 mm)
+// KG no esta a proposito: no es una medida de longitud y no hay forma de expresarle 7 mm. Una
+// unidad que no este en esta tabla hace que la pregunta vuelva a ser por el valor exacto, sin
+// rango -- ver calcularMedidasBolsa(). En produccion solo se usan PUL y CM (comprobado 15/09/2026).
+const TOLERANCIA_MEDIDA_POR_UNIDAD = { PUL: 0.25, CM: 0.7, MT: 0.007 };
+
 // Columnas y OUTER APPLY que traen esas medidas en las consultas de la orden. Ambas asumen que la
 // tabla SEL_OrdenProduccion viene con el alias `ord`, que es como se llama en las tres consultas
 // que las usan (GET /selladora/:codigo/orden/:idOrden, obtenerMiembrosGrupoSellado y
@@ -1481,11 +1514,14 @@ const JOINS_MEDIDAS_BOLSA = `
         WHERE r.Elemento = ord.Elemento
       ) med`;
 
-// Preguntas de medida que aplican a UNA orden, ya redactadas ("¿El ancho de la bolsa es de 10
-// pulgadas?"). `orden` es una fila que traiga las columnas de COLUMNAS_MEDIDAS_BOLSA. Se devuelve
-// tambien valorEsperado ("10 pulgadas") aparte del titulo, porque es lo que se guarda en la base
-// junto con la respuesta: dentro de un mes la referencia puede haber cambiado de medida y el
-// registro tiene que seguir diciendo contra que se comparo ese dia.
+// Preguntas de medida que aplican a UNA orden, ya redactadas ("¿El ancho de la bolsa esta entre
+// 9,75 y 10,25 pulgadas?"). `orden` es una fila que traiga las columnas de COLUMNAS_MEDIDAS_BOLSA.
+//
+// Se pregunta por un RANGO y no por el valor exacto (15/09/2026): ver
+// TOLERANCIA_MEDIDA_POR_UNIDAD. Se devuelve tambien valorEsperado ("10 pulgadas (9,75–10,25)")
+// aparte del titulo, porque es lo que se guarda en la base junto con la respuesta: dentro de un mes
+// la referencia puede haber cambiado de medida y el registro tiene que seguir diciendo contra que
+// se comparo ese dia y con que holgura.
 function calcularMedidasBolsa(orden) {
   const codigoUnidad = String(orden.MedidaUnidad || '').toUpperCase();
   const formasUnidad = UNIDADES_MEDIDA_BOLSA[codigoUnidad] || [codigoUnidad, codigoUnidad];
@@ -1495,10 +1531,28 @@ function calcularMedidasBolsa(orden) {
     if (!isFinite(n) || n === 0) return null;
     const valor = n.toLocaleString('es-CO', { maximumFractionDigits: 2 });
     const unidad = formasUnidad[n === 1 ? 0 : 1];
-    const valorEsperado = unidad ? `${valor} ${unidad}` : valor;
+    const tolerancia = TOLERANCIA_MEDIDA_POR_UNIDAD[codigoUnidad];
+
+    // Sin tolerancia conocida para esa unidad (ej. KG): se pregunta por el valor exacto, como
+    // antes. Es preferible a inventar un rango en una unidad que no es de longitud.
+    if (tolerancia == null) {
+      const valorEsperado = unidad ? `${valor} ${unidad}` : valor;
+      return {
+        clave: m.clave,
+        titulo: `¿${m.articulo} ${m.etiqueta} de la bolsa es de ${valorEsperado}?`,
+        valorEsperado
+      };
+    }
+
+    const formato = (x) => x.toLocaleString('es-CO', { maximumFractionDigits: 3 });
+    const minimo = formato(n - tolerancia);
+    const maximo = formato(n + tolerancia);
+    // ValorEsperado guarda el nominal Y el rango: dentro de unos meses, "10 pulgadas (9,75–10,25)"
+    // dice contra que se comparo y con que holgura, que es lo que hace auditable el registro.
+    const valorEsperado = `${valor} ${unidad} (${minimo}–${maximo})`;
     return {
       clave: m.clave,
-      titulo: `¿${m.articulo} ${m.etiqueta} de la bolsa es de ${valorEsperado}?`,
+      titulo: `¿${m.articulo} ${m.etiqueta} de la bolsa está entre ${minimo} y ${maximo} ${unidad}?`,
       valorEsperado
     };
   }).filter(Boolean);
@@ -1955,86 +2009,115 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, calid
     // apartados) en 'datos', mismo mecanismo que los demas botones.
     var APARTADOS_CALIDAD = ${JSON.stringify(apartadosCalidad)};
 
-    function abrirCalidad() {
+function abrirCalidad() {
       calidadEnPantalla = true;
-      var html = APARTADOS_CALIDAD.map(function(ap) {
-        var preguntasHtml = ap.preguntas.map(function(p) {
-          return '<div class="calidad-pregunta">' +
-            '<div class="calidad-titulo">' + p.titulo + '</div>' +
-            '<div class="calidad-opciones">' +
-              '<label class="calidad-opcion"><input type="checkbox" name="' + p.clave + '" value="conforme"> Conforme</label>' +
-              '<label class="calidad-opcion"><input type="checkbox" name="' + p.clave + '" value="no_conforme"> No conforme</label>' +
-            '</div>' +
-          '</div>';
-        }).join('');
-        return '<div class="calidad-apartado">' +
-          '<div class="calidad-apartado-titulo">' + ap.titulo + '</div>' +
-          preguntasHtml +
+      // Las respuestas se van juntando aca a medida que se recorren los apartados, para que volver
+      // atras no borre lo ya contestado.
+      mostrarApartadoCalidad(0, {});
+    }
+
+    // Un APARTADO POR PANTALLA (15/09/2026, a pedido del usuario): Medidas, luego Pelicula, etc.
+    // Antes salian todos juntos en una sola ventana con scroll, y en la tableta eso obligaba a
+    // checkbox y texto diminutos. Con uno a la vez sobra sitio y se puede agrandar todo (ver
+    // .calidad-paso en estilosBase).
+    //
+    // Avanza SOLO al terminar de contestar el apartado -- no hay boton de "siguiente". El operario
+    // marca la ultima pregunta y la pantalla pasa a la siguiente por su cuenta, con un respiro de
+    // 350 ms para que alcance a ver lo que marco antes de que cambie.
+    function mostrarApartadoCalidad(indice, respuestas) {
+      var ap = APARTADOS_CALIDAD[indice];
+      var esUltimo = indice === APARTADOS_CALIDAD.length - 1;
+      var avanzando = false;   // distingue "se completo y cerre yo la ventana" de "el operario cancelo"
+
+      var preguntasHtml = ap.preguntas.map(function(p) {
+        var marcada = respuestas[p.clave];
+        return '<div class="calidad-pregunta">' +
+          '<div class="calidad-titulo">' + p.titulo + '</div>' +
+          '<div class="calidad-opciones">' +
+            '<label class="calidad-opcion"><input type="checkbox" name="' + p.clave + '" value="conforme"' +
+              (marcada === 'conforme' ? ' checked' : '') + '> Conforme</label>' +
+            '<label class="calidad-opcion no-conforme"><input type="checkbox" name="' + p.clave + '" value="no_conforme"' +
+              (marcada === 'no_conforme' ? ' checked' : '') + '> No conforme</label>' +
+          '</div>' +
         '</div>';
       }).join('');
 
+      var pct = Math.round(indice / APARTADOS_CALIDAD.length * 100);
+      var html =
+        '<div class="calidad-progreso">Apartado ' + (indice + 1) + ' de ' + APARTADOS_CALIDAD.length +
+          '<div class="calidad-progreso-barra"><div class="calidad-progreso-relleno" style="width:' + pct + '%"></div></div>' +
+        '</div>' +
+        '<div class="calidad-paso">' + preguntasHtml + '</div>';
+
       Swal.fire({
-        title: 'Calidad',
+        title: 'Calidad · ' + ap.titulo,
         html: html,
-        width: 520,
-        confirmButtonText: 'Guardar',
-        confirmButtonColor: '#71bf44',
+        width: 560,
+        // Sin boton de confirmar: el apartado avanza solo. Los otros dos son "‹ Atras" (desde el
+        // segundo en adelante) y "Cancelar", que pospone el chequeo 5 minutos.
+        showConfirmButton: false,
+        showDenyButton: indice > 0,
+        denyButtonText: '‹ Atrás',
+        denyButtonColor: '#64748b',
         showCancelButton: true,
         cancelButtonText: 'Cancelar',
         cancelButtonColor: '#c0392b',
-        focusConfirm: false,
+        allowOutsideClick: false,
         didOpen: function() {
           var contenedor = Swal.getHtmlContainer();
-          APARTADOS_CALIDAD.forEach(function(ap) {
-            ap.preguntas.forEach(function(p) {
-              var checks = contenedor.querySelectorAll('input[name="' + p.clave + '"]');
-              checks.forEach(function(actual) {
-                actual.addEventListener('change', function() {
-                  if (actual.checked) {
-                    checks.forEach(function(otro) { if (otro !== actual) otro.checked = false; });
-                  }
+
+          function completo() {
+            return ap.preguntas.every(function(p) {
+              return contenedor.querySelector('input[name="' + p.clave + '"]:checked');
+            });
+          }
+
+          ap.preguntas.forEach(function(p) {
+            var checks = contenedor.querySelectorAll('input[name="' + p.clave + '"]');
+            checks.forEach(function(actual) {
+              actual.addEventListener('change', function() {
+                // Los dos checkbox de una misma pregunta son excluyentes: marcar uno desmarca el otro.
+                if (actual.checked) {
+                  checks.forEach(function(otro) { if (otro !== actual) otro.checked = false; });
+                }
+                if (!completo() || avanzando) return;
+                avanzando = true;
+                ap.preguntas.forEach(function(preg) {
+                  var marcado = contenedor.querySelector('input[name="' + preg.clave + '"]:checked');
+                  respuestas[preg.clave] = marcado.value;
                 });
+                setTimeout(function() { Swal.close(); }, 350);
               });
             });
           });
-        },
-        preConfirm: function() {
-          var contenedor = Swal.getHtmlContainer();
-          var respuestas = {};
-          var faltantes = [];
-          APARTADOS_CALIDAD.forEach(function(ap) {
-            ap.preguntas.forEach(function(p) {
-              var marcado = contenedor.querySelector('input[name="' + p.clave + '"]:checked');
-              if (!marcado) faltantes.push(p.titulo);
-              else respuestas[p.clave] = marcado.value;
-            });
-          });
-          if (faltantes.length > 0) {
-            Swal.showValidationMessage('Falta responder: ' + faltantes.join(', '));
-            return false;
-          }
-          return respuestas;
         }
       }).then(function(resultado) {
-        if (resultado.isConfirmed) {
-          // calidadEnPantalla se libera cuando el POST termina, no cuando se cierra la ventana: si
-          // se liberara antes, el sondeo de 5s podria alcanzar al guardado a medio camino (el
-          // servidor todavia no ha escrito el chequeo, /calidad-pendiente sigue diciendo que si) y
-          // volveria a abrir el mismo chequeo encima.
-          enviarComando('calidad', null, resultado.value)
-            .then(function(data) {
-              // Si no se pudo guardar (Node-RED caido, red intermitente) el chequeo sigue
-              // pendiente -- se reintenta en 5 minutos, no cada 5 segundos.
-              if (!data || !data.ok) calidadReintentarDesde = Date.now() + 5 * 60 * 1000;
-            })
-            .finally(function() { calidadEnPantalla = false; });
-        } else {
-          // Se cancelo -- se reintenta pronto (5 min) en vez de desaparecer: el chequeo debe
-          // insistir, no perderse porque se cancelo una vez (a pedido del usuario, 03/09/2026).
-          calidadReintentarDesde = Date.now() + 5 * 60 * 1000;
-          calidadEnPantalla = false;
+        if (avanzando) {
+          if (!esUltimo) { mostrarApartadoCalidad(indice + 1, respuestas); return; }
+          guardarCalidad(respuestas);
+          return;
         }
+        if (resultado.isDenied) { mostrarApartadoCalidad(indice - 1, respuestas); return; }
+        // Se cancelo -- se reintenta pronto (5 min) en vez de desaparecer: el chequeo debe
+        // insistir, no perderse porque se cancelo una vez (a pedido del usuario, 03/09/2026).
+        // Lo ya contestado se descarta: un chequeo a medias no es un chequeo.
+        calidadReintentarDesde = Date.now() + 5 * 60 * 1000;
+        calidadEnPantalla = false;
       });
+    }
+
+    function guardarCalidad(respuestas) {
+      // calidadEnPantalla se libera cuando el POST termina, no cuando se cierra la ventana: si se
+      // liberara antes, el sondeo de 5s podria alcanzar al guardado a medio camino (el servidor
+      // todavia no ha escrito el chequeo, /calidad-pendiente sigue diciendo que si) y volveria a
+      // abrir el mismo chequeo encima.
+      enviarComando('calidad', null, respuestas)
+        .then(function(data) {
+          // Si no se pudo guardar (Node-RED caido, red intermitente) el chequeo sigue pendiente --
+          // se reintenta en 5 minutos, no cada 5 segundos.
+          if (!data || !data.ok) calidadReintentarDesde = Date.now() + 5 * 60 * 1000;
+        })
+        .finally(function() { calidadEnPantalla = false; });
     }
 
     // Calidad no tiene boton (a pedido del usuario, 31/08/2026) -- sale sola.
@@ -6766,6 +6849,11 @@ app.post('/api/selladora/orden/:idOrden/reanudar', requireLogin, async (req, res
     // DuracionMinutos es una columna CALCULADA (AS DATEDIFF(MINUTE, HoraInicio, HoraFin) PERSISTED)
     // -- SQL Server la resuelve sola en cuanto se guarda HoraFin, no se puede asignar a mano
     // (por eso el error "cannot be modified because it is either a computed column...").
+    // OJO (15/09/2026): eso era cierto SOLO en carlixplastPrueba. En carlixplast era una columna INT
+    // normal y, como aca se dejo de escribirla, quedo en NULL en las 77 filas que habia -- una
+    // columna trampa para cualquier Excel/Power BI que hiciera SUM(DuracionMinutos). Lo iguala
+    // corregir_duracionminutos_tiempomuerto.sql; mientras una base no lo tenga ejecutado, la
+    // duracion de un tiempo muerto hay que derivarla con DATEDIFF(MINUTE, HoraInicio, HoraFin).
     await p.request().input('idEjecucion', IdEjecucion).query(`
       UPDATE SEL_TiempoMuerto SET HoraFin = GETDATE()
       WHERE id_ejecucion = @idEjecucion AND HoraFin IS NULL
