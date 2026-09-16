@@ -1757,6 +1757,26 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, calid
     // referencias de salida: ahi el mismo script maneja las N referencias del grupo y cada boton
     // tiene que mandar el comando contra SU orden, no contra la que quedo fija en el closure.
     // Sin ese parametro se comporta exactamente como antes.
+    // ¿Hay una ventana NUESTRA, de las que no se pueden perder, ocupando la pantalla?
+    //
+    // SweetAlert2 es un modal UNICO: cualquier Swal.fire() cierra el que este abierto. El aviso de
+    // "Comando enviado" no es importante -- es una confirmacion de cortesia -- pero cerraba de un
+    // plumazo el asistente de Calidad y la ventana de verificacion de bascula. Y en el caso de
+    // Calidad era peor que perder la pantalla: al cerrarse asi, el asistente lo leia como
+    // "cancelado", descartaba lo ya respondido y no volvia a preguntar hasta 5 minutos despues.
+    //
+    // Reportado por el usuario (16/09/2026): "cuando imprime el primer paquete la pestaña de
+    // calidad se cierra al salir la ventana emergente de comando enviado". Pasa justo ahi porque el
+    // chequeo de Calidad sale precisamente con el PRIMER paquete del bulto, que es el mismo momento
+    // en que el operario esta imprimiendo.
+    //
+    // typeof: estas banderas viven en scriptComandos, y este ayudante lo usan tambien scripts que
+    // pueden cargarse en paginas donde aquel no esta.
+    function hayVentanaQueNoSePuedePerder() {
+      return (typeof calidadEnPantalla !== 'undefined' && calidadEnPantalla)
+          || (typeof pesoPatronEnPantalla !== 'undefined' && pesoPatronEnPantalla);
+    }
+
     function enviarComando(comando, boton, datos, idOrdenDestino) {
       if (boton) boton.disabled = true;
       return fetch('/api/comando', {
@@ -1767,7 +1787,11 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, calid
         .then(function(r) { return r.json(); })
         .then(function(data) {
           if (data.ok) {
-            Swal.fire({ icon: 'success', title: 'Comando enviado', timer: 1500, showConfirmButton: false });
+            // El comando salio igual; lo unico que se omite es el aviso, para no cerrar una
+            // ventana que si importa (ver hayVentanaQueNoSePuedePerder).
+            if (!hayVentanaQueNoSePuedePerder()) {
+              Swal.fire({ icon: 'success', title: 'Comando enviado', timer: 1500, showConfirmButton: false });
+            }
           } else {
             Swal.fire({ icon: 'error', title: 'Error', text: data.error || 'No se pudo enviar el comando.', confirmButtonColor: '#71bf44' });
           }
