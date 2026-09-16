@@ -1021,8 +1021,18 @@ function scriptPesoEnVivo() {
     (function() {
       var pesoNumeros = document.querySelectorAll('.peso-vivo-numero');
       var pesoEstados = document.querySelectorAll('.peso-vivo-estado');
-      if (pesoNumeros.length === 0) return;
 
+      // FIX 16/09/2026 (bug real, reportado por el usuario: "en la parte del protocolo de calibrar
+      // la bascula no esta leyendo el peso que llega por ws/peso"). Antes aca habia un
+      //     if (pesoNumeros.length === 0) return;
+      // que cortaba el script entero cuando la pagina no tenia donde MOSTRAR el peso. Eso tenia
+      // sentido cuando el unico consumidor era el recuadro de la pantalla de Informacion, pero
+      // desde que existe la verificacion de bascula hay un segundo consumidor que NO pinta nada:
+      // verificarBascula() lee window.ultimoPesoBascula. Y el protocolo de arranque corre en la
+      // pantalla de la COLA de la maquina, que no tiene ningun .peso-vivo-numero -- asi que la
+      // conexion no se abria y la ventana decia siempre "La bascula no esta reportando peso".
+      // Ahora la conexion se abre SIEMPRE; lo unico que se salta, si no hay donde pintar, es
+      // pintar.
       function fijarEstado(conectado, texto) {
         pesoEstados.forEach(function(el) {
           el.textContent = texto;
@@ -3097,6 +3107,11 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
+  <!-- scriptPesoEnVivo va ANTES del protocolo y aunque esta pantalla no muestre el peso: el paso de
+       verificacion de bascula (verificarBascula) lee window.ultimoPesoBascula, que lo mantiene este
+       script desde el WebSocket /ws/peso. El protocolo de arranque corre aqui, en la cola, asi que
+       sin esto la ventana de la bascula no recibe ninguna lectura (16/09/2026). -->
+  <script>${scriptPesoEnVivo()}</script>
   <script>${scriptProtocoloArranque(maquinaCodigo)}</script>
   <script>${scriptActualizarCola(maquinaCodigo)}</script>
   <script>${scriptAvisoSuspension(maquinaCodigo)}</script>
