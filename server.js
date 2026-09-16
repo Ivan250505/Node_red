@@ -905,6 +905,7 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
             <div class="orden-pedido">🔗 Pedido ${ancla.NumeroPedido || '—'} ${badgeEstadoOrden(ancla.Estado)}</div>
             <div class="orden-elemento">${referencias}</div>
             <div class="orden-elemento" style="color:var(--texto-suave);">Un solo proceso -- ${miembros.length} referencias de salida</div>
+            ${ancla.OrdenProduccion ? `<div class="orden-elemento" style="color:var(--texto-suave);">OT: ${ancla.OrdenProduccion}</div>` : ''}
             ${infoFinalizadaGrupo}
           </div>
           <div class="orden-acciones">
@@ -978,6 +979,7 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
         <div class="orden-info">
           <div class="orden-pedido">Pedido ${o.NumeroPedido || '—'} ${badge}</div>
           <div class="orden-elemento">${o.Elemento}</div>
+          ${o.OrdenProduccion ? `<div class="orden-elemento" style="color:var(--texto-suave);">OT: ${o.OrdenProduccion}</div>` : ''}
           ${infoOperarioAsignado}
           ${infoFinalizada}
         </div>
@@ -3276,7 +3278,7 @@ function colorReferenciaGrupo(indice) {
   return COLORES_REFERENCIA_GRUPO[indice % COLORES_REFERENCIA_GRUPO.length];
 }
 
-function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin) {
+function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, ordenProduccion) {
   // Sellado en paralelo (ver DISENO_SELLADO_PARALELO_08092026.md): si esta orden comparte máquina
   // con otras (mismo rollo, hasta 3 referencias de salida distintas), grupoSellado trae TODAS las
   // referencias del grupo (incluida esta misma) -- solo se usa para saber si hay que ocultar
@@ -3453,7 +3455,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Especificaciones</h2>
     <div class="ejecucion-box"><div class="ejecucion-grid">${especificaciones}</div></div>
-    <h2 style="font-size:15px;margin:22px 0 10px;">Historial de materia prima</h2>
+    <h2 style="font-size:15px;margin:22px 0 10px;">Historial de materia prima${ordenProduccion ? ` · OT: ${ordenProduccion}` : ''}</h2>
     <div class="ejecucion-box">${filasHistorial}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
@@ -4238,6 +4240,12 @@ async function obtenerColaOrdenes(p, codigo) {
     SELECT ord.IdOrden, ord.Estado, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento,
            ej.Estado AS EstadoEjecucion, ej.Operario AS OperarioEjecucionCodigo, op.Nombre AS OperarioEjecucionNombre,
            ej.HoraFinReal,
+           -- Orden de Trabajo (PRDProduccion.OrdenProduccion, redefinicion 15/09/2026): se resuelve
+           -- por el primer bulto de esta ejecucion, igual patron que el endpoint de pausar. Null
+           -- mientras la orden sigue 'Pendiente' (todavia no se ha dado Iniciar y no existe OT).
+           (SELECT TOP 1 pp.OrdenProduccion FROM SEL_Bultos b
+            INNER JOIN PRDProduccion pp ON pp.Detalle = b.serialPadre
+            WHERE b.id_ejecucion = ej.IdEjecucion AND pp.OrdenProduccion IS NOT NULL) AS OrdenProduccion,
            (SELECT TOP 1 g.IdGrupo FROM PRDGrupoEtapasCompartidasLineas gl
             INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
             -- FIX 09/09/2026 (bug real: Pedido 11085 se coló en el grupo del Pedido 11408 porque
@@ -5130,7 +5138,7 @@ function renderTarjetaReferenciaGrupo(m, indice) {
 //   - Una tarjeta interactiva por referencia (ver renderTarjetaReferenciaGrupo).
 // "Ver bultos" lleva a la pagina de bultos del GRUPO (/grupo/:idGrupo/bultos), con el filtro por
 // referencia -- no a la de una sola orden.
-function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquinaCodigo, miembros, usuario, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente) {
+function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquinaCodigo, miembros, usuario, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, ordenProduccion) {
   // "Activo ahora" es el que esta recibiendo paquetes en este momento (su bulto esta Activo o
   // Temporal). Si ninguno lo esta (grupo recien creado, nadie ha dado Iniciar) no se ofrece
   // "+ Rollo": el rollo se registra siempre contra la referencia activa.
@@ -5235,7 +5243,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Referencias de salida</h2>
     ${tarjetasReferencia}
-    <h2 style="font-size:15px;margin:22px 0 10px;">Historial de materia prima (todo el grupo)</h2>
+    <h2 style="font-size:15px;margin:22px 0 10px;">Historial de materia prima (todo el grupo)${ordenProduccion ? ` · OT: ${ordenProduccion}` : ''}</h2>
     <div class="ejecucion-box">${filasHistorial}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
@@ -5415,6 +5423,10 @@ app.get('/selladora/:codigo/grupo/:idGrupo', requireLogin, async (req, res) => {
     // la que recibe el comando 'calidad' al responder.
     let pausaActiva = null;
     let calidadHabilitada = false;
+    // Orden de Trabajo (redefinicion 15/09/2026): las 3 referencias del grupo comparten la MISMA OT
+    // (obtenerAnclaGrupoSellado en el Node de scan-rollo.js la ancla por la referencia ancla del
+    // grupo) -- se resuelve una sola vez contra la ejecucion de la orden ancla.
+    let ordenProduccion = null;
     if (miembroAncla) {
       const dtEjecucion = await p.request().input('idOrden', miembroAncla.IdOrden).query(
         `SELECT TOP 1 IdEjecucion, Estado FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden`
@@ -5430,6 +5442,13 @@ app.get('/selladora/:codigo/grupo/:idGrupo', requireLogin, async (req, res) => {
         // Igual que en la pagina de una referencia: nunca en 'PendienteOperador' (nadie ha retomado
         // el control todavia, no tiene sentido pedir un chequeo sin un operario real detras).
         calidadHabilitada = miembroAncla.Estado === 'Activa' && estadoEjecucion !== 'PendienteOperador';
+
+        const dtOP = await p.request().input('idEjecucion', idEjecucion).query(`
+          SELECT TOP 1 pp.OrdenProduccion FROM SEL_Bultos b
+          INNER JOIN PRDProduccion pp ON pp.Detalle = b.serialPadre
+          WHERE b.id_ejecucion = @idEjecucion AND pp.OrdenProduccion IS NOT NULL
+        `);
+        if (dtOP.recordset.length > 0) ordenProduccion = dtOP.recordset[0].OrdenProduccion;
       }
     }
 
@@ -5443,7 +5462,7 @@ app.get('/selladora/:codigo/grupo/:idGrupo', requireLogin, async (req, res) => {
     // que bastarse solo, ya no hay boton "Más información" que lleve a la otra pagina).
     const protocoloPendiente = miembroAncla ? await obtenerProtocoloPendiente(p, miembroAncla.IdOrden) : null;
 
-    res.send(renderGrupoSelladoDetalle(idGrupo, miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente));
+    res.send(renderGrupoSelladoDetalle(idGrupo, miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, ordenProduccion));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
@@ -5541,6 +5560,20 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
       calidadHabilitada = orden.Estado === 'Activa' && estadoEjecucion !== 'PendienteOperador';
     }
 
+    // Orden de Trabajo (PRDProduccion.OrdenProduccion, redefinicion 15/09/2026, a pedido del
+    // usuario -- "apenas se cree en la tarjeta se coloca la orden de trabajo y adentro de la
+    // pantalla también"): mismo patron que obtenerColaOrdenes/el endpoint de pausar. Null mientras
+    // la orden sigue 'Pendiente' (no hay ejecucion ni bulto todavia).
+    let ordenProduccion = null;
+    if (idEjecucion) {
+      const dtOP = await p.request().input('idEjecucion', idEjecucion).query(`
+        SELECT TOP 1 pp.OrdenProduccion FROM SEL_Bultos b
+        INNER JOIN PRDProduccion pp ON pp.Detalle = b.serialPadre
+        WHERE b.id_ejecucion = @idEjecucion AND pp.OrdenProduccion IS NOT NULL
+      `);
+      if (dtOP.recordset.length > 0) ordenProduccion = dtOP.recordset[0].OrdenProduccion;
+    }
+
     // Los bultos producidos viven en su propia pagina (/selladora/:codigo/orden/:idOrden/bultos) --
     // aqui solo se necesita el conteo para el enlace, ver ese route para el detalle completo.
     const conteoBultos = await p.request().input('idOrden', idOrden).query(`
@@ -5584,7 +5617,7 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
     const protocoloPendiente = await obtenerProtocoloPendiente(p, Number(idOrden));
 
     const esAdmin = req.session.usuario.codigo === ADMIN_CODIGO;
-    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin));
+    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, ordenProduccion));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
@@ -6807,13 +6840,28 @@ app.post('/api/selladora/orden/:idOrden/pausar', requireLogin, async (req, res) 
     }
 
     const horaInicio = new Date();
+
+    // FIX 15/09/2026 (a pedido del usuario -- "todo debe quedar asociado a la orden de trabajo"):
+    // si la OT ya existe para esta ejecución (pausa durante producción activa, no el alistamiento
+    // previo al arranque), se resuelve y se escribe de una vez -- no hay que esperar al backfill
+    // de obtenerOCrearOrdenProduccion, que solo corre una vez, al crear la OT. Si todavía no existe
+    // (pausa pre-arranque), queda NULL aquí y se backfillea cuando nazca la OT.
+    const dtOP = await p.request().input('idEjecucion', IdEjecucion).query(`
+      SELECT TOP 1 pp.OrdenProduccion
+      FROM SEL_Bultos b
+      INNER JOIN PRDProduccion pp ON pp.Detalle = b.serialPadre
+      WHERE b.id_ejecucion = @idEjecucion AND pp.OrdenProduccion IS NOT NULL
+    `);
+    const tOrdenProduccionTM = dtOP.recordset.length > 0 ? dtOP.recordset[0].OrdenProduccion : null;
+
     await p.request()
       .input('idEjecucion', IdEjecucion).input('operario', operario).input('tipo', tipo)
       .input('subtipo', tipo === 'alistamiento' ? subtipo : null)
       .input('horaInicio', horaInicio).input('observaciones', observaciones ? observaciones.trim() : null)
+      .input('ordenProduccion', tOrdenProduccionTM)
       .query(`
-        INSERT INTO SEL_TiempoMuerto (id_ejecucion, Operario, Tipo, Subtipo, HoraInicio, Observaciones)
-        VALUES (@idEjecucion, @operario, @tipo, @subtipo, @horaInicio, @observaciones)
+        INSERT INTO SEL_TiempoMuerto (id_ejecucion, Operario, Tipo, Subtipo, HoraInicio, Observaciones, OrdenProduccion)
+        VALUES (@idEjecucion, @operario, @tipo, @subtipo, @horaInicio, @observaciones, @ordenProduccion)
       `);
     await p.request().input('idEjecucion', IdEjecucion).query(
       `UPDATE SEL_EjecucionOrden SET Estado = 'En pausa' WHERE IdEjecucion = @idEjecucion`

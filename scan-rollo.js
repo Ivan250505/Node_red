@@ -185,7 +185,7 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
   const nCodDestinoBulto = await resolverDestinoOrden(tx, idOrden, tNumeroPedido);
   const tOrdenProduccion = await obtenerOCrearOrdenProduccion(tx, {
     elemento: nElementoParaOP, fecha: fFechaSolo, lineaAncla: nLineaAnclaParaOP, lote: tLote,
-    codigoDestino: nCodDestinoBulto, generadoPor
+    codigoDestino: nCodDestinoBulto, generadoPor, idEjecucion
   });
 
   if (!sinMateriaPrima) {

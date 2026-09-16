@@ -439,7 +439,7 @@ async function obtenerAnclaGrupoSellado(db, idOrden) {
   return dt.recordset.length > 0 ? dt.recordset[0] : null;
 }
 
-async function obtenerOCrearOrdenProduccion(db, { elemento, fecha, lineaAncla, lote, codigoDestino, generadoPor }) {
+async function obtenerOCrearOrdenProduccion(db, { elemento, fecha, lineaAncla, lote, codigoDestino, generadoPor, idEjecucion }) {
   try {
     const dtExiste = await db.request()
       .input('fecha', fecha).input('lote', lote).input('elemento', elemento).input('lineaAncla', lineaAncla)
@@ -459,13 +459,41 @@ async function obtenerOCrearOrdenProduccion(db, { elemento, fecha, lineaAncla, l
 
     const tOP = `OP${lote}${String(nConsecutivo).padStart(4, '0')}${tSigla}`;
 
+    // FIX 15/09/2026 (a pedido del usuario): HoraInicioReal NO es GETDATE() -- el trabajo real
+    // empieza en el alistamiento/limpieza del protocolo de arranque (pasos 1-2), que corren ANTES
+    // de que exista esta OT (SEL_TiempoMuerto ya tiene filas para esta id_ejecucion, pero sin
+    // OrdenProduccion todavia porque no habia a que asociarlas). Se busca la hora MAS ANTIGUA de
+    // esos registros y esa es la que se usa como inicio real; solo si no hay ninguno (se salto el
+    // protocolo) se cae a GETDATE().
+    let fHoraInicioReal = null;
+    if (idEjecucion) {
+      const dtPrimerTM = await db.request().input('idEjecucion', idEjecucion)
+        .query(`SELECT MIN(HoraInicio) AS PrimeraHora FROM SEL_TiempoMuerto WHERE id_ejecucion = @idEjecucion`);
+      fHoraInicioReal = dtPrimerTM.recordset[0].PrimeraHora || null;
+    }
+
+    // FIX 15/09/2026 (Fase 1 del plan de Orden de Trabajo, a pedido del usuario -- mismo cambio
+    // portado a Produccion.vb): Estado/HoraInicioReal al crear la OT -- ver
+    // agregar_estado_horas_ordenesproduccion.sql (Source/Produccion/nueva produccion). NO se toca
+    // el lookup de arriba (WHERE Fecha/Lote/Elemento/LineaAncla) ni obtenerAnclaGrupoSellado.
     await db.request()
       .input('op', tOP).input('lote', lote).input('destino', codigoDestino).input('consecutivo', nConsecutivo)
       .input('fecha', fecha).input('elemento', elemento).input('lineaAncla', lineaAncla).input('generadoPor', generadoPor)
+      .input('horaInicioReal', fHoraInicioReal)
       .query(`
-        INSERT INTO PRDOrdenesProduccion (OrdenProduccion, Lote, Destino, Consecutivo, Fecha, Elemento, LineaAncla, TipoProceso, GeneradoPor, FechaCreacion)
-        VALUES (@op, @lote, @destino, @consecutivo, @fecha, @elemento, @lineaAncla, 'Sellado', @generadoPor, GETDATE())
+        INSERT INTO PRDOrdenesProduccion (OrdenProduccion, Lote, Destino, Consecutivo, Fecha, Elemento, LineaAncla, TipoProceso, GeneradoPor, FechaCreacion, Estado, HoraInicioReal)
+        VALUES (@op, @lote, @destino, @consecutivo, @fecha, @elemento, @lineaAncla, 'Sellado', @generadoPor, GETDATE(), 'Activa', ISNULL(@horaInicioReal, GETDATE()))
       `);
+
+    // FIX 15/09/2026 (a pedido del usuario): backfill -- los SEL_TiempoMuerto de esta ejecucion
+    // que quedaron con OrdenProduccion NULL (limpieza/alistamiento previos, ver arriba) ya pueden
+    // asociarse a la OT recien creada. Requiere SEL_TiempoMuerto.OrdenProduccion (ver
+    // sql/pendientes/20260915_agregar_ordenproduccion_tiempomuerto.sql).
+    if (idEjecucion) {
+      await db.request().input('idEjecucion', idEjecucion).input('op', tOP)
+        .query(`UPDATE SEL_TiempoMuerto SET OrdenProduccion = @op WHERE id_ejecucion = @idEjecucion AND OrdenProduccion IS NULL`);
+    }
+
     return tOP;
   } catch (err) {
     return '';
@@ -609,6 +637,16 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
       INNER JOIN SEL_Bultos b ON b.serialPadre = p.Detalle
       INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
       WHERE ej.IdOrden = @idOrden AND b.estado = 'Cerrado'
+    `);
+    // FIX 15/09/2026 (Fase 1, a pedido del usuario): registra HoraFinReal en cada Finalizar.
+    // A PROPOSITO no se toca Estado aqui -- cuando la OT es compartida por un grupo Sellado en
+    // paralelo (obtenerAnclaGrupoSellado), finalizar UNA referencia no significa que las demas
+    // del grupo tambien terminaron; marcar Estado='Finalizada' aqui podria cerrar en falso una OT
+    // que otra referencia hermana sigue usando. Queda pendiente de definir el criterio de "grupo
+    // completo finalizado" antes de tocar Estado. HoraFinReal si es seguro: es solo timestamp del
+    // ultimo cierre, sin efecto en reportes que dependan de Estado.
+    await db.request().input('op', tOP).query(`
+      UPDATE PRDOrdenesProduccion SET HoraFinReal = GETDATE() WHERE OrdenProduccion = @op
     `);
   }
 
