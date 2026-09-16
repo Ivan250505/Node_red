@@ -273,7 +273,7 @@ async function registrarControlParcialSellado(db, { idOrden, elemento, fecha, an
 
   const dtControl = await db.request()
     .input('elemento', elemento).input('fecha', sql.Date, fecha).input('lineaOriginal', nLineaOriginal).input('lote', lote)
-    .query(`SELECT IdExtrusionControl FROM PRDExtrusionControl WHERE ElementoOriginal = @elemento AND FechaOriginal = @fecha AND LineaOriginal = @lineaOriginal AND LoteOriginal = @lote AND TipoProceso = 'Sellado'`);
+    .query(`SELECT IdExtrusionControl FROM PRDExtrusionControl WHERE ElementoOriginal = @elemento AND FechaOriginal = @fecha AND LineaOriginal = @lineaOriginal AND LoteOriginal = @lote AND TipoProceso = 'SELLADORA'`);
 
   let nIdControl;
   if (dtControl.recordset.length > 0) {
@@ -286,7 +286,7 @@ async function registrarControlParcialSellado(db, { idOrden, elemento, fecha, an
       .query(`
         INSERT INTO PRDExtrusionControl (ElementoOriginal, FechaOriginal, LineaOriginal, LoteOriginal, MaterialTotalKg, MaterialConsumidoKg, Estado, TipoProceso, UsuarioCreacion, FechaCreacion)
         OUTPUT INSERTED.IdExtrusionControl
-        VALUES (@elemento, @fecha, @lineaOriginal, @lote, @materialTotal, 0, 'EnProceso', 'Sellado', @generadoPor, GETDATE())
+        VALUES (@elemento, @fecha, @lineaOriginal, @lote, @materialTotal, 0, 'EnProceso', 'SELLADORA', @generadoPor, GETDATE())
       `);
     if (dtNuevo.recordset.length === 0) return;
     nIdControl = dtNuevo.recordset[0].IdExtrusionControl;
@@ -482,7 +482,7 @@ async function obtenerOCrearOrdenProduccion(db, { elemento, fecha, lineaAncla, l
       .input('horaInicioReal', fHoraInicioReal)
       .query(`
         INSERT INTO PRDOrdenesProduccion (OrdenProduccion, Lote, Destino, Consecutivo, Fecha, Elemento, LineaAncla, TipoProceso, GeneradoPor, FechaCreacion, Estado, HoraInicioReal)
-        VALUES (@op, @lote, @destino, @consecutivo, @fecha, @elemento, @lineaAncla, 'Sellado', @generadoPor, GETDATE(), 'Activa', ISNULL(@horaInicioReal, GETDATE()))
+        VALUES (@op, @lote, @destino, @consecutivo, @fecha, @elemento, @lineaAncla, 'SELLADORA', @generadoPor, GETDATE(), 'Activa', ISNULL(@horaInicioReal, GETDATE()))
       `);
 
     // FIX 15/09/2026 (a pedido del usuario): backfill -- los SEL_TiempoMuerto de esta ejecucion
@@ -652,7 +652,7 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
 
   const dtCtrl = await db.request()
     .input('elemento', nUltimoElemento).input('fecha', fFechaOriginal).input('lineaOriginal', nLineaOriginal).input('lote', tLoteOriginal)
-    .query(`SELECT IdExtrusionControl FROM PRDExtrusionControl WHERE ElementoOriginal = @elemento AND FechaOriginal = @fecha AND LineaOriginal = @lineaOriginal AND LoteOriginal = @lote AND TipoProceso = 'Sellado'`);
+    .query(`SELECT IdExtrusionControl FROM PRDExtrusionControl WHERE ElementoOriginal = @elemento AND FechaOriginal = @fecha AND LineaOriginal = @lineaOriginal AND LoteOriginal = @lote AND TipoProceso = 'SELLADORA'`);
   if (dtCtrl.recordset.length === 0) return;
   const nIdCtrl = dtCtrl.recordset[0].IdExtrusionControl;
 
