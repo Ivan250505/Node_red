@@ -6203,8 +6203,12 @@ app.get('/selladora/:codigo/peso-patron-pendiente', requireLogin, async (req, re
       WHERE ord.Maquina = @maquina AND pa.Paso LIKE 'peso_patron%'
       ORDER BY pa.Id DESC
     `);
-    // Nunca se ha verificado en esta maquina (ordenes anteriores a este cambio): toca ya.
-    if (dtUltima.recordset.length === 0) return res.json({ ok: true, pendiente: true, ultima: null });
+    // Nunca se ha verificado en esta maquina. NO se pide de inmediato (FIX 16/09/2026, mismo
+    // reporte que el de obtenerProtocoloPendiente): eso solo pasa con ordenes que arrancaron antes
+    // de que el paso existiera, y abrirles la ventana apenas entran es exactamente la molestia que
+    // se quiere evitar. Se corrige solo: la proxima orden que pase por el protocolo deja su
+    // verificacion de arranque, y a partir de ahi el conteo de 30-40 min arranca normal.
+    if (dtUltima.recordset.length === 0) return res.json({ ok: true, pendiente: false, ultima: null });
 
     const { Id, FechaHora } = dtUltima.recordset[0];
     const proxima = proximaVerificacionBascula(Id, FechaHora);
@@ -7056,21 +7060,30 @@ async function obtenerProtocoloPendiente(p, idOrden) {
       return { idOrden: Number(idOrden), paso: 'rollo' };
     }
 
-    // Verificacion de bascula del ARRANQUE: va antes que la temperatura, y por eso se pregunta
-    // antes. Se mira solo 'peso_patron' y NO 'peso_patron_periodico' a proposito -- si se miraran
-    // las dos, una verificacion periodica de otra orden haria creer que el paso del arranque ya se
-    // hizo. Solo cuenta como hecha si quedo CONFORME: una que fallo deja el arranque a medias,
-    // que es justo lo que el usuario pidio al elegir que bloquee.
+    // PROTOCOLO YA TERMINADO -> no hay nada pendiente. El ultimo paso es 'amperaje' desde el
+    // 15/09/2026 y era 'temperatura' antes; cualquiera de los dos significa que la secuencia llego
+    // hasta el final.
+    //
+    // FIX 16/09/2026 (bug real, reportado por el usuario: "¿por que me sale verificacion de
+    // bascula si no hay una ejecucion activa?"). Esta salida temprana TIENE que ir antes de
+    // preguntar por peso_patron. Sin ella, toda orden que arranco ANTES de que existiera ese paso
+    // -- o sea, con alistamiento y temperatura guardados pero sin peso_patron -- cumplia la
+    // condicion de "falta la verificacion" y la tableta le abria la ventana al entrar, aunque su
+    // protocolo hubiera terminado semanas atras. En produccion eran 4 ordenes, 2 de ellas Activas.
+    // Un paso nuevo no puede volver retroactivamente incompleto un protocolo que ya cerro.
+    if (pasos.some(x => x.Paso === 'amperaje' || x.Paso === 'temperatura')) return null;
+
+    // Verificacion de bascula del ARRANQUE: va antes del ultimo paso, y por eso se pregunta antes.
+    // Se mira solo 'peso_patron' y NO 'peso_patron_periodico' a proposito -- si se miraran las dos,
+    // una verificacion periodica de otra orden haria creer que el paso del arranque ya se hizo.
+    // Solo cuenta como hecha si quedo CONFORME: una que fallo deja el arranque a medias, que es
+    // justo lo que el usuario pidio al elegir que bloquee.
     if (pasos.some(x => x.Paso === 'alistamiento')
         && !pasos.some(x => x.Paso === 'peso_patron' && x.Respuesta === 'Conforme')) {
       return { idOrden: Number(idOrden), paso: 'peso_patron' };
     }
 
-    // Ultimo paso. Cuenta como hecho tanto 'amperaje' (lo actual) como 'temperatura' (el % de la
-    // perilla, hasta el 15/09/2026): una orden que ya respondio el paso viejo NO tiene que volver a
-    // responderlo solo porque cambio la magnitud que se pide.
-    if (pasos.some(x => x.Paso === 'alistamiento')
-        && !pasos.some(x => x.Paso === 'amperaje' || x.Paso === 'temperatura')) {
+    if (pasos.some(x => x.Paso === 'alistamiento')) {
       return { idOrden: Number(idOrden), paso: 'amperaje' };
     }
     return null;
