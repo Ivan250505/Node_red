@@ -397,6 +397,22 @@ function estilosBase() {
     https://claude.ai/code/artifact/17eae4be-abd7-4742-a5bf-c6d87970f2d7 */
     .header-fila { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 16px; }
     .header-info { justify-self: start; min-width: 0; }
+    /* Orden de Trabajo encima del titulo del pedido, en el encabezado de Informacion (a pedido del
+    usuario, 16/09/2026 -- antes solo salia en el titulo del Historial de materia prima, al final de
+    la pagina, y tocaba bajar hasta alla para verla). Pastilla BLANCA con la letra verde de la marca
+    y el MISMO tamano que el h1 del pedido (a pedido del usuario, 16/09/2026): es el dato que manda
+    en la pantalla, asi que se lee igual de grande que el pedido y no como una etiqueta chiquita.
+    Se usa --verde (#4a9c2e, el verde oscuro de la paleta) y no --verde-logo/--verde-marca porque
+    esos dos, sobre blanco, quedan casi ilegibles a contraluz en la tableta del taller. Solo se
+    pinta si la OT ya existe (mientras la orden esta Pendiente no hay ejecucion ni bulto, ver
+    obtenerOCrearOrdenProduccion en sel-inventario-mp.js). Va SOLO el codigo, sin la etiqueta "OT"
+    delante (a pedido del usuario, 16/09/2026): el codigo ya arranca con el prefijo de la Orden de
+    Trabajo y la pastilla terminaba leyendose "OT OT...". */
+    .header-ot {
+      display: inline-block; margin: 0 0 6px; padding: 3px 12px; border-radius: 999px;
+      background: white; color: var(--verde);
+      font-size: 20px; font-weight: 700; line-height: 1.25;
+    }
     .header-fila .volver { margin-top: 8px; margin-bottom: 0; }
     .header-salir-grupo { justify-self: end; grid-column: 3; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
     .header-salir-grupo .header-usuario { font-size: 12px; opacity: 0.9; }
@@ -3414,6 +3430,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     <div class="header-inner">
       <div class="header-fila">
         <div class="header-info">
+          ${ordenProduccion ? `<div class="header-ot">${ordenProduccion}</div>` : ''}
           <h1>Pedido ${orden.NumeroPedido || '—'} ${badgeEstadoOrden(orden.Estado)}</h1>
           <div class="sub">${orden.Elemento}</div>
           <a class="volver" href="/selladora/${maquinaCodigo}">‹ ${orden.MaquinaNombre}</a>
@@ -3455,7 +3472,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Especificaciones</h2>
     <div class="ejecucion-box"><div class="ejecucion-grid">${especificaciones}</div></div>
-    <h2 style="font-size:15px;margin:22px 0 10px;">Historial de materia prima${ordenProduccion ? ` · OT: ${ordenProduccion}` : ''}</h2>
+    <h2 style="font-size:15px;margin:22px 0 10px;">Historial de materia prima</h2>
     <div class="ejecucion-box">${filasHistorial}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
@@ -5215,6 +5232,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
     <div class="header-inner">
       <div class="header-fila">
         <div class="header-info">
+          ${ordenProduccion ? `<div class="header-ot">${ordenProduccion}</div>` : ''}
           <h1>🔗 Pedido ${numeroPedido || '—'}</h1>
           <div class="sub">Sellado en paralelo -- un solo proceso, ${miembros.length} referencias de salida</div>
           <a class="volver" href="/selladora/${maquinaCodigo}">‹ ${maquinaNombre}</a>
@@ -5243,7 +5261,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Referencias de salida</h2>
     ${tarjetasReferencia}
-    <h2 style="font-size:15px;margin:22px 0 10px;">Historial de materia prima (todo el grupo)${ordenProduccion ? ` · OT: ${ordenProduccion}` : ''}</h2>
+    <h2 style="font-size:15px;margin:22px 0 10px;">Historial de materia prima (todo el grupo)</h2>
     <div class="ejecucion-box">${filasHistorial}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
