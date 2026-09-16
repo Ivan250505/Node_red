@@ -35,12 +35,18 @@ vea de un golpe qué tan viejo es cada uno.
 | `20260913_agregar_calidad_por_bulto_y_medidas.sql` | ✅ | ✅ |
 | `20260913_agregar_unidadespaquete_pesajeelemento.sql` | ✅ | ✅ |
 | `20260913_sellado_paralelo_pasos/` (13 pasos) | ✅ | ✅ |
-| `20260915_agregar_amperaje_ferroniquel.sql` | ✅ | ❌ **falta** |
+| `20260915_agregar_amperaje_ferroniquel.sql` | ✅ | ✅ |
 | `20260915_corregir_duracionminutos_tiempomuerto.sql` | ✅ | ✅ |
+| `20260916_igualar_prueba_con_produccion.sql` | — *(solo Prueba)* | ✅ |
 
-**Lo único que falta correr:** `20260915_agregar_amperaje_ferroniquel.sql` en `CarlixplastPrueba`.
-Sin esa tabla, el último paso del protocolo de arranque no deja empezar a producir: avisa
-"Falta crear la tabla SEL_AmperajeFerroniquel".
+**No queda nada por correr.** El 16/09/2026 se igualó `CarlixplastPrueba` con producción y se
+comprobó columna por columna que no queda ninguna diferencia en las tablas `SEL_`: mismos tipos,
+mismos anchos, misma nulabilidad y las mismas tres restricciones `CHECK`.
+
+Ojo al comprobarlo de nuevo: `OBJECT_NAME()` resuelve en la base **actual**, no en la que se
+consulta, así que comparar restricciones entre bases con nombres a tres partes da resultados
+falsos. Hay que consultar cada base con su propio `USE`, o unir `sys.check_constraints` con
+`sys.tables` dentro de cada una.
 
 ## Dos cosas que hay que saber antes de usar esto
 
