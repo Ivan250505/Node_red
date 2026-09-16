@@ -457,7 +457,11 @@ async function obtenerOCrearOrdenProduccion(db, { elemento, fecha, lineaAncla, l
       .query(`SELECT ISNULL(MAX(Consecutivo), 0) + 1 AS NC FROM PRDOrdenesProduccion WHERE Lote = @lote AND Destino = @destino`);
     const nConsecutivo = dtCons.recordset[0].NC;
 
-    const tOP = `OP${lote}${String(nConsecutivo).padStart(4, '0')}${tSigla}`;
+    // FIX 16/09/2026 (reporte del usuario -- seguia generando "OP..." pese al renombrado de
+    // prefijo del 15/09, que solo toco codigos YA guardados en la BD, no este generador; mismo
+    // cambio portado a ObtenerOCrearOrdenProduccion en Produccion.vb): prefijo "OT" para toda
+    // Orden de Trabajo nueva de aca en adelante.
+    const tOP = `OT${lote}${String(nConsecutivo).padStart(4, '0')}${tSigla}`;
 
     // FIX 15/09/2026 (a pedido del usuario): HoraInicioReal NO es GETDATE() -- el trabajo real
     // empieza en el alistamiento/limpieza del protocolo de arranque (pasos 1-2), que corren ANTES
@@ -476,25 +480,47 @@ async function obtenerOCrearOrdenProduccion(db, { elemento, fecha, lineaAncla, l
     // portado a Produccion.vb): Estado/HoraInicioReal al crear la OT -- ver
     // agregar_estado_horas_ordenesproduccion.sql (Source/Produccion/nueva produccion). NO se toca
     // el lookup de arriba (WHERE Fecha/Lote/Elemento/LineaAncla) ni obtenerAnclaGrupoSellado.
-    await db.request()
-      .input('op', tOP).input('lote', lote).input('destino', codigoDestino).input('consecutivo', nConsecutivo)
-      .input('fecha', fecha).input('elemento', elemento).input('lineaAncla', lineaAncla).input('generadoPor', generadoPor)
-      .input('horaInicioReal', fHoraInicioReal)
-      .query(`
-        INSERT INTO PRDOrdenesProduccion (OrdenProduccion, Lote, Destino, Consecutivo, Fecha, Elemento, LineaAncla, TipoProceso, GeneradoPor, FechaCreacion, Estado, HoraInicioReal)
-        VALUES (@op, @lote, @destino, @consecutivo, @fecha, @elemento, @lineaAncla, 'SELLADORA', @generadoPor, GETDATE(), 'Activa', ISNULL(@horaInicioReal, GETDATE()))
-      `);
+    let tOPFinal = tOP;
+    try {
+      await db.request()
+        .input('op', tOP).input('lote', lote).input('destino', codigoDestino).input('consecutivo', nConsecutivo)
+        .input('fecha', fecha).input('elemento', elemento).input('lineaAncla', lineaAncla).input('generadoPor', generadoPor)
+        .input('horaInicioReal', fHoraInicioReal)
+        .query(`
+          INSERT INTO PRDOrdenesProduccion (OrdenProduccion, Lote, Destino, Consecutivo, Fecha, Elemento, LineaAncla, TipoProceso, GeneradoPor, FechaCreacion, Estado, HoraInicioReal)
+          VALUES (@op, @lote, @destino, @consecutivo, @fecha, @elemento, @lineaAncla, 'SELLADORA', @generadoPor, GETDATE(), 'Activa', ISNULL(@horaInicioReal, GETDATE()))
+        `);
+    } catch (errInsert) {
+      // FIX 16/09/2026 (bug real reportado por el usuario -- bulto Detalle=2026000916000134661
+      // quedo con OrdenProduccion NULL para siempre): PRDOrdenesProduccion tiene restriccion UNIQUE
+      // sobre (Fecha,Lote,Elemento,LineaAncla) -- ver UQ_PRDOrdenesProduccion_Ancla. En "Sellado en
+      // Paralelo" (obtenerAnclaGrupoSellado) varios bultos de referencias distintas comparten la
+      // MISMA ancla, y pueden llamar esta funcion casi al mismo tiempo -- el SELECT de arriba
+      // (dtExiste) y este INSERT no estan protegidos por ningun lock entre medio (TOCTOU clasico).
+      // Si el INSERT choca (2627 = violacion de UNIQUE/PK, 2601 = violacion de indice unico), quiere
+      // decir que OTRA llamada concurrente ya gano la carrera y dejo la fila creada -- se vuelve a
+      // consultar en vez de tragar el error y devolver '' (que era lo que pasaba antes).
+      if (errInsert.number === 2627 || errInsert.number === 2601) {
+        const dtRetry = await db.request()
+          .input('fecha', fecha).input('lote', lote).input('elemento', elemento).input('lineaAncla', lineaAncla)
+          .query(`SELECT OrdenProduccion FROM PRDOrdenesProduccion WHERE Fecha = @fecha AND Lote = @lote AND Elemento = @elemento AND LineaAncla = @lineaAncla`);
+        if (dtRetry.recordset.length === 0) throw errInsert;
+        tOPFinal = dtRetry.recordset[0].OrdenProduccion;
+      } else {
+        throw errInsert;
+      }
+    }
 
     // FIX 15/09/2026 (a pedido del usuario): backfill -- los SEL_TiempoMuerto de esta ejecucion
     // que quedaron con OrdenProduccion NULL (limpieza/alistamiento previos, ver arriba) ya pueden
     // asociarse a la OT recien creada. Requiere SEL_TiempoMuerto.OrdenProduccion (ver
     // sql/pendientes/20260915_agregar_ordenproduccion_tiempomuerto.sql).
     if (idEjecucion) {
-      await db.request().input('idEjecucion', idEjecucion).input('op', tOP)
+      await db.request().input('idEjecucion', idEjecucion).input('op', tOPFinal)
         .query(`UPDATE SEL_TiempoMuerto SET OrdenProduccion = @op WHERE id_ejecucion = @idEjecucion AND OrdenProduccion IS NULL`);
     }
 
-    return tOP;
+    return tOPFinal;
   } catch (err) {
     return '';
   }
