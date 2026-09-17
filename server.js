@@ -1366,11 +1366,18 @@ function scriptAvisoPedidoNuevo(maquinaCodigo) {
           estilo.textContent =
             '.avisos-pedido{position:fixed;top:0;left:0;right:0;z-index:2000;display:flex;' +
               'flex-direction:column;align-items:center;gap:8px;padding:10px 10px 0;pointer-events:none;}' +
-            '.aviso-pedido{pointer-events:auto;width:min(520px,100%);background:#fff;border-radius:14px;' +
+            '.aviso-pedido{position:relative;padding-top:16px;pointer-events:auto;width:min(520px,100%);background:#fff;border-radius:14px;' +
               'box-shadow:0 8px 26px rgba(28,39,51,0.30);border-left:5px solid #71bf44;padding:12px 14px;' +
               'display:flex;gap:12px;align-items:flex-start;cursor:pointer;opacity:0;transform:translateY(-140%);' +
               'transition:transform .38s cubic-bezier(.16,.84,.44,1),opacity .30s ease;}' +
             '.aviso-pedido.visible{opacity:1;transform:translateY(0);}' +
+            // touch-action:none es lo que permite arrastrar la tarjeta: sin el, el navegador se
+            // queda el gesto vertical para desplazar la pagina y el dedo nunca llega al handler.
+            '.aviso-pedido{touch-action:none;}' +
+            // Manija: al quitar el cierre por toque (17/09/2026) hace falta que se vea que la
+            // tarjeta se puede arrastrar. Es la barrita corta de siempre, arriba y centrada.
+            '.aviso-pedido-manija{position:absolute;top:6px;left:50%;transform:translateX(-50%);' +
+              'width:38px;height:4px;border-radius:999px;background:#cfd4da;}' +
             '.aviso-pedido-icono{flex:0 0 auto;width:38px;height:38px;border-radius:11px;color:#fff;' +
               'background:linear-gradient(135deg,#00a2cb,#006984);display:flex;align-items:center;' +
               'justify-content:center;font-size:19px;}' +
@@ -1420,13 +1427,50 @@ function scriptAvisoPedidoNuevo(maquinaCodigo) {
         tarjeta.className = 'aviso-pedido';
         tarjeta.setAttribute('role', 'status');
         tarjeta.innerHTML =
+          '<div class="aviso-pedido-manija"></div>' +
           '<div class="aviso-pedido-icono">📦</div>' +
           '<div class="aviso-pedido-cuerpo">' +
             '<div class="aviso-pedido-titulo">' + escapar(titulo) + '<span class="aviso-pedido-hora">' + hora + '</span></div>' +
             lineas +
           '</div>';
-        // Un toque la cierra de una -- el operario no tiene que esperar los 7s si ya la leyo.
-        tarjeta.addEventListener('click', function() { esconder(tarjeta); });
+        // DESLIZAR HACIA ARRIBA para descartarla (a pedido del usuario, 17/09/2026). Sustituye al
+        // cierre por toque que habia antes: un toque ya no hace nada.
+        //
+        // La tarjeta sigue al dedo mientras se arrastra en vez de esperar a soltar. Es deliberado:
+        // si no se moviera, el operario no sabria que el gesto esta funcionando y acabaria
+        // tocandola -- que es justo lo que ya no cierra nada.
+        //
+        // Solo hacia ARRIBA (Math.min con 0): hacia abajo no hace nada, para no descartarla sin
+        // querer al intentar desplazar la pagina.
+        var UMBRAL_DESCARTE = 40;   // px que hay que recorrer para que se descarte al soltar
+        var RECORRIDO_OPACIDAD = 120;
+        var arrastrando = false, inicioY = 0, recorrido = 0;
+
+        tarjeta.addEventListener('pointerdown', function(e) {
+          arrastrando = true; inicioY = e.clientY; recorrido = 0;
+          tarjeta.style.transition = 'none';   // durante el arrastre va 1:1 con el dedo
+          try { tarjeta.setPointerCapture(e.pointerId); } catch (err) {}
+        });
+
+        tarjeta.addEventListener('pointermove', function(e) {
+          if (!arrastrando) return;
+          recorrido = Math.min(0, e.clientY - inicioY);
+          tarjeta.style.transform = 'translateY(' + recorrido + 'px)';
+          tarjeta.style.opacity = String(Math.max(0, 1 + recorrido / RECORRIDO_OPACIDAD));
+        });
+
+        function soltar() {
+          if (!arrastrando) return;
+          arrastrando = false;
+          // Se quitan los estilos en linea ANTES de decidir: asi, si se descarta, manda la
+          // transicion de .visible (sube y se desvanece), y si no, vuelve solo a su sitio.
+          tarjeta.style.transition = '';
+          tarjeta.style.transform = '';
+          tarjeta.style.opacity = '';
+          if (-recorrido >= UMBRAL_DESCARTE) esconder(tarjeta);
+        }
+        tarjeta.addEventListener('pointerup', soltar);
+        tarjeta.addEventListener('pointercancel', soltar);
         obtenerContenedor().appendChild(tarjeta);
         requestAnimationFrame(function() { tarjeta.classList.add('visible'); });
         setTimeout(function() { esconder(tarjeta); }, SEGUNDOS_VISIBLE * 1000);
