@@ -126,7 +126,15 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
     // arrancaba un proceso de cero (el caso mas comun, es donde se toma el alistamiento) se
     // quedaba sin bitacora. Mismo criterio de "nunca revienta hacia afuera" que ya tiene
     // abrirOReanudarBitacora -- si algo falla, Iniciar sigue su curso normal.
-    await abrirOReanudarBitacora(tx, nMaquina, codOperario);
+    // FIX 16/09/2026 (bug real reportado por el usuario -- "Transaction has been aborted" al
+    // Iniciar/Cerrar bulto): el catch interno de abrirOReanudarBitacora traga cualquier error,
+    // pero seguia recibiendo `tx` -- la MISMA transaccion critica del resto de Iniciar. Un fallo
+    // ahi (ej. falta una tabla/columna de bitacora) deja la transaccion abortada igual (XACT_ABORT
+    // del paquete mssql), y todo lo que viene despues de este punto (incluida la OT) revienta,
+    // aunque el error real quede tragado en silencio adentro de la funcion. Se le pasa un objeto
+    // que abre un Request nuevo sobre el POOL global (independiente de tx) -- asi un fallo ahi
+    // queda genuinamente aislado, tal como la funcion ya prometia en su propio comentario.
+    await abrirOReanudarBitacora({ request: () => new sql.Request() }, nMaquina, codOperario);
   }
 
   const fHoy = new Date();
@@ -364,54 +372,31 @@ async function confirmarRollo(pool, { idOrden, idEjecucionActivo, serial, esNuev
         bolsasXGolpe, maquina: datosOrden.maquina
       });
 
-      await crearBultoInicial(tx, {
-        idOrden, idEjecucion: nuevaIdEjecucion, codOperario, serial: consulta.serial,
-        cantidad: consulta.cantidad, lote: consulta.lote, bolsasXGolpe, generadoPor
-      });
+      // FIX 16/09/2026 (rediseno del Iniciar, a pedido del usuario -- "el chicharrón"): antes acá
+      // se creaba de una vez la OT/bulto/PRDProduccion (crearBultoInicial), ANTES de que el
+      // Alistamiento del protocolo de arranque siquiera empezara. Si algo fallaba entre medio (se
+      // cae la tableta, se pierde la conexión), "PRDProduccion" ya quedaba creado con datos a
+      // medias, fechado antes de que el Alistamiento pasara. Ahora esto se pospone: solo se deja
+      // constancia del rollo ya validado y confirmado en una tabla puente
+      // (SEL_RolloPendienteInicio) -- la creación real del bulto se dispara SOLO cuando el
+      // operario termina el Alistamiento (ver materializarInicioOrden, llamado desde POST
+      // /reanudar en server.js cuando cierra el Tipo='alistamiento'/Subtipo='arranque'). Si algo
+      // falla entre este punto y el fin del Alistamiento, este registro sigue intacto y no se
+      // pierde nada -- al retomar la orden se termina el Alistamiento pendiente y ahí se
+      // materializa. Aplica SOLO al Iniciar -- "Añadir Rollo" nunca creó bulto/PRDProduccion
+      // nuevo, no tiene este problema (confirmado con el usuario).
+      await tx.request()
+        .input('idOrden', idOrden).input('idEjecucion', nuevaIdEjecucion)
+        .input('codOperario', codOperario > 0 ? codOperario : null)
+        .input('serial', consulta.serial).input('cantidad', consulta.cantidad)
+        .input('lote', consulta.lote || null).input('bolsasXGolpe', bolsasXGolpe)
+        .input('generadoPor', generadoPor)
+        .query(`
+          INSERT INTO SEL_RolloPendienteInicio (IdOrden, IdEjecucion, CodOperario, Serial, Cantidad, Lote, BolsasXGolpe, GeneradoPor)
+          VALUES (@idOrden, @idEjecucion, @codOperario, @serial, @cantidad, @lote, @bolsasXGolpe, @generadoPor)
+        `);
 
-      await tx.request().input('idOrden', idOrden).query(`UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden = @idOrden`);
       idEjecucionDelRollo = nuevaIdEjecucion;
-
-      // Sellado en paralelo (08/09/2026 -- ver DISENO_SELLADO_PARALELO_08092026.md, corregido tras
-      // aclaración del usuario): "Iniciar" en la orden ANCLA de un grupo arranca las 3 referencias
-      // de una vez, no solo la ancla -- las otras 2 quedan con su ejecución Activa y su primer
-      // bulto ya creado, pero en 'EnEspera' desde el arranque (no esperan a la primera vez que se
-      // "alterne" a ellas). Mismo rollo físico ya registrado arriba -- sinMateriaPrima=true, no se
-      // vuelve a descontar inventario ni a duplicar PRDProduccionMateriaPrima.
-      // FIX 09/09/2026 (bug real, Pedido 11085 colado en el grupo del Pedido 11408 al Iniciar):
-      // Elemento por sí solo NO es llave suficiente -- dos pedidos DISTINTOS pueden compartir la
-      // misma referencia de salida en momentos distintos. Exige también el mismo NumeroPedido en
-      // ambos lados (ord1 Y ord2 contra g.Numero, el pedido para el que se armó ese grupo).
-      // FIX 13/09/2026 (a pedido del usuario, mismo patrón ya corregido en server.js/
-      // frmLiberacionProduccion.vb para el bug del pedido 11243): la llave real es ord.Linea, no
-      // ord.Elemento -- dos LÍNEAS DISTINTAS del mismo pedido pueden vender la misma referencia
-      // sin ser la misma agrupación física, y con Elemento como llave esas dos líneas se
-      // confundían entre sí. Server.js ya quedó así (obtenerColaOrdenes/obtenerIdGrupoSelladoDeOrden/
-      // obtenerMiembrosGrupoSellado); esta consulta se había quedado atrás, por eso la cola fusionaba
-      // la tarjeta pero Iniciar nunca activaba de verdad los hermanos.
-      const dtHermanos = await tx.request().input('idOrden', idOrden).query(`
-        SELECT ord2.IdOrden
-        FROM SEL_OrdenProduccion ord1
-        INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Linea = ord1.Linea
-        INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl1.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
-          AND g.Numero = ord1.NumeroPedido
-        INNER JOIN PRDGrupoEtapasCompartidasLineas gl2 ON gl2.IdGrupo = g.IdGrupo
-        INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gl2.Linea AND ord2.NumeroPedido = g.Numero
-        WHERE ord1.IdOrden = @idOrden AND ord2.IdOrden <> @idOrden AND ord2.Estado = 'Pendiente'
-      `);
-      for (const filaHermano of dtHermanos.recordset) {
-        const nIdEjecucionHermano = await abrirNuevaEjecucion(tx, {
-          idOrden: filaHermano.IdOrden, codOperario, serial: null, cantidad: null,
-          bolsasXGolpe, maquina: datosOrden.maquina
-        });
-        await crearBultoInicial(tx, {
-          idOrden: filaHermano.IdOrden, idEjecucion: nIdEjecucionHermano, codOperario, serial: null,
-          cantidad: null, lote: null, bolsasXGolpe, generadoPor, sinMateriaPrima: true, estadoInicial: 'EnEspera'
-        });
-        await tx.request().input('idOrden', filaHermano.IdOrden).query(
-          `UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden = @idOrden`
-        );
-      }
     }
 
     // Linea de tiempo del rollo (ver agregar_rollo_ejecucion.sql): es el UNICO punto donde se sabe
@@ -420,25 +405,115 @@ async function confirmarRollo(pool, { idOrden, idEjecucionActivo, serial, esNuev
     // cada paquete el rollo del que salio. El IF OBJECT_ID evita que un despliegue donde todavia no
     // se corrio el script SQL haga fallar el escaneo entero: si la tabla no existe, no se registra
     // y el rollo se procesa igual.
-    const tBodegaTimeline = await obtenerBodegaDeRollo(tx, consulta.serial);
+    // FIX 16/09/2026: para "Iniciar" (esNuevoRollo=false) esto YA NO corre acá -- se movió dentro
+    // de materializarInicioOrden (no hay bulto todavía en este punto para engancharle el id_bulto).
+    // Para "Añadir Rollo" sigue exactamente igual, sin cambios -- ese bulto ya existe de antes.
+    if (esNuevoRollo) {
+      const tBodegaTimeline = await obtenerBodegaDeRollo(tx, consulta.serial);
+      await tx.request()
+        .input('idEjecucion', idEjecucionDelRollo)
+        .input('serial', consulta.serial)
+        .input('cantidad', consulta.cantidad)
+        .input('loteMP', consulta.lote || null)
+        .input('bodega', tBodegaTimeline || null)
+        .input('operario', codOperario > 0 ? codOperario : null)
+        .query(`
+          IF OBJECT_ID('SEL_RolloEjecucion', 'U') IS NOT NULL
+          INSERT INTO SEL_RolloEjecucion (id_ejecucion, id_bulto, Serial, Cantidad, LoteMP, Bodega, Operario, EsInicio)
+          SELECT @idEjecucion,
+                 (SELECT TOP 1 id FROM SEL_Bultos WHERE id_ejecucion = @idEjecucion AND estado = 'Activo' ORDER BY id DESC),
+                 @serial, @cantidad, @loteMP, @bodega, @operario, 0
+        `);
+    }
+
+    await tx.commit();
+    return { ok: true };
+  } catch (err) {
+    await tx.rollback();
+    throw err;
+  }
+}
+
+// FIX 16/09/2026 (rediseno del Iniciar, a pedido del usuario): materializa TODO lo que antes hacia
+// crearBultoInicial en el momento del escaneo del rollo -- ahora se dispara SOLO cuando el operario
+// termina el Alistamiento del protocolo de arranque (ver POST /reanudar en server.js). Recibe los
+// datos del rollo ya guardados en SEL_RolloPendienteInicio (ver confirmarRollo, rama Iniciar) y abre
+// su PROPIA transacción -- ya no corre dentro de la de confirmarRollo, porque se dispara mucho
+// después, desde un endpoint distinto.
+async function materializarInicioOrden(pool, { idOrden, idEjecucion, codOperario, serial, cantidad, lote, bolsasXGolpe, generadoPor }) {
+  const datosOrden = await obtenerDatosOrden(pool, idOrden);
+  if (!datosOrden) throw new Error('Orden no encontrada.');
+  const { maquina: nMaquina } = datosOrden;
+
+  const tx = new sql.Transaction(pool);
+  await tx.begin();
+  try {
+    await crearBultoInicial(tx, {
+      idOrden, idEjecucion, codOperario, serial, cantidad, lote, bolsasXGolpe, generadoPor
+    });
+
+    await tx.request().input('idOrden', idOrden).query(`UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden = @idOrden`);
+
+    // Sellado en paralelo (08/09/2026 -- ver DISENO_SELLADO_PARALELO_08092026.md, corregido tras
+    // aclaración del usuario): "Iniciar" en la orden ANCLA de un grupo arranca las 3 referencias
+    // de una vez, no solo la ancla -- las otras 2 quedan con su ejecución Activa y su primer
+    // bulto ya creado, pero en 'EnEspera' desde el arranque (no esperan a la primera vez que se
+    // "alterne" a ellas). Mismo rollo físico ya registrado arriba -- sinMateriaPrima=true, no se
+    // vuelve a descontar inventario ni a duplicar PRDProduccionMateriaPrima.
+    // FIX 09/09/2026 (bug real, Pedido 11085 colado en el grupo del Pedido 11408 al Iniciar):
+    // Elemento por sí solo NO es llave suficiente -- dos pedidos DISTINTOS pueden compartir la
+    // misma referencia de salida en momentos distintos. Exige también el mismo NumeroPedido en
+    // ambos lados (ord1 Y ord2 contra g.Numero, el pedido para el que se armó ese grupo).
+    // FIX 13/09/2026 (a pedido del usuario, mismo patrón ya corregido en server.js/
+    // frmLiberacionProduccion.vb para el bug del pedido 11243): la llave real es ord.Linea, no
+    // ord.Elemento -- dos LÍNEAS DISTINTAS del mismo pedido pueden vender la misma referencia
+    // sin ser la misma agrupación física, y con Elemento como llave esas dos líneas se
+    // confundían entre sí. Server.js ya quedó así (obtenerColaOrdenes/obtenerIdGrupoSelladoDeOrden/
+    // obtenerMiembrosGrupoSellado); esta consulta se había quedado atrás, por eso la cola fusionaba
+    // la tarjeta pero Iniciar nunca activaba de verdad los hermanos.
+    const dtHermanos = await tx.request().input('idOrden', idOrden).query(`
+      SELECT ord2.IdOrden
+      FROM SEL_OrdenProduccion ord1
+      INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Linea = ord1.Linea
+      INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl1.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
+        AND g.Numero = ord1.NumeroPedido
+      INNER JOIN PRDGrupoEtapasCompartidasLineas gl2 ON gl2.IdGrupo = g.IdGrupo
+      INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gl2.Linea AND ord2.NumeroPedido = g.Numero
+      WHERE ord1.IdOrden = @idOrden AND ord2.IdOrden <> @idOrden AND ord2.Estado = 'Pendiente'
+    `);
+    for (const filaHermano of dtHermanos.recordset) {
+      const nIdEjecucionHermano = await abrirNuevaEjecucion(tx, {
+        idOrden: filaHermano.IdOrden, codOperario, serial: null, cantidad: null,
+        bolsasXGolpe, maquina: nMaquina
+      });
+      await crearBultoInicial(tx, {
+        idOrden: filaHermano.IdOrden, idEjecucion: nIdEjecucionHermano, codOperario, serial: null,
+        cantidad: null, lote: null, bolsasXGolpe, generadoPor, sinMateriaPrima: true, estadoInicial: 'EnEspera'
+      });
+      await tx.request().input('idOrden', filaHermano.IdOrden).query(
+        `UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden = @idOrden`
+      );
+    }
+
+    // Linea de tiempo del rollo -- igual criterio que antes en confirmarRollo, ahora corre acá
+    // porque acá es donde recién nace el bulto (id_bulto).
+    const tBodegaTimeline = await obtenerBodegaDeRollo(tx, serial);
     await tx.request()
-      .input('idEjecucion', idEjecucionDelRollo)
-      .input('serial', consulta.serial)
-      .input('cantidad', consulta.cantidad)
-      .input('loteMP', consulta.lote || null)
+      .input('idEjecucion', idEjecucion)
+      .input('serial', serial)
+      .input('cantidad', cantidad)
+      .input('loteMP', lote || null)
       .input('bodega', tBodegaTimeline || null)
       .input('operario', codOperario > 0 ? codOperario : null)
-      .input('esInicio', esNuevoRollo ? 0 : 1)
       .query(`
         IF OBJECT_ID('SEL_RolloEjecucion', 'U') IS NOT NULL
         INSERT INTO SEL_RolloEjecucion (id_ejecucion, id_bulto, Serial, Cantidad, LoteMP, Bodega, Operario, EsInicio)
         SELECT @idEjecucion,
                (SELECT TOP 1 id FROM SEL_Bultos WHERE id_ejecucion = @idEjecucion AND estado = 'Activo' ORDER BY id DESC),
-               @serial, @cantidad, @loteMP, @bodega, @operario, @esInicio
+               @serial, @cantidad, @loteMP, @bodega, @operario, 1
       `);
 
     await tx.commit();
-    return { ok: true };
   } catch (err) {
     await tx.rollback();
     throw err;
@@ -513,4 +588,4 @@ async function alternarReferenciaGrupo(pool, { idOrdenDestino, codOperario, bols
   }
 }
 
-module.exports = { obtenerDatosOrden, consultarSerial, confirmarRollo, alternarReferenciaGrupo };
+module.exports = { obtenerDatosOrden, consultarSerial, confirmarRollo, alternarReferenciaGrupo, materializarInicioOrden };

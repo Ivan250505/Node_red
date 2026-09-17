@@ -204,7 +204,15 @@ async function finalizarOrden(pool, idOrden, generadoPor, operarioFinal) {
     await tx.commit();
     return { ok: true };
   } catch (err) {
-    await tx.rollback();
+    // FIX 16/09/2026 (ver DIAGNOSTICO_FINALIZAR_ORDEN.md -- bug real "Transaction has been
+    // aborted" al dar Finalizar): si la transaccion ya quedo abortada por un error anterior
+    // (ej. "Conversion failed..." dentro de finalizarControlParcialSellado), este rollback()
+    // TAMBIEN falla -- y sin protegerlo, SU error reemplazaba al original, tapando la causa real.
+    try {
+      await tx.rollback();
+    } catch (errRollback) {
+      console.error('Rollback fallido tras el error real:', errRollback.message);
+    }
     throw err;
   }
 }

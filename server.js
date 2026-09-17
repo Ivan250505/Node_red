@@ -8,7 +8,7 @@ const sql = require('mssql');
 const { desencriptar } = require('./crypto-mirane');
 const { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO } = require('./auth');
 const { registrarEvento } = require('./accesos');
-const { consultarSerial, confirmarRollo, alternarReferenciaGrupo } = require('./scan-rollo');
+const { consultarSerial, confirmarRollo, alternarReferenciaGrupo, materializarInicioOrden } = require('./scan-rollo');
 const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
 const {
   obtenerLineaOriginalControlSellado, resolverTurnoMaquina, cerrarBitacora, abrirOReanudarBitacora
@@ -6955,6 +6955,19 @@ app.post('/api/selladora/orden/:idOrden/reanudar', requireLogin, async (req, res
       return res.json({ ok: false, error: 'Esta orden no está en pausa.' });
     }
 
+    // FIX 16/09/2026 (rediseno del Iniciar, a pedido del usuario): hay que saber QUE actividad se
+    // esta cerrando ANTES de cerrarla -- si es el Alistamiento del protocolo de arranque
+    // (Tipo='alistamiento', Subtipo='arranque'), es la señal de que hay que materializar el
+    // bulto/PRDProduccion que quedo pendiente desde que se escaneo el rollo (ver
+    // SEL_RolloPendienteInicio / materializarInicioOrden en scan-rollo.js).
+    const dtAbierta = await p.request().input('idEjecucion', IdEjecucion).query(`
+      SELECT TOP 1 Tipo, Subtipo FROM SEL_TiempoMuerto
+      WHERE id_ejecucion = @idEjecucion AND HoraFin IS NULL ORDER BY id DESC
+    `);
+    const esFinDeAlistamientoArranque = dtAbierta.recordset.length > 0
+      && String(dtAbierta.recordset[0].Tipo || '').toLowerCase() === 'alistamiento'
+      && String(dtAbierta.recordset[0].Subtipo || '').toLowerCase() === 'arranque';
+
     // DuracionMinutos es una columna CALCULADA (AS DATEDIFF(MINUTE, HoraInicio, HoraFin) PERSISTED)
     // -- SQL Server la resuelve sola en cuanto se guarda HoraFin, no se puede asignar a mano
     // (por eso el error "cannot be modified because it is either a computed column...").
@@ -6967,14 +6980,43 @@ app.post('/api/selladora/orden/:idOrden/reanudar', requireLogin, async (req, res
       UPDATE SEL_TiempoMuerto SET HoraFin = GETDATE()
       WHERE id_ejecucion = @idEjecucion AND HoraFin IS NULL
     `);
+
+    // FIX 16/09/2026: recien AHORA que el Alistamiento de verdad termino se crea el bulto/OT/
+    // PRDProduccion -- antes esto pasaba al confirmar el escaneo del rollo, mucho antes de que el
+    // Alistamiento siquiera arrancara. Si por lo que sea ya se habia materializado (no deberia
+    // pasar -- /reanudar exige Estado='En pausa', que ya cambia en cuanto esto corre una vez -- pero
+    // por las dudas) o no hay ninguna fila pendiente, no hace nada.
+    let seMaterializo = false;
+    if (esFinDeAlistamientoArranque) {
+      const dtPendiente = await p.request().input('idEjecucion', IdEjecucion).query(`
+        SELECT TOP 1 Id, IdOrden, CodOperario, Serial, Cantidad, Lote, BolsasXGolpe, GeneradoPor
+        FROM SEL_RolloPendienteInicio WHERE IdEjecucion = @idEjecucion AND Procesado = 0
+      `);
+      if (dtPendiente.recordset.length > 0) {
+        const pend = dtPendiente.recordset[0];
+        await materializarInicioOrden(p, {
+          idOrden: pend.IdOrden, idEjecucion: IdEjecucion, codOperario: pend.CodOperario,
+          serial: pend.Serial, cantidad: pend.Cantidad, lote: pend.Lote,
+          bolsasXGolpe: pend.BolsasXGolpe, generadoPor: pend.GeneradoPor
+        });
+        await p.request().input('id', pend.Id).query(
+          `UPDATE SEL_RolloPendienteInicio SET Procesado = 1, FechaHoraProcesado = GETDATE() WHERE Id = @id`
+        );
+        seMaterializo = true;
+      }
+    }
+
     // FIX 09/09/2026: al reanudar ya no se pone 'Activa' a ciegas. El paso 1 del protocolo de
     // arranque (limpieza y desinfeccion) pausa la ejecucion cuando la orden TODAVIA esta Pendiente
     // -- su registro en SEL_EjecucionOrden sigue siendo el placeholder que creo Programacion.vb, y
     // dejarlo en 'Activa' sin que se haya escaneado ningun rollo lo hacia aparecer como una
     // ejecucion en curso (el /logout, por ejemplo, lo marcaba 'PendienteOperador'). La ejecucion
     // vuelve al estado que le corresponde segun la ORDEN: solo es 'Activa' si la orden ya arranco.
+    // FIX 16/09/2026: EstadoOrden se leyo ANTES de materializar -- si justo se materializo en este
+    // mismo llamado, la orden ya quedo 'Activa' (lo hace materializarInicioOrden), asi que se fuerza
+    // 'Activa' acá también en vez de usar el valor viejo capturado arriba.
     await p.request().input('idEjecucion', IdEjecucion)
-      .input('estado', EstadoOrden === 'Activa' ? 'Activa' : 'Pendiente')
+      .input('estado', (seMaterializo || EstadoOrden === 'Activa') ? 'Activa' : 'Pendiente')
       .query(`UPDATE SEL_EjecucionOrden SET Estado = @estado WHERE IdEjecucion = @idEjecucion`);
 
     res.json({ ok: true });
@@ -7070,8 +7112,42 @@ async function obtenerProtocoloPendiente(p, idOrden) {
       WHERE ej.IdOrden = @idOrden ORDER BY ej.IdEjecucion ASC
     `);
     if (dtEj.recordset.length === 0) return null;
-    const { IdEjecucion, EstadoOrden } = dtEj.recordset[0];
+    const { IdEjecucion } = dtEj.recordset[0];
+    let EstadoOrden = dtEj.recordset[0].EstadoOrden;
     if (EstadoOrden !== 'Pendiente' && EstadoOrden !== 'Activa') return null;
+
+    // FIX 16/09/2026 (rediseno del Iniciar -- autocuracion): si el Alistamiento del protocolo de
+    // arranque YA se cerro (HoraFin puesto, ver POST /reanudar) pero la materializacion del bulto
+    // nunca corrio (ventana muy angosta pero posible: el servidor se cae justo entre cerrar el
+    // tiempo muerto y crear el bulto), NO hay que volver a pedir escanear el rollo -- ya esta
+    // guardado en SEL_RolloPendienteInicio. Se materializa aca mismo antes de seguir evaluando.
+    const dtPendienteAutocura = await p.request().input('idEjecucion', IdEjecucion).query(`
+      SELECT TOP 1 Id, IdOrden, CodOperario, Serial, Cantidad, Lote, BolsasXGolpe, GeneradoPor
+      FROM SEL_RolloPendienteInicio WHERE IdEjecucion = @idEjecucion AND Procesado = 0
+    `);
+    if (dtPendienteAutocura.recordset.length > 0) {
+      const dtAlistamientoCerrado = await p.request().input('idEjecucion', IdEjecucion).query(`
+        SELECT TOP 1 1 AS X FROM SEL_TiempoMuerto
+        WHERE id_ejecucion = @idEjecucion AND Tipo = 'alistamiento' AND Subtipo = 'arranque' AND HoraFin IS NOT NULL
+      `);
+      if (dtAlistamientoCerrado.recordset.length > 0) {
+        const pend = dtPendienteAutocura.recordset[0];
+        await materializarInicioOrden(p, {
+          idOrden: pend.IdOrden, idEjecucion: IdEjecucion, codOperario: pend.CodOperario,
+          serial: pend.Serial, cantidad: pend.Cantidad, lote: pend.Lote,
+          bolsasXGolpe: pend.BolsasXGolpe, generadoPor: pend.GeneradoPor
+        });
+        await p.request().input('id', pend.Id).query(
+          `UPDATE SEL_RolloPendienteInicio SET Procesado = 1, FechaHoraProcesado = GETDATE() WHERE Id = @id`
+        );
+        await p.request().input('idEjecucion', IdEjecucion).query(
+          `UPDATE SEL_EjecucionOrden SET Estado = 'Activa' WHERE IdEjecucion = @idEjecucion`
+        );
+        // La orden ya quedo 'Activa' (lo hace materializarInicioOrden) -- el resto de esta funcion
+        // usa EstadoOrden para decidir la rama Pendiente/Activa, asi que se refleja aca tambien.
+        EstadoOrden = 'Activa';
+      }
+    }
 
     const dtAbierta = await p.request().input('idEjecucion', IdEjecucion).query(`
       SELECT TOP 1 Tipo, Subtipo, HoraInicio FROM SEL_TiempoMuerto

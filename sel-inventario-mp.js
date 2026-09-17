@@ -441,9 +441,28 @@ async function obtenerAnclaGrupoSellado(db, idOrden) {
 
 async function obtenerOCrearOrdenProduccion(db, { elemento, fecha, lineaAncla, lote, codigoDestino, generadoPor, idEjecucion }) {
   try {
+    // FIX 16/09/2026 (REVERTIDO el intento anterior de "reintentar tras choque" -- causaba
+    // "transaccion abortada" bloqueando Iniciar/Cerrar bulto completos): tanto scan-rollo.js como
+    // ejecucion-selladora.js llaman esta funcion con una TRANSACCION activa (tx). Si el INSERT de
+    // mas abajo choca contra UQ_PRDOrdenesProduccion_Ancla/_Codigo, la transaccion del paquete
+    // mssql queda abortada (XACT_ABORT ON por defecto en Transaction) -- CUALQUIER consulta
+    // posterior sobre esa misma tx (incluido un reintento) revienta con "transaccion abortada",
+    // tumbando TODO el resto del Iniciar/Cerrar, no solo esta funcion. La solucion correcta es
+    // EVITAR la carrera, no recuperarse despues del choque: WITH (UPDLOCK, HOLDLOCK) toma un lock
+    // de actualizacion sobre esta clave (Fecha,Lote,Elemento,LineaAncla) que se mantiene hasta que
+    // termine la transaccion -- una segunda llamada concurrente para la MISMA clave queda
+    // bloqueada (esperando) en este SELECT hasta que la primera haga COMMIT, y en ese momento ve
+    // la fila ya insertada y la reutiliza -- nunca llega a intentar el INSERT duplicado.
+    // FIX 16/09/2026 (ver DIAGNOSTICO_FINALIZAR_ORDEN.md -- "Conversion failed when converting
+    // date and/or time from character string" real, todavia sin causa raiz identificada del todo):
+    // se tipa explicito sql.Date en vez de dejar que mssql infiera el tipo del objeto Date de JS --
+    // es la causa mas comun de esa conversion fallida (si la inferencia no da con DateTime/Date,
+    // tedious puede terminar mandando el valor como texto, y SQL Server no siempre lo puede
+    // convertir de vuelta). Mismo tipo en el SELECT y en el INSERT de mas abajo para que no haya
+    // ninguna diferencia de comportamiento entre los dos usos de "fecha".
     const dtExiste = await db.request()
-      .input('fecha', fecha).input('lote', lote).input('elemento', elemento).input('lineaAncla', lineaAncla)
-      .query(`SELECT OrdenProduccion FROM PRDOrdenesProduccion WHERE Fecha = @fecha AND Lote = @lote AND Elemento = @elemento AND LineaAncla = @lineaAncla`);
+      .input('fecha', sql.Date, fecha).input('lote', lote).input('elemento', elemento).input('lineaAncla', lineaAncla)
+      .query(`SELECT OrdenProduccion FROM PRDOrdenesProduccion WITH (UPDLOCK, HOLDLOCK) WHERE Fecha = @fecha AND Lote = @lote AND Elemento = @elemento AND LineaAncla = @lineaAncla`);
     if (dtExiste.recordset.length > 0) return dtExiste.recordset[0].OrdenProduccion;
 
     let tNombreDestino = '';
@@ -480,47 +499,27 @@ async function obtenerOCrearOrdenProduccion(db, { elemento, fecha, lineaAncla, l
     // portado a Produccion.vb): Estado/HoraInicioReal al crear la OT -- ver
     // agregar_estado_horas_ordenesproduccion.sql (Source/Produccion/nueva produccion). NO se toca
     // el lookup de arriba (WHERE Fecha/Lote/Elemento/LineaAncla) ni obtenerAnclaGrupoSellado.
-    let tOPFinal = tOP;
-    try {
-      await db.request()
-        .input('op', tOP).input('lote', lote).input('destino', codigoDestino).input('consecutivo', nConsecutivo)
-        .input('fecha', fecha).input('elemento', elemento).input('lineaAncla', lineaAncla).input('generadoPor', generadoPor)
-        .input('horaInicioReal', fHoraInicioReal)
-        .query(`
-          INSERT INTO PRDOrdenesProduccion (OrdenProduccion, Lote, Destino, Consecutivo, Fecha, Elemento, LineaAncla, TipoProceso, GeneradoPor, FechaCreacion, Estado, HoraInicioReal)
-          VALUES (@op, @lote, @destino, @consecutivo, @fecha, @elemento, @lineaAncla, 'SELLADORA', @generadoPor, GETDATE(), 'Activa', ISNULL(@horaInicioReal, GETDATE()))
-        `);
-    } catch (errInsert) {
-      // FIX 16/09/2026 (bug real reportado por el usuario -- bulto Detalle=2026000916000134661
-      // quedo con OrdenProduccion NULL para siempre): PRDOrdenesProduccion tiene restriccion UNIQUE
-      // sobre (Fecha,Lote,Elemento,LineaAncla) -- ver UQ_PRDOrdenesProduccion_Ancla. En "Sellado en
-      // Paralelo" (obtenerAnclaGrupoSellado) varios bultos de referencias distintas comparten la
-      // MISMA ancla, y pueden llamar esta funcion casi al mismo tiempo -- el SELECT de arriba
-      // (dtExiste) y este INSERT no estan protegidos por ningun lock entre medio (TOCTOU clasico).
-      // Si el INSERT choca (2627 = violacion de UNIQUE/PK, 2601 = violacion de indice unico), quiere
-      // decir que OTRA llamada concurrente ya gano la carrera y dejo la fila creada -- se vuelve a
-      // consultar en vez de tragar el error y devolver '' (que era lo que pasaba antes).
-      if (errInsert.number === 2627 || errInsert.number === 2601) {
-        const dtRetry = await db.request()
-          .input('fecha', fecha).input('lote', lote).input('elemento', elemento).input('lineaAncla', lineaAncla)
-          .query(`SELECT OrdenProduccion FROM PRDOrdenesProduccion WHERE Fecha = @fecha AND Lote = @lote AND Elemento = @elemento AND LineaAncla = @lineaAncla`);
-        if (dtRetry.recordset.length === 0) throw errInsert;
-        tOPFinal = dtRetry.recordset[0].OrdenProduccion;
-      } else {
-        throw errInsert;
-      }
-    }
+    // El UPDLOCK/HOLDLOCK del SELECT de arriba ya evita la carrera -- este INSERT no deberia
+    // volver a chocar contra UQ_PRDOrdenesProduccion_Ancla/_Codigo en uso normal.
+    await db.request()
+      .input('op', tOP).input('lote', lote).input('destino', codigoDestino).input('consecutivo', nConsecutivo)
+      .input('fecha', sql.Date, fecha).input('elemento', elemento).input('lineaAncla', lineaAncla).input('generadoPor', generadoPor)
+      .input('horaInicioReal', sql.DateTime, fHoraInicioReal)
+      .query(`
+        INSERT INTO PRDOrdenesProduccion (OrdenProduccion, Lote, Destino, Consecutivo, Fecha, Elemento, LineaAncla, TipoProceso, GeneradoPor, FechaCreacion, Estado, HoraInicioReal)
+        VALUES (@op, @lote, @destino, @consecutivo, @fecha, @elemento, @lineaAncla, 'SELLADORA', @generadoPor, GETDATE(), 'Activa', ISNULL(@horaInicioReal, GETDATE()))
+      `);
 
     // FIX 15/09/2026 (a pedido del usuario): backfill -- los SEL_TiempoMuerto de esta ejecucion
     // que quedaron con OrdenProduccion NULL (limpieza/alistamiento previos, ver arriba) ya pueden
     // asociarse a la OT recien creada. Requiere SEL_TiempoMuerto.OrdenProduccion (ver
     // sql/pendientes/20260915_agregar_ordenproduccion_tiempomuerto.sql).
     if (idEjecucion) {
-      await db.request().input('idEjecucion', idEjecucion).input('op', tOPFinal)
+      await db.request().input('idEjecucion', idEjecucion).input('op', tOP)
         .query(`UPDATE SEL_TiempoMuerto SET OrdenProduccion = @op WHERE id_ejecucion = @idEjecucion AND OrdenProduccion IS NULL`);
     }
 
-    return tOPFinal;
+    return tOP;
   } catch (err) {
     return '';
   }
@@ -648,6 +647,15 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
   const nAgnoOriginal = dtPrimero.recordset[0].agno;
   const nLineaOriginal = dtPrimero.recordset[0].num_bulto;
   const fFechaOriginal = new Date(nAgnoOriginal, dtPrimero.recordset[0].mes - 1, dtPrimero.recordset[0].dia);
+  // FIX 16/09/2026 (ver DIAGNOSTICO_FINALIZAR_ORDEN.md): si agno/mes/dia viniera NULL en SEL_Bultos
+  // (bulto viejo/incompleto -- este idOrden en particular ya tuvo un incidente de datos mezclados,
+  // ver FIX 09/09/2026 mas abajo en el archivo), fFechaOriginal sale "Invalid Date" en silencio y
+  // recien revienta mucho mas adelante como "Conversion failed..." dentro del INSERT de la OT,
+  // con el rollo() tapando el mensaje real. Cortar aca con un error claro en vez de dejar que
+  // arrastre un dato corrupto.
+  if (isNaN(fFechaOriginal.getTime())) {
+    throw new Error(`SEL_Bultos con agno/mes/dia inválido para IdOrden=${idOrden} (num_bulto=${nLineaOriginal}) -- no se puede resolver la fecha original para crear la Orden de Trabajo.`);
+  }
   const tLoteOriginal = String(dtPrimero.recordset[0].mes).padStart(2, '0') + String(dtPrimero.recordset[0].dia).padStart(2, '0');
   // FIX 31/08/2026: reusa tNumeroPedidoOrden (SEL_OrdenProduccion, confiable) en vez de releer
   // SEL_Bultos.NumeroPedido -- mismo criterio que la otra llamada a resolverDestinoOrden mas arriba.
@@ -875,7 +883,13 @@ async function abrirOReanudarBitacora(p, maquinaCodigo, operarioCodigo) {
       `);
     return dtNueva.recordset[0].Id;
   } catch (err) {
-    console.error('No se pudo abrir/reanudar la bitacora de turno (¿falta ejecutar agregar_bitacora_turno.sql?):', err.message);
+    // FIX 16/09/2026 (debug a pedido del usuario -- "Transaction has been aborted" en Iniciar/
+    // Cerrar bulto, causado por esta funcion recibiendo `tx` compartida -- ya corregido en
+    // scan-rollo.js, ahora recibe un Request aislado del pool global). Se deja el log ampliado
+    // (numero/codigo de error SQL, no solo el mensaje) para diagnosticar rapido si vuelve a fallar
+    // -- por ejemplo si de verdad falta correr agregar_bitacora_turno.sql.
+    console.error('No se pudo abrir/reanudar la bitacora de turno (¿falta ejecutar agregar_bitacora_turno.sql?):',
+      { message: err.message, number: err.number, code: err.code, maquina: maquinaCodigo, operario: operarioCodigo });
     return null;
   }
 }
