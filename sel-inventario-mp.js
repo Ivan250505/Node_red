@@ -894,6 +894,579 @@ async function abrirOReanudarBitacora(p, maquinaCodigo, operarioCodigo) {
   }
 }
 
+// ===========================================================================================
+// Ajuste de la cantidad realmente consumida de un rollo
+// Ver AJUSTE_CANTIDAD_CONSUMIDA_ROLLO_18092026.md (documento de diseno, 18/09/2026) y
+// sql/pendientes/20260918_agregar_ajuste_consumo_rollo.sql.
+//
+// El problema: consultarSerial (scan-rollo.js) toma INVExistencias.Cantidad COMPLETA y
+// generarSalidaRollo la descuenta entera -- el sistema asume que el rollo se gasto al 100%. Si el
+// operario solo uso una parte, la diferencia queda perdida: descontada del inventario, contada
+// como materia prima del pedido e inflando la merma.
+//
+// La correccion se hace sobre la CANTIDAD CONSUMIDA (C), no sobre "cuanto sobro". Es el mismo dato
+// visto desde el lado que ya entiende el resto del sistema: la merma sale sola de
+// SUM(PRDProduccionMateriaPrima.Cantidad) menos la salida real, sin ninguna cuenta aparte.
+//
+// Las cuatro variables del documento (seccion 4):
+//   R = cantidad original del rollo         C = cantidad consumida que digita el usuario
+//   S = salida real acumulada de la orden   D = R - C, lo que se devuelve al inventario
+// ===========================================================================================
+
+// S -- salida real acumulada, formula de ObtenerDatosMermaOrden (SEL_InventarioMP.vb):
+//   SUM[(Cantidad - PesoCono) + Torta + NuevoRetal + ResiduoTroquelado + ResiduoRefilado +
+//       ResiduoNoConforme] sobre los bultos.
+// Se suma sobre TODOS los miembros del grupo de sellado, no solo la orden pedida: es un solo rollo
+// fisico para hasta 3 referencias de salida, asi que lo que "salio" de ese rollo es la produccion
+// de las tres juntas. Comparar C contra la salida de una sola referencia dejaria pasar ajustes
+// imposibles (devolver kilos que en realidad ya se convirtieron en bultos de una hermana).
+async function obtenerSalidaRealSellado(db, idsOrdenes) {
+  if (!idsOrdenes || idsOrdenes.length === 0) return 0;
+  const dt = await db.request().query(`
+    SELECT ISNULL(SUM(
+      (ISNULL(p.Cantidad, 0) - ISNULL(p.PesoCono, 0))
+      + ISNULL(p.Torta, 0) + ISNULL(p.NuevoRetal, 0)
+      + ISNULL(p.ResiduoTroquelado, 0) + ISNULL(p.ResiduoRefilado, 0)
+      + ISNULL(p.ResiduoNoConforme, 0)
+    ), 0) AS Salida
+    FROM PRDProduccion p
+    INNER JOIN SEL_Bultos b ON b.serialPadre = p.Detalle
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+    WHERE ej.IdOrden IN (${idsOrdenes.join(',')})
+  `);
+  return Number(dt.recordset[0].Salida) || 0;
+}
+
+// Todos los miembros del grupo de sellado (incluida la orden pedida). Mismo criterio por ord.Linea
+// que ya usan confirmarRollo/finalizarOrden desde el FIX 13/09/2026 -- Elemento por si solo NO es
+// llave suficiente (dos lineas del mismo pedido pueden vender la misma referencia sin ser la misma
+// agrupacion fisica). Si la orden no esta agrupada devuelve [idOrden] y todo lo demas funciona igual.
+async function obtenerMiembrosGrupoSellado(db, idOrden) {
+  const dt = await db.request().input('idOrden', idOrden).query(`
+    SELECT ord2.IdOrden
+    FROM SEL_OrdenProduccion ord1
+    INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Linea = ord1.Linea
+    INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl1.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
+      AND g.Numero = ord1.NumeroPedido
+    INNER JOIN PRDGrupoEtapasCompartidasLineas gl2 ON gl2.IdGrupo = g.IdGrupo
+    INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gl2.Linea AND ord2.NumeroPedido = g.Numero
+    WHERE ord1.IdOrden = @idOrden
+  `);
+  const ids = [...new Set(dt.recordset.map(r => r.IdOrden))];
+  return ids.length > 0 ? ids : [Number(idOrden)];
+}
+
+// El ancla bajo la que vive la materia prima de la orden (o del grupo), con su Fecha/Lote/Linea.
+// Es la MISMA resolucion que hace crearBultoInicial antes de llamar a obtenerOCrearOrdenProduccion:
+// en un grupo, la MP se registro una sola vez contra la ancla (sinMateriaPrima=true para los
+// hermanos), asi que el ajuste tiene que apuntar ahi y no a la orden desde la que se pidio.
+async function resolverAnclaMateriaPrima(db, idOrden) {
+  const anclaGrupo = await obtenerAnclaGrupoSellado(db, idOrden);
+  const idOrdenAncla = anclaGrupo ? anclaGrupo.IdOrden : Number(idOrden);
+
+  const dtOrden = await db.request().input('idOrden', idOrdenAncla)
+    .query(`SELECT Elemento FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+  if (dtOrden.recordset.length === 0) throw new Error('Orden ancla no encontrada.');
+
+  const lineaOriginal = await obtenerLineaOriginalControlSellado(db, idOrdenAncla, 0);
+  const original = await obtenerFechaLoteOriginalControlSellado(db, idOrdenAncla, lineaOriginal);
+  if (!original) {
+    throw new Error('Esta orden todavía no tiene bultos creados -- no hay materia prima que ajustar.');
+  }
+
+  return {
+    idOrdenAncla,
+    elemento: dtOrden.recordset[0].Elemento,
+    lineaOriginal,
+    fecha: original.fecha,
+    lote: original.lote
+  };
+}
+
+// Los rollos de la orden con R y C, para la pantalla y para revalidar dentro de la transaccion.
+//
+// R sale, en este orden: del PRIMER ajuste guardado en SEL_AjusteConsumoRollo, de
+// SEL_RolloEjecucion.CantidadOriginal, o -- si el rollo nunca se ajusto y es de antes de que esa
+// tabla existiera (09/09/2026) -- de la cantidad que hay hoy en PRDProduccionMateriaPrima, que en
+// ese caso todavia ES la original. El orden importa: leer R de la MP despues de un ajuste daria el
+// valor ya corregido y encadenaria ajuste sobre ajuste (seccion 6 del documento).
+async function listarRollosOrden(db, idOrden) {
+  const ancla = await resolverAnclaMateriaPrima(db, idOrden);
+
+  const dt = await db.request()
+    .input('elemento', ancla.elemento).input('fecha', sql.Date, ancla.fecha)
+    .input('lote', ancla.lote).input('linea', ancla.lineaOriginal)
+    .input('idOrdenAncla', ancla.idOrdenAncla)
+    .query(`
+      SELECT
+        mp.Detalle AS Serial,
+        mp.MateriaPrima,
+        mp.Cantidad AS CantidadActual,
+        mp.LoteMP,
+        mp.Bodega,
+        e.Nombre AS Referencia,
+        COALESCE(
+          (SELECT TOP 1 aj.CantidadOriginal FROM SEL_AjusteConsumoRollo aj
+            WHERE aj.Serial = mp.Detalle AND aj.IdOrdenAncla = @idOrdenAncla ORDER BY aj.Id ASC),
+          (SELECT TOP 1 re.CantidadOriginal FROM SEL_RolloEjecucion re
+            INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = re.id_ejecucion
+            WHERE re.Serial = mp.Detalle AND ej.IdOrden = @idOrdenAncla ORDER BY re.Id ASC),
+          mp.Cantidad
+        ) AS CantidadOriginal,
+        (SELECT COUNT(*) FROM SEL_AjusteConsumoRollo aj2
+          WHERE aj2.Serial = mp.Detalle AND aj2.IdOrdenAncla = @idOrdenAncla) AS Ajustes
+      FROM PRDProduccionMateriaPrima mp
+      LEFT JOIN INVElementos e ON mp.MateriaPrima = e.Codigo
+      WHERE mp.Elemento = @elemento AND mp.Fecha = @fecha AND mp.Lote = @lote AND mp.Linea = @linea
+      ORDER BY mp.Detalle
+    `);
+
+  return { ancla, rollos: dt.recordset };
+}
+
+// Devuelve D kilos al inventario, contra la MISMA etiqueta (Detalle) de la que salieron. Es el
+// inverso de descontarExistenciaPorDetalle y se apoya en el mismo AUD_INVExi_Borradas.
+//
+// El caso normal es que la fila YA NO EXISTA: generarSalidaRollo la dejo en 0 y el
+// "DELETE FROM INVExistencias WHERE Cantidad = 0 AND Unidades = 0" del final la borro. Por eso
+// esto es una ENTRADA que recrea la fila (Linea = MAX(Linea)+1 de esa bodega/elemento, igual que
+// EntradaInventario en INVModulo.vb), no un "deshacer" del UPDATE.
+//
+// Valor: la fila borrada se llevo su valorizacion. Se reconstruye a prorrata desde el snapshot que
+// descontarExistenciaPorDetalle dejo en AUD_INVExi_Borradas justo antes de descontar -- ahi estan
+// el Valor, la FechaIngreso, la Serie y el Lote exactos que tenia el rollo. Prorratear por
+// D/Cantidad es lo unico honesto: devolver la mitad de los kilos devuelve la mitad del valor.
+// Sin snapshot (rollo de antes de que existiera la auditoria) entra en 0 y queda dicho en el log:
+// es preferible a inventarse un costo.
+async function entradaExistenciaPorDetalle(db, { bodega, elemento, detalle, cantidad, serie, generadoPor }) {
+  const nCant = Number(cantidad);
+  if (!(nCant > 0)) return;
+
+  // El snapshot se lee SIEMPRE, no solo cuando hay que recrear la fila: de el sale el valor
+  // unitario del rollo, y ese hace falta tanto para valorizar la fila nueva como para sumarle
+  // valor a una que ya existe. Leerlo solo en la rama del INSERT fue un bug real encontrado
+  // probando dos ajustes seguidos (18/09/2026): el segundo subia Cantidad de 16 a 26 Kg y dejaba
+  // Valor clavado en los 16 Kg originales, o sea kilos sin costo dentro del inventario.
+  const dtSnap = await db.request().input('bodega', bodega).input('elemento', elemento).input('detalle', detalle)
+    .query(`
+      SELECT TOP 1 Cantidad, Valor, FechaIngreso, Serie, Lote
+      FROM AUD_INVExi_Borradas
+      WHERE Bodega = @bodega AND Elemento = @elemento AND Detalle = @detalle AND Operacion = 'SALIDA'
+      ORDER BY AuditId DESC
+    `);
+
+  let nValorUnitario = 0, fFechaIngreso = null, tSerie = serie || null, nLote = null;
+  if (dtSnap.recordset.length > 0) {
+    const snap = dtSnap.recordset[0];
+    const nCantSnap = Number(snap.Cantidad) || 0;
+    nValorUnitario = nCantSnap > 0 ? (Number(snap.Valor) || 0) / nCantSnap : 0;
+    fFechaIngreso = snap.FechaIngreso || null;
+    tSerie = snap.Serie != null ? String(snap.Serie).trim() : tSerie;
+    nLote = snap.Lote != null ? snap.Lote : null;
+  } else {
+    console.warn(`ajustarConsumoRollo: sin snapshot en AUD_INVExi_Borradas para ${detalle} (bodega ${bodega}, elemento ${elemento}) -- el saldo entra con Valor 0.`);
+  }
+  const nValor = nValorUnitario * nCant;
+
+  const dtExiste = await db.request().input('bodega', bodega).input('elemento', elemento).input('detalle', detalle)
+    .query(`SELECT Linea, Cantidad FROM INVExistencias WHERE Bodega = @bodega AND Elemento = @elemento AND Detalle = @detalle`);
+
+  if (dtExiste.recordset.length > 0) {
+    // El rollo todavia tiene saldo (se ajusta antes de que se consumiera del todo, o es un segundo
+    // ajuste sobre un rollo ya devuelto): se suma sobre la fila que ya esta, sin crear otra.
+    const fila = dtExiste.recordset[0];
+    await db.request()
+      .input('bodega', bodega).input('elemento', elemento).input('linea', fila.Linea)
+      .input('cantidad', nCant).input('valor', nValor)
+      .query(`UPDATE INVExistencias SET Cantidad = Cantidad + @cantidad, Valor = Valor + @valor WHERE Bodega = @bodega AND Elemento = @elemento AND Linea = @linea`);
+  } else {
+    const dtLinea = await db.request().input('bodega', bodega).input('elemento', elemento)
+      .query(`SELECT ISNULL(MAX(Linea), 0) + 1 AS NL FROM INVExistencias WHERE Bodega = @bodega AND Elemento = @elemento`);
+
+    await db.request()
+      .input('bodega', bodega).input('elemento', elemento).input('linea', dtLinea.recordset[0].NL)
+      .input('cantidad', nCant).input('valor', nValor).input('detalle', detalle)
+      .input('serie', tSerie).input('lote', nLote).input('fechaIngreso', fFechaIngreso)
+      .query(`
+        INSERT INTO INVExistencias (Bodega, Elemento, Linea, UnidadMedida, Cantidad, Unidades, Valor, FechaIngreso, Serie, Lote, Detalle)
+        VALUES (@bodega, @elemento, @linea, 'KGS', @cantidad, 0, @valor, ISNULL(@fechaIngreso, GETDATE()), @serie, @lote, @detalle)
+      `);
+  }
+
+  // Mismo rastro que deja la salida, con Operacion invertida -- asi la auditoria de una etiqueta se
+  // lee de corrido: SALIDA cuando se monto el rollo, ENTRADA cuando se corrigio lo consumido.
+  //
+  // Se guarda la FOTO DE LA FILA, no el movimiento: es la semantica de esta tabla (las filas
+  // SALIDA que escribe descontarExistenciaPorDetalle son la fila entera tal como estaba ANTES de
+  // descontar, no los kilos descontados). Las de ENTRADA son la fila tal como queda DESPUES de
+  // devolver. Cuantos kilos se movieron en cada ajuste esta en SEL_AjusteConsumoRollo.Diferencia,
+  // que es su sitio -- mezclar aqui un delta en Cantidad con un total en Valor haria la tabla
+  // ilegible.
+  await db.request()
+    .input('generadoPor', generadoPor).input('bodega', bodega).input('elemento', elemento)
+    .input('detalle', detalle)
+    .query(`
+      INSERT INTO AUD_INVExi_Borradas
+        (FechaHora, GeneradoPor, Origen, Bodega, Elemento, Linea, Cantidad, Unidades, Valor, FechaIngreso, Serie, Lote, Detalle, Operacion)
+      SELECT TOP 1 GETDATE(), @generadoPor, 'NodeSelladora.ajustarConsumoRollo', Bodega, Elemento, Linea,
+             Cantidad, Unidades, Valor, FechaIngreso, Serie, Lote, Detalle, 'ENTRADA'
+      FROM INVExistencias
+      WHERE Bodega = @bodega AND Elemento = @elemento AND Detalle = @detalle
+    `);
+}
+
+// Reescribe la linea del movimiento Tipo 24 con la cantidad nueva.
+//
+// Se ACTUALIZA la linea, no se borra y se vuelve a crear (seccion 5 punto 3 del documento): borrar
+// y recrear gastaria un consecutivo de SISNumeracion por cada correccion.
+//
+// Como se ubica: por Tipo + Detalle + Elemento, NO por Observaciones (el prefijo de Node es
+// "Salida Materia Prima Selladora - " y el de Mirane "Salida Materia Prima - ") ni por Fecha exacta
+// (en "Añadir Rollo" Node pasa fHoy con hora, en el primer rollo la fecha sin hora).
+//
+// El supuesto de que un serial aparece una sola vez en Tipo 24 se cumple hoy porque el rollo se
+// consume entero y su fila de existencias se borra, asi que no se puede volver a pitar. Pero este
+// ajuste ROMPE esa garantia: al devolver kilos el serial vuelve a existir y puede montarse en otra
+// orden, generando una segunda linea con el mismo Detalle. Por eso, cuando hay varias candidatas,
+// se desempata por la que tiene exactamente la cantidad que estamos corrigiendo, y si ni asi se
+// puede decidir se corta con un error claro en vez de pisar la linea equivocada.
+async function ajustarLineaSalidaTipo24(db, { detalle, elemento, cantidadAnterior, cantidadNueva }) {
+  const dt = await db.request().input('detalle', detalle).input('elemento', elemento)
+    .query(`
+      SELECT SubEmpresa, Fecha, Tipo, Numero, Linea, Cantidad
+      FROM INVMovimientosElementos
+      WHERE Tipo = 24 AND Detalle = @detalle AND Elemento = @elemento
+      ORDER BY Fecha DESC, Numero DESC, Linea DESC
+    `);
+
+  if (dt.recordset.length === 0) {
+    throw new Error(`No se encontró la línea de salida (Tipo 24) del rollo '${detalle}'. El ajuste no se puede aplicar desde aquí -- corríjalo desde el escritorio.`);
+  }
+
+  let fila;
+  if (dt.recordset.length === 1) {
+    fila = dt.recordset[0];
+  } else {
+    const exactas = dt.recordset.filter(r => Math.abs(Number(r.Cantidad) - Number(cantidadAnterior)) < 0.005);
+    if (exactas.length !== 1) {
+      throw new Error(`El rollo '${detalle}' tiene ${dt.recordset.length} líneas de salida (Tipo 24) y no se puede determinar cuál corresponde a esta orden. Ajústelo desde el escritorio.`);
+    }
+    fila = exactas[0];
+  }
+
+  await db.request()
+    .input('subempresa', fila.SubEmpresa).input('fecha', fila.Fecha).input('numero', fila.Numero)
+    .input('linea', fila.Linea).input('cantidad', cantidadNueva)
+    .query(`
+      UPDATE INVMovimientosElementos SET Cantidad = @cantidad
+      WHERE SubEmpresa = @subempresa AND Fecha = @fecha AND Tipo = 24 AND Numero = @numero AND Linea = @linea
+    `);
+
+  await db.request()
+    .input('subempresa', fila.SubEmpresa).input('fecha', fila.Fecha).input('numero', fila.Numero)
+    .query(`
+      UPDATE INVMovimientos SET FechaModificado = GETDATE()
+      WHERE SubEmpresa = @subempresa AND Fecha = @fecha AND Tipo = 24 AND Numero = @numero
+    `);
+
+  return { numero: fila.Numero, fecha: fila.Fecha };
+}
+
+// Deja PRDExtrusionControl coherente con la materia prima despues del ajuste.
+//
+// Los dos totales se recalculan como SUM(PRDProduccionMateriaPrima.Cantidad) del ancla (decision
+// del usuario, 18/09/2026 -- pregunta abierta 4 del documento). Mantiene la invariante que Node ya
+// tiene hoy (MaterialTotalKg = MaterialConsumidoKg, y por lo tanto la columna calculada
+// MaterialDisponibleKg en 0) y de paso corrige el caso de varios rollos, donde hoy ninguno de los
+// dos se mueve porque "Añadir Rollo" nunca llama a registrarControlParcialSellado.
+//
+// MaterialDisponibleKg NO se toca: es columna calculada ([MaterialTotalKg]-[MaterialConsumidoKg]),
+// escribirla revienta.
+//
+// El filtro de TipoProceso acepta los DOS valores a proposito. Node escribe 'SELLADORA' desde el
+// 16/09/2026 pero el script que renombra las filas viejas sigue sin correrse
+// (sql/pendientes/20260916_renombrar_tipoproceso_sellado_a_selladora.sql), asi que en produccion
+// conviven controles con 'Sellado' y con 'SELLADORA'. Buscar solo por uno dejaria sin recalcular
+// justo los procesos mas viejos, que son los que mas falta les hace.
+async function recalcularControlSellado(db, { elemento, fecha, lineaOriginal, lote, generadoPor }) {
+  const dtTotal = await db.request()
+    .input('elemento', elemento).input('fecha', sql.Date, fecha).input('lote', lote).input('linea', lineaOriginal)
+    .query(`SELECT ISNULL(SUM(Cantidad), 0) AS Total FROM PRDProduccionMateriaPrima WHERE Elemento = @elemento AND Fecha = @fecha AND Lote = @lote AND Linea = @linea`);
+  const nTotal = Number(dtTotal.recordset[0].Total) || 0;
+
+  const r = await db.request()
+    .input('elemento', elemento).input('fecha', sql.Date, fecha).input('lineaOriginal', lineaOriginal)
+    .input('lote', lote).input('total', nTotal).input('generadoPor', generadoPor)
+    .query(`
+      UPDATE PRDExtrusionControl
+      SET MaterialTotalKg = @total, MaterialConsumidoKg = @total,
+          FechaUltimaModificacion = GETDATE(), UsuarioUltimaModificacion = @generadoPor
+      WHERE ElementoOriginal = @elemento AND FechaOriginal = @fecha AND LineaOriginal = @lineaOriginal
+        AND LoteOriginal = @lote AND TipoProceso IN ('SELLADORA', 'Sellado')
+    `);
+
+  return { total: nTotal, filasActualizadas: r.rowsAffected[0] || 0 };
+}
+
+// Lo que ve la pantalla antes de dejar ajustar: los rollos con R/C y los topes que salen de S.
+// Se expone aparte de ajustarConsumoRollo porque la MISMA cuenta se vuelve a hacer adentro de la
+// transaccion -- entre que el operario abre la ventana y confirma, la maquina pudo cerrar otro
+// bulto y mover S (seccion 6 del documento).
+async function obtenerEstadoAjusteConsumo(pool, idOrden) {
+  const dtOrden = await pool.request().input('idOrden', idOrden)
+    .query(`SELECT Estado, NumeroPedido, Elemento FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+  if (dtOrden.recordset.length === 0) throw new Error('Orden no encontrada.');
+
+  const { ancla, rollos } = await listarRollosOrden(pool, idOrden);
+  const idsGrupo = await obtenerMiembrosGrupoSellado(pool, ancla.idOrdenAncla);
+  const salidaReal = await obtenerSalidaRealSellado(pool, idsGrupo);
+
+  const totalActual = rollos.reduce((acc, r) => acc + (Number(r.CantidadActual) || 0), 0);
+
+  return {
+    estado: dtOrden.recordset[0].Estado,
+    idOrdenAncla: ancla.idOrdenAncla,
+    salidaReal,
+    totalActual,
+    // Margen de maniobra del conjunto: cuanto se puede bajar en total sin que la suma de C quede
+    // por debajo de la salida real. Es el tope de verdad -- el maximo por rollo (R) es solo el
+    // techo individual.
+    margenDevolucion: Math.max(0, totalActual - salidaReal),
+    rollos: rollos.map(r => ({
+      serial: r.Serial,
+      referencia: (r.Referencia || '').trim() || '—',
+      lote: (r.LoteMP || '').trim() || '—',
+      bodega: (r.Bodega || '').trim() || '',
+      materiaPrima: r.MateriaPrima,
+      cantidadOriginal: Number(r.CantidadOriginal) || 0,
+      cantidadActual: Number(r.CantidadActual) || 0,
+      ajustes: Number(r.Ajustes) || 0
+    }))
+  };
+}
+
+// El ajuste completo, en UNA sola transaccion (seccion 5 del documento).
+//
+// Que se toca y en que orden:
+//   1. PRDProduccionMateriaPrima.Cantidad = C            (la fuente de verdad de la MP)
+//   2. INVExistencias                                     (entrada de D, o salida si C sube)
+//   3. INVMovimientosElementos Tipo 24 .Cantidad = C      (la salida ya registrada)
+//   4. PRDExtrusionControl                                (Total/Consumido recalculados)
+//   5. SEL_RolloEjecucion.Cantidad = C                    (linea de tiempo del rollo)
+//   6. SEL_EjecucionOrden                                 (solo si el serial es el que figura ahi)
+//   7. SEL_RolloPendienteInicio                           (solo si quedo sin materializar)
+//   8. SEL_AjusteConsumoRollo                             (bitacora del ajuste)
+//
+// La merma NO se escribe (punto 8 del documento): en Node no se calcula -- la calcula el escritorio
+// en "Cerrar Definitivo" leyendo SUM(PRDProduccionMateriaPrima.Cantidad). Por eso el ajuste se
+// limita a PendienteValidacion: es la ventana que va desde el Finalizar de la tableta (que no
+// calcula merma) hasta el cierre del digitador, asi que la merma se calcula despues del ajuste y
+// con los numeros ya corregidos, sin que haya nada que recalcular a mano.
+//
+// D se calcula contra la cantidad ACTUAL, no contra R: en un segundo ajuste (50 -> 40 -> 35) los
+// primeros 10 kilos ya volvieron al inventario, y devolver R - C otra vez los duplicaria. Si C
+// SUBE (el operario se corrigio al reves), D queda negativo y se vuelve a descontar por el mismo
+// camino que la salida original, con su misma guardia de existencia insuficiente.
+async function ajustarConsumoRollo(pool, { idOrden, serial, cantidadNueva, motivo, generadoPor, usuario }) {
+  const tSerial = (serial || '').trim();
+  if (!tSerial) throw new Error('Serial vacío.');
+
+  const nNueva = Number(cantidadNueva);
+  if (!Number.isFinite(nNueva) || nNueva <= 0) {
+    throw new Error('La cantidad consumida debe ser un número mayor que cero.');
+  }
+
+  const dtOrden = await pool.request().input('idOrden', idOrden)
+    .query(`SELECT Estado FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+  if (dtOrden.recordset.length === 0) throw new Error('Orden no encontrada.');
+  if (dtOrden.recordset[0].Estado !== 'PendienteValidacion') {
+    throw new Error('Solo se puede ajustar el consumo mientras la orden está pendiente de validación. Una vez que el digitador la cierra definitivamente, su merma ya está calculada y el ajuste tiene que hacerse desde el escritorio.');
+  }
+
+  const tx = new sql.Transaction(pool);
+  await tx.begin();
+  try {
+    // Todo se vuelve a leer DENTRO de la transaccion: entre que se pinto la pantalla y llego este
+    // POST, la maquina pudo cerrar un bulto y subir S, u otro usuario pudo ajustar el mismo rollo.
+    const { ancla, rollos } = await listarRollosOrden(tx, idOrden);
+    const rollo = rollos.find(r => String(r.Serial).trim() === tSerial);
+    if (!rollo) {
+      throw new Error(`El rollo '${tSerial}' no pertenece a la materia prima de esta orden.`);
+    }
+
+    const nOriginal = Number(rollo.CantidadOriginal) || 0;
+    const nActual = Number(rollo.CantidadActual) || 0;
+
+    if (nNueva > nOriginal + 0.0001) {
+      throw new Error(`No se puede consumir más de lo que entró: el rollo '${tSerial}' tiene ${nOriginal.toFixed(2)} Kg.`);
+    }
+
+    const idsGrupo = await obtenerMiembrosGrupoSellado(tx, ancla.idOrdenAncla);
+    const nSalidaReal = await obtenerSalidaRealSellado(tx, idsGrupo);
+
+    // Regla C > S ESTRICTA (seccion 4, regla 2): lo que entra nunca puede ser igual a lo que sale,
+    // siempre hay merma. Se valida sobre el TOTAL de la orden, no rollo por rollo -- con varios
+    // rollos lo que tiene que superar la salida es la suma.
+    const nTotalOtros = rollos
+      .filter(r => String(r.Serial).trim() !== tSerial)
+      .reduce((acc, r) => acc + (Number(r.CantidadActual) || 0), 0);
+    const nTotalNuevo = nTotalOtros + nNueva;
+
+    if (nTotalNuevo <= nSalidaReal) {
+      const nMinimo = nSalidaReal - nTotalOtros;
+      throw new Error(`La orden ya produjo ${nSalidaReal.toFixed(2)} Kg de salida real. El consumo total no puede quedar en ${nTotalNuevo.toFixed(2)} Kg: siempre tiene que haber merma. Para este rollo digite más de ${nMinimo.toFixed(2)} Kg.`);
+    }
+
+    const nDiferencia = nActual - nNueva; // > 0 devuelve al inventario, < 0 vuelve a descontar
+    const nElementoRollo = parseInt(tSerial.slice(-5), 10);
+    if (!Number.isFinite(nElementoRollo) || nElementoRollo <= 0) {
+      throw new Error(`No se pudo determinar el elemento de materia prima del serial '${tSerial}'.`);
+    }
+
+    // 1. La materia prima -- llave completa, que es la PK de la tabla.
+    await tx.request()
+      .input('cantidad', nNueva).input('fecha', sql.Date, ancla.fecha).input('elemento', ancla.elemento)
+      .input('lote', ancla.lote).input('linea', ancla.lineaOriginal)
+      .input('materiaPrima', rollo.MateriaPrima).input('detalle', tSerial)
+      .query(`
+        UPDATE PRDProduccionMateriaPrima SET Cantidad = @cantidad
+        WHERE Fecha = @fecha AND Elemento = @elemento AND Lote = @lote AND Linea = @linea
+          AND MateriaPrima = @materiaPrima AND Detalle = @detalle
+      `);
+
+    // 2. El inventario. La bodega se resuelve igual que en la salida (obtenerBodegaDeRollo cae al
+    //    movimiento Tipo 24 cuando la fila de existencias ya no esta, que es justo este caso).
+    const tBodega = (rollo.Bodega || '').trim() || await obtenerBodegaDeRollo(tx, tSerial);
+    if (!tBodega) {
+      throw new Error(`No se pudo determinar la bodega del rollo '${tSerial}' -- sin ella no se puede devolver el saldo al inventario.`);
+    }
+
+    // Misma guardia AR que generarSalidaRollo: sin Detalle habilitado en la bodega no hay forma de
+    // devolver el saldo contra la etiqueta, que es lo unico que lo hace rastreable.
+    const dtTipoPedido = await tx.request().input('idOrden', ancla.idOrdenAncla)
+      .query(`SELECT TipoPedido FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+    if (dtTipoPedido.recordset.length > 0 && (dtTipoPedido.recordset[0].TipoPedido || '').trim() === 'AR') {
+      const dtBod = await tx.request().input('bodega', tBodega)
+        .query(`SELECT Nombre, Detalle FROM INVBodegas WHERE Codigo = @bodega`);
+      if (dtBod.recordset.length > 0 && dtBod.recordset[0].Detalle === false) {
+        throw new Error(`La bodega '${dtBod.recordset[0].Nombre}' no tiene habilitada la opción Etiquetas (Detalle). No es posible devolver el saldo del rollo sin esa configuración.`);
+      }
+    }
+
+    if (nDiferencia > 0.0001) {
+      await entradaExistenciaPorDetalle(tx, {
+        bodega: tBodega, elemento: nElementoRollo, detalle: tSerial,
+        cantidad: nDiferencia, serie: (rollo.LoteMP || '').trim() || null, generadoPor
+      });
+    } else if (nDiferencia < -0.0001) {
+      // C subio: el operario se habia quedado corto y hay que volver a sacar kilos del saldo. Se
+      // reusa la misma funcion que la salida original, con su guardia de existencia insuficiente.
+      await descontarExistenciaPorDetalle(tx, {
+        bodega: tBodega, elemento: nElementoRollo, detalle: tSerial,
+        cantidad: -nDiferencia, generadoPor
+      });
+      // descontarExistenciaPorDetalle solo mueve Cantidad/Unidades, nunca Valor -- asi viene
+      // portado de Mirane y asi se deja, porque lo usa tambien el escaneo normal del rollo. Pero
+      // acá la entrada SI valoriza (entradaExistenciaPorDetalle), y dejar la salida sin valorizar
+      // haria que un ciclo bajar-subir dejara kilos y pesos desalineados en la misma fila. Se
+      // corrige solo en este camino, a prorrata de lo que queda, y en 0 si la fila quedo vacia.
+      await tx.request()
+        .input('bodega', tBodega).input('elemento', nElementoRollo).input('detalle', tSerial)
+        .input('quitado', -nDiferencia)
+        .query(`
+          UPDATE INVExistencias
+          SET Valor = CASE
+                        WHEN Cantidad <= 0 THEN 0
+                        ELSE CASE WHEN (Cantidad + @quitado) > 0
+                                  THEN Valor * (Cantidad / (Cantidad + @quitado))
+                                  ELSE 0 END
+                      END
+          WHERE Bodega = @bodega AND Elemento = @elemento AND Detalle = @detalle
+        `);
+    }
+
+    // 3. La linea del movimiento de salida ya registrado.
+    await ajustarLineaSalidaTipo24(tx, {
+      detalle: tSerial, elemento: nElementoRollo,
+      cantidadAnterior: nActual, cantidadNueva: nNueva
+    });
+
+    // 4. El control del proceso (Total y Consumido, los dos como SUM de la MP ya corregida).
+    const control = await recalcularControlSellado(tx, {
+      elemento: ancla.elemento, fecha: ancla.fecha, lineaOriginal: ancla.lineaOriginal,
+      lote: ancla.lote, generadoPor
+    });
+
+    // 5. La linea de tiempo del rollo -- sobre TODAS las ejecuciones del grupo, porque en sellado
+    //    en paralelo el mismo serial puede tener fila en la ejecucion de mas de un miembro.
+    const idsGrupoLista = idsGrupo.join(',');
+    await tx.request().input('serial', tSerial).input('cantidad', nNueva).query(`
+      IF OBJECT_ID('SEL_RolloEjecucion', 'U') IS NOT NULL
+      UPDATE re SET re.Cantidad = @cantidad
+      FROM SEL_RolloEjecucion re
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = re.id_ejecucion
+      WHERE re.Serial = @serial AND ej.IdOrden IN (${idsGrupoLista})
+    `);
+
+    // 6. SEL_EjecucionOrden guarda UN solo rollo por ejecucion (el ultimo escaneado) y no
+    //    representa el total consumido, asi que por defecto no se toca. Solo se alinea si el rollo
+    //    ajustado es justamente el que quedo ahi, para que los dos datos no se contradigan.
+    await tx.request().input('serial', tSerial).input('cantidad', nNueva).query(`
+      UPDATE SEL_EjecucionOrden SET PesoRolloBruto = @cantidad, PesoRolloNeto = @cantidad
+      WHERE IdOrden IN (${idsGrupoLista}) AND SerialRolloEntrada = @serial
+    `);
+
+    // 7. Rollo confirmado que nunca llego a materializarse (Alistamiento a medias). En una orden
+    //    PendienteValidacion no deberia quedar ninguno, pero si lo hay se deja coherente para que
+    //    no materialice despues con la cantidad vieja.
+    await tx.request().input('serial', tSerial).input('cantidad', nNueva).query(`
+      IF OBJECT_ID('SEL_RolloPendienteInicio', 'U') IS NOT NULL
+      UPDATE SEL_RolloPendienteInicio SET Cantidad = @cantidad
+      WHERE Serial = @serial AND Procesado = 0 AND IdOrden IN (${idsGrupoLista})
+    `);
+
+    // 8. La bitacora. CantidadOriginal se guarda SIEMPRE con el R resuelto arriba -- es lo que hace
+    //    que el proximo ajuste lea el original de aca y no encadene sobre el valor ya corregido.
+    await tx.request()
+      .input('idOrden', idOrden).input('idOrdenAncla', ancla.idOrdenAncla).input('serial', tSerial)
+      .input('original', nOriginal).input('anterior', nActual).input('nueva', nNueva)
+      .input('diferencia', nDiferencia).input('salidaReal', nSalidaReal)
+      .input('motivo', (motivo || '').trim() || null)
+      .input('generadoPor', generadoPor).input('usuario', usuario || null)
+      .query(`
+        INSERT INTO SEL_AjusteConsumoRollo
+          (IdOrden, IdOrdenAncla, Serial, CantidadOriginal, CantidadAnterior, CantidadNueva, Diferencia, SalidaRealKg, Motivo, GeneradoPor, Usuario)
+        VALUES (@idOrden, @idOrdenAncla, @serial, @original, @anterior, @nueva, @diferencia, @salidaReal, @motivo, @generadoPor, @usuario)
+      `);
+
+    await tx.commit();
+
+    return {
+      ok: true,
+      serial: tSerial,
+      cantidadOriginal: nOriginal,
+      cantidadAnterior: nActual,
+      cantidadNueva: nNueva,
+      devuelto: nDiferencia,
+      salidaReal: nSalidaReal,
+      consumoTotal: nTotalNuevo,
+      mermaEstimada: nTotalNuevo - nSalidaReal,
+      // Cero filas actualizadas significa que no hay PRDExtrusionControl para este proceso: la MP y
+      // el inventario ya quedaron bien, pero el control (y con el la merma del escritorio) no.
+      // Se avisa hacia arriba en vez de tragarselo.
+      controlActualizado: control.filasActualizadas > 0,
+      materialTotal: control.total
+    };
+  } catch (err) {
+    try {
+      await tx.rollback();
+    } catch (errRollback) {
+      console.error('Rollback fallido tras el error real del ajuste de consumo:', errRollback.message);
+    }
+    throw err;
+  }
+}
+
 module.exports = {
   obtenerBodegaDeRollo,
   obtenerLoteRollo,
@@ -914,5 +1487,12 @@ module.exports = {
   valNumerico,
   resolverTurnoMaquina,
   cerrarBitacora,
-  abrirOReanudarBitacora
+  abrirOReanudarBitacora,
+  obtenerSalidaRealSellado,
+  obtenerMiembrosGrupoSellado,
+  resolverAnclaMateriaPrima,
+  listarRollosOrden,
+  recalcularControlSellado,
+  obtenerEstadoAjusteConsumo,
+  ajustarConsumoRollo
 };

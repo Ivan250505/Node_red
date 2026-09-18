@@ -38,8 +38,20 @@ vea de un golpe qué tan viejo es cada uno.
 | `20260915_agregar_amperaje_ferroniquel.sql` | ✅ | ✅ |
 | `20260915_corregir_duracionminutos_tiempomuerto.sql` | ✅ | ✅ |
 | `20260916_igualar_prueba_con_produccion.sql` | — *(solo Prueba)* | ✅ |
+| `pendientes/20260918_agregar_ajuste_consumo_rollo.sql` | ⏳ **falta** | ✅ |
 
-**No queda nada por correr.** El 16/09/2026 se igualó `CarlixplastPrueba` con producción y se
+**Falta correr `20260918_agregar_ajuste_consumo_rollo.sql` en producción** (18/09/2026). Ya está
+aplicado y probado de punta a punta en `carlixplastPrueba`. Sin él, el botón "Ajustar consumo de
+rollo" de la tableta avisa que falta el script y no deja hacer nada -- el resto de la aplicación
+sigue funcionando igual. Es aditivo (una columna nullable en `SEL_RolloEjecucion` y la tabla nueva
+`SEL_AjusteConsumoRollo`) y se puede re-ejecutar sin daño.
+
+Sigue pendiente también `20260916_renombrar_tipoproceso_sellado_a_selladora.sql`: comprobado el
+18/09/2026 contra Prueba, conviven 38 controles con `TipoProceso = 'Sellado'` y 5 con `'SELLADORA'`.
+Mientras no se corra, el VB de Mirane (que filtra por `'Sellado'`) no encuentra los controles que
+crea Node y `RecalcularMermaSellado` sale en silencio sin calcular la merma.
+
+El 16/09/2026 se igualó `CarlixplastPrueba` con producción y se
 comprobó columna por columna que no queda ninguna diferencia en las tablas `SEL_`: mismos tipos,
 mismos anchos, misma nulabilidad y las mismas tres restricciones `CHECK`.
 

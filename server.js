@@ -11,7 +11,8 @@ const { registrarEvento } = require('./accesos');
 const { consultarSerial, confirmarRollo, alternarReferenciaGrupo, materializarInicioOrden } = require('./scan-rollo');
 const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
 const {
-  obtenerLineaOriginalControlSellado, resolverTurnoMaquina, cerrarBitacora, abrirOReanudarBitacora
+  obtenerLineaOriginalControlSellado, resolverTurnoMaquina, cerrarBitacora, abrirOReanudarBitacora,
+  obtenerAnclaGrupoSellado, obtenerEstadoAjusteConsumo, ajustarConsumoRollo
 } = require('./sel-inventario-mp');
 
 const dbConfig = {
@@ -375,7 +376,16 @@ function estilosBase() {
       text-decoration: none; display: inline-block; padding: 8px 14px; border-radius: 8px; margin-bottom: 8px;
     }
     .header-top { text-align: center; }
-    .header-inner { max-width: 960px; margin: 0 auto; }
+    /* Ancho util de la pagina (18/09/2026, a pedido del usuario: "la interfaz corre en una tableta
+    de 11 pulgadas y aun hay espacio en los laterales"). Estaba en 960px, que en la tableta del
+    taller (1280 px de ancho en horizontal) dejaba ~160px de margen muerto a cada lado. A 1200px
+    queda un margen de ~40px por lado -- suficiente para no pegarse al bisel -- y todo lo de adentro
+    aprovecha el espacio solo, porque ya es fluido: .grid mete una columna mas de tarjetas
+    (auto-fill de 280px), las islas se reparten la fila y las filas de la cola le dan mas aire a los
+    botones. En pantallas mas angostas (telefono, tableta en vertical) no cambia nada: max-width
+    solo pone un techo. Los dos valores -- este y el de main -- tienen que ir siempre iguales, si no
+    el encabezado y el contenido quedan desalineados. */
+    .header-inner { max-width: 1200px; margin: 0 auto; }
     .logo-wrap {
       background: white; display: inline-block; padding: 10px 22px;
       border-radius: 12px; margin-bottom: 14px;
@@ -398,7 +408,7 @@ function estilosBase() {
     .header-fila { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 16px; }
     .header-info { justify-self: start; min-width: 0; }
     /* Orden de Trabajo encima del titulo del pedido, en el encabezado de Informacion (a pedido del
-    usuario, 16/09/2026 -- antes solo salia en el titulo del Historial de materia prima, al final de
+    usuario, 16/09/2026 -- antes solo salia en el titulo del Historial rollo, al final de
     la pagina, y tocaba bajar hasta alla para verla). Pastilla BLANCA con la letra verde de la marca
     y el MISMO tamano que el h1 del pedido (a pedido del usuario, 16/09/2026): es el dato que manda
     en la pantalla, asi que se lee igual de grande que el pedido y no como una etiqueta chiquita.
@@ -416,6 +426,51 @@ function estilosBase() {
     .header-fila .volver { margin-top: 8px; margin-bottom: 0; }
     .header-salir-grupo { justify-self: end; grid-column: 3; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
     .header-salir-grupo .header-usuario { font-size: 12px; opacity: 0.9; }
+    /* Campana de notificaciones, al lado del nombre del usuario (18/09/2026, a pedido del usuario).
+    El bloque del usuario pasa de ser una columna de dos renglones a "usuario + campana" en el
+    primero y "Cerrar sesion" en el segundo. */
+    .header-usuario-fila { display: flex; align-items: center; gap: 8px; }
+    .btn-campana {
+      position: relative; width: auto; min-width: 0; padding: 4px 8px; font-size: 16px; line-height: 1;
+      background: rgba(255,255,255,0.18); color: white; border-radius: 10px; box-shadow: none;
+    }
+    .btn-campana:active { background: rgba(255,255,255,0.3); }
+    /* Contador de no leidas. Rojo sobre el azul del encabezado para que se vea de reojo desde la
+    maquina, que es donde esta el operario cuando entra un pedido. */
+    .campana-punto {
+      position: absolute; top: -5px; right: -5px; min-width: 17px; height: 17px; padding: 0 4px;
+      border-radius: 999px; background: #c00000; color: white;
+      font-size: 11px; font-weight: 700; line-height: 17px; text-align: center;
+    }
+    /* El panel NO puede vivir dentro de <header>: ese tiene overflow: hidden por la trama de puntos
+    y lo recortaria. Se cuelga de <body> en position: fixed y el script lo coloca debajo de la
+    campana con getBoundingClientRect (mismo camino que la tarjeta de "pedido nuevo", que tambien se
+    dibuja fuera del encabezado). z-index 1050: por encima del backdrop de SweetAlert2 (1040) y por
+    debajo de la tarjeta de pedido nuevo (1060), que es la unica que debe tapar a todo lo demas. */
+    .notif-panel {
+      position: fixed; z-index: 1050; width: min(340px, calc(100vw - 24px));
+      background: white; color: var(--texto); border-radius: 14px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.25); overflow: hidden;
+    }
+    .notif-cabecera {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: 12px 14px; border-bottom: 1px solid #eef0f2;
+      font-size: 14px; font-weight: 700;
+    }
+    .notif-limpiar {
+      width: auto; padding: 4px 10px; font-size: 12px; font-weight: 600;
+      background: var(--gris-fondo); color: var(--texto-suave); box-shadow: none; border-radius: 8px;
+    }
+    .notif-lista { max-height: min(60vh, 420px); overflow-y: auto; }
+    .notif-item { display: flex; gap: 10px; padding: 11px 14px; border-bottom: 1px solid #f4f6f8; }
+    .notif-item:last-child { border-bottom: none; }
+    .notif-item.no-leida { background: #f0f8ff; }
+    .notif-icono { flex: 0 0 auto; font-size: 17px; line-height: 1.3; }
+    .notif-cuerpo { flex: 1; min-width: 0; }
+    .notif-titulo { font-size: 13px; font-weight: 700; }
+    .notif-detalle { font-size: 12px; color: var(--texto-suave); margin-top: 2px; word-break: break-word; }
+    .notif-hora { font-size: 11px; color: var(--texto-suave); margin-top: 3px; }
+    .notif-vacio { padding: 26px 14px; text-align: center; color: var(--texto-suave); font-size: 13px; }
     .avance-header-card {
       background: white; border-radius: 12px; padding: 10px 14px; justify-self: center; width: 260px; max-width: 100%;
       box-shadow: 0 1px 4px rgba(0,0,0,0.15); color: var(--texto);
@@ -426,7 +481,8 @@ function estilosBase() {
     .avance-header-barra { height: 8px; border-radius: 999px; background: #eef0f2; overflow: hidden; margin-bottom: 6px; }
     .avance-header-relleno { height: 100%; border-radius: 999px; }
     .avance-header-stats { display: flex; justify-content: space-between; font-size: 12px; color: var(--texto-suave); font-weight: 600; }
-    main { max-width: 960px; margin: 0 auto; padding: 16px 14px 30px; position: relative; z-index: 1; }
+    /* Mismo ancho que .header-inner -- ver el comentario de arriba. */
+    main { max-width: 1200px; margin: 0 auto; padding: 16px 14px 30px; position: relative; z-index: 1; }
     .barra {
       display: flex;
       flex-wrap: wrap;
@@ -613,6 +669,39 @@ function estilosBase() {
       padding: 8px 0; border-bottom: 1px solid #eef0f2;
     }
     .hist-fila:last-child { border-bottom: none; }
+    /* Historial rollo (18/09/2026): la fila pasa de rejilla de 3 columnas a dos bloques -- los
+    datos del rollo a la izquierda y los kilos consumidos a la derecha. El serial tiene 19+ digitos
+    y en la tableta no cabe en una rejilla junto a la cantidad sin partirse en pedazos ilegibles.
+    Ver AJUSTE_CANTIDAD_CONSUMIDA_ROLLO_18092026.md. */
+    .hist-rollo {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 10px 0; border-bottom: 1px solid #eef0f2;
+    }
+    .hist-rollo:last-child { border-bottom: none; }
+    .hist-rollo-datos { min-width: 0; }
+    .hist-rollo-serial { font-size: 13px; font-family: monospace; font-weight: 500; word-break: break-all; }
+    .hist-rollo-meta { font-size: 12px; color: var(--texto-suave); margin-top: 2px; }
+    .hist-rollo-kg { font-size: 16px; font-weight: 700; white-space: nowrap; }
+    .hist-rollo-kg small { font-size: 11px; font-weight: 600; color: var(--texto-suave); display: block; text-align: right; }
+    /* Ventanas del ajuste de consumo. Van en la hoja de la pagina y no en estilos sueltos dentro del
+    HTML de cada Swal porque son tres ventanas encadenadas (lista -> teclado -> resultado) que
+    comparten el mismo resumen de kilos. Los botones de rollo se tocan con el dedo en la tableta:
+    area grande y separacion generosa. */
+    .swal-ajuste-resumen { background: #f6f8f9; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+    .swal-ajuste-resumen > div { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 3px 0; font-size: 13px; }
+    .swal-ajuste-resumen span { color: var(--texto-suave); }
+    .swal-ajuste-resumen b { font-size: 15px; white-space: nowrap; }
+    .swal-ajuste-ayuda { font-size: 12.5px; color: var(--texto-suave); margin: 10px 0 12px; line-height: 1.45; }
+    .swal-ajuste-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--texto-suave); margin: 12px 0 5px; }
+    .swal-rollo-item {
+      display: block; width: 100%; text-align: left; background: white; border: 1px solid #e3e7ea;
+      border-radius: 10px; padding: 11px 13px; margin-bottom: 9px; cursor: pointer; font: inherit;
+    }
+    .swal-rollo-item:hover { border-color: var(--verde); background: #f7fbf4; }
+    .swal-rollo-serial { font-family: monospace; font-size: 13px; font-weight: 500; word-break: break-all; }
+    .swal-rollo-meta { font-size: 12px; color: var(--texto-suave); margin-top: 3px; }
+    .swal-rollo-kg { font-size: 15px; font-weight: 700; margin-top: 5px; }
+    .swal-rollo-orig { font-size: 12px; font-weight: 500; color: var(--texto-suave); text-decoration: line-through; }
     .card-grid {
       display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px;
     }
@@ -662,6 +751,19 @@ function estilosBase() {
     .btn-residuo { background: var(--texto-suave); }
     .btn-no-conforme { background: #c00000; }
     .btn-pausa { background: var(--naranja); }
+    /* Fila de islas cuyo ancho lo manda el CONTENIDO de cada una, no un reparto a partes iguales
+    (18/09/2026, a pedido del usuario, para "Produccion / Residuos / Verificacion" de Informacion).
+    Con el flex normal de .isla (1 1 220px) las tres salen del MISMO ancho, porque flex-grow reparte
+    el sobrante a partes iguales sin mirar lo que cada una necesita: Produccion, que solo lleva 3
+    botones, quedaba con un hueco grande al lado, y Residuos partia los suyos en dos lineas.
+    Con flex-basis auto la base de cada isla es el ancho de sus botones y el sobrante se reparte
+    desde ahi: la que mas lleva sale mas ancha, la de un solo boton mas angosta.
+    Se mide SOLO, sin anchos escritos a mano, que es justo lo que hace falta aca: los botones de
+    Residuos cambian segun la orden y la maquina (Troquelado solo aparece si la orden lo lleva, y
+    BOTONES_RESIDUOS_POR_TIPO decide el resto) -- si esa isla pierde o gana un boton, las otras dos
+    se reacomodan sin tocar nada. */
+    .islas-fila-ajustada > .isla { flex: 1 1 auto; }
+    .btn-verificar { background: var(--azul-osc); }
     .btn-accion:disabled { opacity: 0.5; cursor: not-allowed; }
     .btn-accion:disabled:active { transform: none; }
     .calidad-apartado { text-align: left; margin-bottom: 16px; }
@@ -774,6 +876,7 @@ function estilosBase() {
       .ref-card-cabecera { flex-wrap: wrap; }
       .ref-card-avance { flex: 1 1 100%; }
       .ejecucion-grid { grid-template-columns: 1fr 1fr; }
+      .islas-fila-ajustada > .isla { flex: 1 1 220px; }
       .grid { grid-template-columns: 1fr; }
       .imprimir-acciones-grid { grid-template-columns: 1fr; }
       header h1 { font-size: 18px; }
@@ -783,9 +886,28 @@ function estilosBase() {
       .header-info, .avance-header-card, .header-salir-grupo { justify-self: stretch; width: auto; grid-column: 1; }
       .header-salir-grupo { align-items: stretch; }
       .header-salir-grupo .header-usuario { text-align: center; }
+      .header-usuario-fila { justify-content: center; }
       .header-salir-grupo a.salir { text-align: center; }
     }
   `;
+}
+
+// Bloque del usuario en el encabezado: el nombre, la campana de notificaciones y "Cerrar sesion".
+// Estaba copiado igual en las SEIS paginas con encabezado (Selladoras, cola de la maquina,
+// Informacion, pedido agrupado, Bultos de una orden y Bultos del grupo). Se saco aca el 18/09/2026
+// al agregar la campana: el boton lleva id, y seis copias de un id son seis sitios donde se puede
+// desincronizar. Si alguna pagina necesita un encabezado distinto, que reciba un parametro -- no
+// que vuelva a copiarse el bloque.
+function bloqueUsuarioHeader(usuario) {
+  return `<div class="header-salir-grupo">
+          <div class="header-usuario-fila">
+            <div class="header-usuario">👤 ${usuario}</div>
+            <button type="button" class="btn-campana" id="btn-notificaciones"
+                    title="Notificaciones" aria-label="Notificaciones"
+                    onclick="alternarNotificaciones(this)">🔔<span class="campana-punto oculto" id="campana-punto">0</span></button>
+          </div>
+          <a class="salir" href="/logout">Cerrar sesión</a>
+        </div>`;
 }
 
 function badgeEstadoOrden(estado) {
@@ -829,10 +951,7 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
           ${esAdmin ? `<a class="volver" href="/admin/tablet-fija">📌 Tablet fija a máquina</a>` : ''}
           ${esAdmin && SIMULADOR_PLC_VISIBLE ? `<a class="volver" href="/admin/simulador-plc">🧪 Simulador de PLC</a>` : ''}
         </div>
-        <div class="header-salir-grupo">
-          <div class="header-usuario">👤 ${usuario}</div>
-          <a class="salir" href="/logout">Cerrar sesión</a>
-        </div>
+        ${bloqueUsuarioHeader(usuario)}
       </div>
     </div>
   </header>
@@ -840,6 +959,7 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
     ${contenido}
   </main>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptNotificaciones(null)}</script>
   <script>${scriptAvisoPedidoNuevo(null)}</script>
   ${error ? `<script>Swal.fire({ icon: 'error', title: 'Error', text: ${jsString(error)}, confirmButtonColor: '#71bf44' });</script>` : ''}
 </body>
@@ -1193,6 +1313,199 @@ function scriptActualizarCola(maquinaCodigo) {
 // cuenta, el trigger nuevo (trg_SEL_Bultos_SuspenderTemporal, ver nueva produccion/SQL) hace la
 // transición sola, sin que el operario tenga que volver a tocar nada.
 // "No, suspender ahora": el servidor corta el bulto Activo ya mismo (sin esperar al PLC).
+// Apartado de notificaciones (18/09/2026, a pedido del usuario: "al lado del nombre de usuario
+// quiero un boton donde pueda acceder a un apartado de notificaciones").
+//
+// QUE GUARDA: los avisos que la tableta ya mostraba y se perdian al cerrarse -- pedido nuevo en la
+// cola, suspension pedida por Programacion, chequeo de calidad y protocolo de arranque a medias.
+// El operario que cerro sin querer el aviso, o que no estaba mirando la tableta, puede volver a
+// leerlo. Los avisos siguen saliendo igual que siempre: esto es el historial, no los reemplaza.
+//
+// DONDE SE GUARDA: en la tableta (localStorage), no en la base. No hace falta tabla nueva ni
+// endpoint -- todos estos avisos los detecta ya el propio navegador. Misma convencion de clave que
+// el aviso de pedido nuevo: una lista POR MAQUINA, para que la tableta de la 05 no mezcle su
+// historial con el de la 07. Las paginas sin maquina (Selladoras) usan la lista 'todas', asi que lo
+// anotado ahi no sale en el panel de una maquina concreta, ni al reves.
+//
+// Si algun dia esto tiene que ser multiusuario de verdad (que Programacion le mande un mensaje a un
+// operario concreto), el cambio es sustituir leerNotificaciones/guardarNotificaciones por un par de
+// endpoints contra una tabla -- el resto del panel no se entera.
+function scriptNotificaciones(maquinaCodigo) {
+  return `
+    var NOTIF_CLAVE = 'carlixplast.notificaciones.' + (${jsString(maquinaCodigo || '')} || 'todas');
+    var NOTIF_MAXIMO = 50;                // se descartan las mas viejas, no crece sin fin
+    var NOTIF_ANTIRREPETIDO_MS = 1800000; // 30 min -- ver registrarNotificacion
+    var notifPanel = null;
+
+    var NOTIF_ICONOS = {
+      pedido: '📦', suspension: '⏸', calidad: '✅', calidad_alerta: '⚠️', protocolo: '⚙️'
+    };
+
+    function notifEscapar(texto) {
+      return String(texto == null ? '' : texto)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function leerNotificaciones() {
+      try { var v = JSON.parse(localStorage.getItem(NOTIF_CLAVE)); return Array.isArray(v) ? v : []; }
+      catch (e) { return []; }
+    }
+
+    function guardarNotificaciones(lista) {
+      try { localStorage.setItem(NOTIF_CLAVE, JSON.stringify(lista)); } catch (e) {}
+    }
+
+    // La llaman los avisos que ya existian. SIEMPRE con typeof desde el otro lado: hay paginas que
+    // cargan un aviso pero no este script, y un aviso no se puede caer por no poder anotarse.
+    //
+    // clave (opcional) es el antirrepetido: hay avisos que vuelven a salir en cada carga de pagina
+    // mientras la condicion siga ahi -- el protocolo a medias es el caso claro. Con la misma clave
+    // dentro de la ultima media hora no se anota otra vez; si no, el panel se llenaria del mismo
+    // renglon repetido y el contador no pararia de subir.
+    window.registrarNotificacion = function(tipo, titulo, detalle, clave) {
+      try {
+        var lista = leerNotificaciones();
+        if (clave) {
+          var limite = Date.now() - NOTIF_ANTIRREPETIDO_MS;
+          var repetida = lista.some(function(n) {
+            return n.clave === clave && new Date(n.hora).getTime() > limite;
+          });
+          if (repetida) return;
+        }
+        lista.unshift({
+          tipo: tipo || '', titulo: String(titulo == null ? '' : titulo),
+          detalle: String(detalle == null ? '' : detalle),
+          hora: new Date().toISOString(), leida: false, clave: clave || null
+        });
+        if (lista.length > NOTIF_MAXIMO) lista.length = NOTIF_MAXIMO;
+        guardarNotificaciones(lista);
+        pintarContadorNotificaciones();
+        if (notifPanel) pintarListaNotificaciones();
+      } catch (e) {}
+    };
+
+    function pintarContadorNotificaciones() {
+      var punto = document.getElementById('campana-punto');
+      if (!punto) return;
+      var sinLeer = leerNotificaciones().filter(function(n) { return !n.leida; }).length;
+      punto.textContent = sinLeer > 9 ? '9+' : String(sinLeer);
+      punto.classList.toggle('oculto', sinLeer === 0);
+    }
+
+    // "hace 5 min" mientras es reciente y la fecha con hora cuando ya no lo es: a las 3 horas
+    // "hace 180 min" no le dice nada a nadie.
+    function notifHaceCuanto(iso) {
+      var ms = Date.now() - new Date(iso).getTime();
+      if (!isFinite(ms) || ms < 0) return '';
+      var min = Math.floor(ms / 60000);
+      if (min < 1) return 'ahora mismo';
+      if (min < 60) return 'hace ' + min + ' min';
+      var horas = Math.floor(min / 60);
+      if (horas < 6) return 'hace ' + horas + ' h';
+      return new Date(iso).toLocaleString('es-CO', {
+        day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false
+      });
+    }
+
+    function pintarListaNotificaciones() {
+      if (!notifPanel) return;
+      var lista = leerNotificaciones();
+      var cuerpo = notifPanel.querySelector('.notif-lista');
+      if (lista.length === 0) {
+        cuerpo.innerHTML = '<div class="notif-vacio">No hay notificaciones</div>';
+        return;
+      }
+      cuerpo.innerHTML = lista.map(function(n) {
+        return '<div class="notif-item' + (n.leida ? '' : ' no-leida') + '">' +
+                 '<div class="notif-icono">' + (NOTIF_ICONOS[n.tipo] || '🔔') + '</div>' +
+                 '<div class="notif-cuerpo">' +
+                   '<div class="notif-titulo">' + notifEscapar(n.titulo) + '</div>' +
+                   (n.detalle ? '<div class="notif-detalle">' + notifEscapar(n.detalle) + '</div>' : '') +
+                   '<div class="notif-hora">' + notifEscapar(notifHaceCuanto(n.hora)) + '</div>' +
+                 '</div>' +
+               '</div>';
+      }).join('');
+    }
+
+    function cerrarNotificaciones() {
+      if (!notifPanel) return;
+      notifPanel.remove();
+      notifPanel = null;
+      document.removeEventListener('pointerdown', notifClicFuera, true);
+      document.removeEventListener('keydown', notifTecla, true);
+      window.removeEventListener('resize', cerrarNotificaciones);
+      window.removeEventListener('scroll', cerrarNotificaciones, true);
+    }
+
+    function notifClicFuera(evento) {
+      if (!notifPanel) return;
+      var boton = document.getElementById('btn-notificaciones');
+      if (notifPanel.contains(evento.target)) return;
+      if (boton && boton.contains(evento.target)) return; // de cerrarlo se encarga su propio onclick
+      cerrarNotificaciones();
+    }
+
+    function notifTecla(evento) {
+      if (evento.key === 'Escape') cerrarNotificaciones();
+    }
+
+    // Se coloca debajo de la campana, y pegado al borde si no cabe: en la tableta el boton esta en
+    // la esquina derecha, asi que sin este ajuste el panel se saldria de la pantalla.
+    function colocarPanelNotificaciones(boton) {
+      var caja = boton.getBoundingClientRect();
+      var ancho = notifPanel.offsetWidth;
+      var izquierda = Math.min(Math.max(12, caja.right - ancho), window.innerWidth - ancho - 12);
+      notifPanel.style.top = (caja.bottom + 8) + 'px';
+      notifPanel.style.left = izquierda + 'px';
+    }
+
+    function alternarNotificaciones(boton) {
+      if (notifPanel) { cerrarNotificaciones(); return; }
+      notifPanel = document.createElement('div');
+      notifPanel.className = 'notif-panel';
+      notifPanel.innerHTML =
+        '<div class="notif-cabecera"><span>Notificaciones</span>' +
+          '<button type="button" class="notif-limpiar" onclick="limpiarNotificaciones()">Limpiar</button>' +
+        '</div>' +
+        '<div class="notif-lista"></div>';
+      document.body.appendChild(notifPanel);
+      pintarListaNotificaciones();
+      colocarPanelNotificaciones(boton);
+
+      // Abrirlo es haberlas visto: se marcan leidas y el contador se apaga. La lista ya quedo
+      // pintada arriba con el resaltado de las que estaban sin leer, para que de un vistazo se
+      // distinga lo nuevo de lo que ya se habia visto.
+      var lista = leerNotificaciones();
+      if (lista.some(function(n) { return !n.leida; })) {
+        lista.forEach(function(n) { n.leida = true; });
+        guardarNotificaciones(lista);
+      }
+      pintarContadorNotificaciones();
+
+      document.addEventListener('pointerdown', notifClicFuera, true);
+      document.addEventListener('keydown', notifTecla, true);
+      window.addEventListener('resize', cerrarNotificaciones);
+      window.addEventListener('scroll', cerrarNotificaciones, true);
+    }
+
+    function limpiarNotificaciones() {
+      guardarNotificaciones([]);
+      pintarListaNotificaciones();
+      pintarContadorNotificaciones();
+    }
+
+    // Otra pestana del mismo WebView anoto algo (el operario navega entre Informacion y Bultos):
+    // el contador se pone al dia sin tener que recargar.
+    window.addEventListener('storage', function(evento) {
+      if (evento.key !== NOTIF_CLAVE) return;
+      pintarContadorNotificaciones();
+      if (notifPanel) pintarListaNotificaciones();
+    });
+
+    pintarContadorNotificaciones();
+  `;
+}
+
 function scriptAvisoSuspension(maquinaCodigo) {
   return `
     (function() {
@@ -1239,6 +1552,13 @@ function scriptAvisoSuspension(maquinaCodigo) {
         if (Swal.isVisible()) { setTimeout(function() { revisar(); }, 5000); return; }
 
         idPreguntado = datos.idOrden;
+        // Historial de notificaciones (18/09/2026). Con clave: el sondeo corre cada 5s y la
+        // pregunta puede volver a salir al recargar la tableta -- sin ella se anotaria en bucle.
+        if (typeof registrarNotificacion === 'function') {
+          registrarNotificacion('suspension',
+            'Programación pidió suspender el pedido ' + (datos.numeroPedido || '—'),
+            datos.elemento || '', 'suspension:' + datos.idOrden);
+        }
         pitar();
         if (navigator.vibrate) { try { navigator.vibrate([200, 100, 200, 100, 200]); } catch (e) {} }
         Swal.fire({
@@ -1409,6 +1729,15 @@ function scriptAvisoPedidoNuevo(maquinaCodigo) {
 
         var lote = pendientes;
         pendientes = [];
+        // Historial de notificaciones (18/09/2026): la tarjeta se va sola a los 7 segundos, el
+        // renglon del panel se queda. Una por pedido y no una por lote -- en el panel lo que
+        // importa es CUAL entro, no cuantos llegaron juntos.
+        if (typeof registrarNotificacion === 'function') {
+          lote.forEach(function(o) {
+            registrarNotificacion('pedido', 'Pedido ' + (o.numeroPedido || '—') + ' en la cola',
+              (o.elemento || '') + (!MAQUINA && o.maquinaNombre ? ' · ' + o.maquinaNombre : ''));
+          });
+        }
         var titulo = lote.length === 1 ? 'Nuevo pedido en la cola' : lote.length + ' pedidos nuevos en la cola';
         // Con muchos pedidos de golpe la tarjeta no crece sin fin: se listan los primeros y el
         // resto se resume en una linea ("y 2 más"). La cola completa siempre esta a un toque.
@@ -1950,6 +2279,23 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, calid
       { clave: 'espacio_trabajo', titulo: '📐 Espacio de trabajo' }
     ];
 
+    // Verificacion (18/09/2026): la isla y el boton ya estan en su sitio, la funcionalidad se
+    // definira despues (pedido del usuario: "posteriormente le daremos la funcionalidad"). Hasta
+    // entonces avisa en vez de no hacer nada -- un boton que no responde en la tableta del taller
+    // se lee como que la pantalla se colgo, y el operario lo pulsa una y otra vez.
+    //
+    // PARA CONECTARLO: reemplazar el cuerpo de esta funcion. El boton vive en la isla
+    // "Verificacion" de renderOrdenDetalle y solo se pinta con la orden Activa, asi que aca ya se
+    // puede contar con window.idBultoActivo y con el resto de lo que usa scriptComandos.
+    function abrirVerificacion() {
+      Swal.fire({
+        icon: 'info',
+        title: 'Verificación',
+        text: 'Esta función todavía no está habilitada.',
+        confirmButtonText: 'Entendido', confirmButtonColor: '#71bf44'
+      });
+    }
+
     function abrirPausa() {
       // Texto y radio mas grandes que .calidad-opcion (a pedido del usuario, 01/09/2026) -- estilo
       // en linea, no una clase compartida, para no afectar tambien las opciones de Calidad
@@ -2203,6 +2549,20 @@ function abrirCalidad() {
     }
 
     function guardarCalidad(respuestas) {
+      // Historial de notificaciones (18/09/2026): se anota el RESULTADO, que es lo que despues se
+      // quiere volver a mirar. La ventana del chequeo es bloqueante, no se puede perder de vista;
+      // lo que se pierde es en que quedo, sobre todo si salio algo no conforme.
+      if (typeof registrarNotificacion === 'function') {
+        var noConformes = Object.keys(respuestas).filter(function(k) {
+          return respuestas[k] === 'no_conforme';
+        }).length;
+        registrarNotificacion(
+          noConformes > 0 ? 'calidad_alerta' : 'calidad',
+          noConformes > 0
+            ? 'Chequeo de calidad con ' + noConformes + ' no conforme(s)'
+            : 'Chequeo de calidad conforme',
+          window.idBultoActivo ? 'Bulto ' + window.idBultoActivo : '');
+      }
       // calidadEnPantalla se libera cuando el POST termina, no cuando se cierra la ventana: si se
       // liberara antes, el sondeo de 5s podria alcanzar al guardado a medio camino (el servidor
       // todavia no ha escrito el chequeo, /calidad-pendiente sigue diciendo que si) y volveria a
@@ -2289,7 +2649,7 @@ function abrirCalidad() {
     // -- llamar a vigilarCalidadDelBulto() desde el principio dejaba un setInterval(fn, undefined),
     // que es un setInterval de 0 ms sondeando sin parar.
     ${calidadHabilitada ? `vigilarCalidadDelBulto();` : ''}
-    ${calidadHabilitada ? `vigilarPesoPatron();` : ''}
+    ${calidadHabilitada && VERIFICACION_BASCULA_ACTIVA ? `vigilarPesoPatron();` : ''}
   `;
 }
 
@@ -2301,6 +2661,170 @@ function abrirCalidad() {
 
 // Script compartido por renderPage y renderOrdenDetalle -- confirmacion antes de Finalizar, y
 // (31/08/2026) antes de Tomar control de una ejecucion PendienteOperador.
+// Ajuste de la cantidad realmente consumida de un rollo (18/09/2026, ver
+// AJUSTE_CANTIDAD_CONSUMIDA_ROLLO_18092026.md). Dos ventanas: la lista de rollos de la orden y el
+// teclado para digitar C. Se usa igual desde la pagina de una referencia suelta y desde la de un
+// grupo -- el endpoint resuelve solo el ancla bajo la que vive la materia prima.
+function scriptAjusteConsumo() {
+  return `
+    function kg(n) { return (Number(n) || 0).toFixed(2); }
+
+    function abrirAjusteConsumo(idOrden) {
+      Swal.fire({ title: 'Cargando rollos...', didOpen: function() { Swal.showLoading(); }, allowOutsideClick: false });
+      fetch('/api/selladora/orden/' + idOrden + '/rollos-consumo')
+        .then(function(r) { return r.json(); })
+        .then(function(datos) {
+          if (!datos.ok) {
+            Swal.fire({ icon: 'error', title: 'No se puede ajustar', text: datos.error, confirmButtonColor: '#71bf44' });
+            return;
+          }
+          if (!datos.rollos.length) {
+            Swal.fire({ icon: 'info', title: 'Sin rollos', text: 'Esta orden no tiene materia prima registrada.', confirmButtonColor: '#71bf44' });
+            return;
+          }
+          listaAjusteConsumo(idOrden, datos);
+        })
+        .catch(function() {
+          Swal.fire({ icon: 'error', title: 'Error de conexión', text: 'No se pudo consultar los rollos de esta orden.', confirmButtonColor: '#71bf44' });
+        });
+    }
+
+    // La lista muestra, por rollo, lo que se escaneo (R) y lo que hay registrado ahora (C). Mientras
+    // nadie ajuste nada los dos valores son iguales -- se muestran igual para que se vea de una que
+    // R es el techo y que un rollo ya ajustado no vuelve a partir de cero.
+    function listaAjusteConsumo(idOrden, datos) {
+      var filas = datos.rollos.map(function(ro, i) {
+        var ajustado = ro.ajustes > 0;
+        return '<button type="button" class="swal-rollo-item" onclick="pedirConsumoRollo(' + idOrden + ', ' + i + ')">' +
+                 '<div class="swal-rollo-serial">' + ro.serial + '</div>' +
+                 '<div class="swal-rollo-meta">' + ro.referencia + (ro.lote !== '—' ? ' · Lote ' + ro.lote : '') +
+                   (ajustado ? ' · <b>ya ajustado</b>' : '') + '</div>' +
+                 '<div class="swal-rollo-kg">' + kg(ro.cantidadActual) + ' Kg' +
+                   (ajustado ? ' <span class="swal-rollo-orig">de ' + kg(ro.cantidadOriginal) + '</span>' : '') +
+                 '</div>' +
+               '</button>';
+      }).join('');
+
+      window.__ajusteConsumo = datos;
+
+      Swal.fire({
+        title: 'Ajustar consumo de rollo',
+        html: '<div style="text-align:left;">' +
+                '<div class="swal-ajuste-resumen">' +
+                  '<div><span>Consumo registrado</span><b>' + kg(datos.totalActual) + ' Kg</b></div>' +
+                  '<div><span>Salida real producida</span><b>' + kg(datos.salidaReal) + ' Kg</b></div>' +
+                  '<div><span>Máximo devolvible</span><b>' + kg(datos.margenDevolucion) + ' Kg</b></div>' +
+                '</div>' +
+                '<div class="swal-ajuste-ayuda">Elija el rollo que no se consumió completo. La salida real ya producida ' +
+                  'es el piso: el consumo total siempre tiene que quedar por encima, porque siempre hay merma.</div>' +
+                filas +
+              '</div>',
+        width: 520,
+        showConfirmButton: false,
+        showCancelButton: true,
+        cancelButtonText: 'Cerrar',
+        cancelButtonColor: '#6b7280'
+      });
+    }
+
+    function pedirConsumoRollo(idOrden, indice) {
+      var datos = window.__ajusteConsumo;
+      var ro = datos.rollos[indice];
+
+      // Piso de ESTE rollo: lo que la salida real exige menos lo que aportan los demas rollos. Es la
+      // misma cuenta que revalida el servidor adentro de la transaccion; aca solo sirve para que el
+      // operario vea el rango antes de digitar y no se lleve un error despues de confirmar.
+      var otros = 0;
+      datos.rollos.forEach(function(r, i) { if (i !== indice) otros += Number(r.cantidadActual) || 0; });
+      var minimo = Math.max(0, datos.salidaReal - otros);
+
+      Swal.fire({
+        title: 'Consumo real del rollo',
+        html: '<div style="text-align:left;">' +
+                '<div class="swal-rollo-serial" style="margin-bottom:10px;">' + ro.serial + '</div>' +
+                '<div class="swal-ajuste-resumen">' +
+                  '<div><span>Se escaneó</span><b>' + kg(ro.cantidadOriginal) + ' Kg</b></div>' +
+                  '<div><span>Registrado ahora</span><b>' + kg(ro.cantidadActual) + ' Kg</b></div>' +
+                '</div>' +
+                '<label class="swal-ajuste-label">¿Cuántos Kg se consumieron de verdad?</label>' +
+                '<input id="ajuste-consumo-kg" type="number" inputmode="decimal" step="0.01" ' +
+                  'min="0" max="' + ro.cantidadOriginal + '" value="' + kg(ro.cantidadActual) + '" class="swal2-input" ' +
+                  'style="margin:0;width:100%;font-size:22px;text-align:center;">' +
+                '<div class="swal-ajuste-ayuda">Permitido: más de ' + kg(minimo) + ' Kg y hasta ' + kg(ro.cantidadOriginal) + ' Kg.</div>' +
+                '<label class="swal-ajuste-label">Motivo (opcional)</label>' +
+                '<input id="ajuste-consumo-motivo" type="text" maxlength="255" class="swal2-input" style="margin:0;width:100%;">' +
+              '</div>',
+        width: 520,
+        showCancelButton: true,
+        confirmButtonText: 'Confirmar ajuste',
+        confirmButtonColor: '#71bf44',
+        cancelButtonText: 'Cancelar',
+        cancelButtonColor: '#6b7280',
+        focusConfirm: false,
+        preConfirm: function() {
+          var contenedor = Swal.getHtmlContainer();
+          var valor = Number(contenedor.querySelector('#ajuste-consumo-kg').value);
+          var motivo = contenedor.querySelector('#ajuste-consumo-motivo').value;
+          if (!isFinite(valor) || valor <= 0) { Swal.showValidationMessage('Digite los Kg consumidos.'); return false; }
+          if (valor > Number(ro.cantidadOriginal) + 0.0001) {
+            Swal.showValidationMessage('No puede superar los ' + kg(ro.cantidadOriginal) + ' Kg que se escanearon.');
+            return false;
+          }
+          if (valor <= minimo + 0.0001) {
+            Swal.showValidationMessage('Tiene que ser más de ' + kg(minimo) + ' Kg: siempre hay merma.');
+            return false;
+          }
+          return { cantidad: valor, motivo: motivo };
+        }
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        confirmarAjusteConsumo(idOrden, ro.serial, resultado.value.cantidad, resultado.value.motivo);
+      });
+    }
+
+    function confirmarAjusteConsumo(idOrden, serial, cantidad, motivo) {
+      Swal.fire({ title: 'Aplicando ajuste...', didOpen: function() { Swal.showLoading(); }, allowOutsideClick: false });
+      fetch('/api/selladora/orden/' + idOrden + '/rollo/ajustar-consumo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serial: serial, cantidad: cantidad, motivo: motivo })
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(datos) {
+          if (!datos.ok) {
+            Swal.fire({ icon: 'error', title: 'No se pudo ajustar', text: datos.error, confirmButtonColor: '#71bf44', width: 520 });
+            return;
+          }
+          var devuelto = Number(datos.devuelto) || 0;
+          var lineaInventario = devuelto > 0
+            ? '<div><span>Devuelto al inventario</span><b>' + kg(devuelto) + ' Kg</b></div>'
+            : (devuelto < 0 ? '<div><span>Descontado del inventario</span><b>' + kg(-devuelto) + ' Kg</b></div>' : '');
+          Swal.fire({
+            icon: 'success',
+            title: 'Consumo ajustado',
+            html: '<div style="text-align:left;"><div class="swal-ajuste-resumen">' +
+                    '<div><span>Consumo del rollo</span><b>' + kg(datos.cantidadAnterior) + ' → ' + kg(datos.cantidadNueva) + ' Kg</b></div>' +
+                    lineaInventario +
+                    '<div><span>Consumo total de la orden</span><b>' + kg(datos.consumoTotal) + ' Kg</b></div>' +
+                    '<div><span>Merma resultante</span><b>' + kg(datos.mermaEstimada) + ' Kg</b></div>' +
+                  '</div>' +
+                  (datos.controlActualizado ? '' :
+                    '<div class="swal-ajuste-ayuda" style="color:#b46200;"><b>Ojo:</b> la materia prima y el inventario ' +
+                    'quedaron corregidos, pero este proceso no tiene control de material (PRDExtrusionControl), así que ' +
+                    'la merma del escritorio no se va a recalcular sola. Avise al digitador.</div>') +
+                  '</div>',
+            width: 520,
+            confirmButtonText: 'Entendido',
+            confirmButtonColor: '#71bf44'
+          }).then(function() { location.reload(); });
+        })
+        .catch(function() {
+          Swal.fire({ icon: 'error', title: 'Error de conexión', text: 'No se pudo aplicar el ajuste.', confirmButtonColor: '#71bf44' });
+        });
+    }
+  `;
+}
+
 function scriptConfirmarFinalizar() {
   return `
     function confirmarFinalizar(evento, formulario) {
@@ -2364,6 +2888,9 @@ function scriptEscanearRollo(maquinaCodigo) {
     //       donde el protocolo mete las preguntas 4.1/4.2 (estado del rollo / peligro fisico).
     //   alIniciar(idOrden) : reemplaza a preguntarActividadInicial() despues de que la ejecucion
     //       arranco (el protocolo sigue con su propio alistamiento, paso 5).
+    //   alAnadir(idOrden)  : lo mismo pero para el "+ Rollo" (esNuevoRollo = true), en vez de
+    //       recargar la pagina. Lo usa el protocolo de relevo (18/09/2026), donde pitar otro rollo
+    //       es un paso a mitad del protocolo y recargar perderia el hilo.
     function abrirEscaneoRollo(idOrden, esNuevoRollo, ganchos) {
       var titulo = esNuevoRollo ? 'Añadir rollo' : 'Iniciar ejecución';
       fetch('/api/selladora/orden/' + idOrden + '/rollo/preparar?nuevo=' + (esNuevoRollo ? '1' : '0'))
@@ -2476,6 +3003,7 @@ function scriptEscanearRollo(maquinaCodigo) {
           timer: 1000, showConfirmButton: false
         }).then(function() {
           if (esNuevoRollo) {
+            if (ganchos && ganchos.alAnadir) { ganchos.alAnadir(idOrden); return; }
             // Se recarga la misma pagina en la que estaba (cola de la maquina o Informacion) --
             // antes la pantalla /escanear devolvia siempre a la cola de la maquina.
             window.location.reload();
@@ -2711,17 +3239,35 @@ function scriptProtocoloArranque(maquinaCodigo) {
     }
 
     // ---------------- Paso 1: limpieza y desinfeccion ----------------
-    function comenzarProtocoloArranque(idOrden) {
+    // esRelevo = true cuando el protocolo NO lo dispara el boton "Iniciar" sino la retoma/reanuda
+    // de una ejecucion que ya venia corriendo (18/09/2026, a pedido del usuario: "cuando se retoma
+    // un pedido por otro operario nuevamente inicia el protocolo de arranque"). Es el MISMO
+    // protocolo -- los mismos pasos, la misma tabla, los mismos cronometros -- con una sola
+    // diferencia: el paso del rollo no obliga a pitar uno nuevo, porque la maquina ya tiene uno
+    // montado (ver pasoRolloRelevo). Por eso el relevo se cuenta en 4 pasos y no en 5: el chequeo
+    // 4.1/4.2 del rollo solo aparece si de verdad se monta otro.
+    function comenzarProtocoloArranque(idOrden, esRelevo) {
       Swal.fire({
         icon: 'info',
-        title: 'Protocolo de arranque',
+        title: esRelevo ? 'Protocolo de arranque (relevo)' : 'Protocolo de arranque',
         html: '<div style="text-align:left;font-size:15px;line-height:1.7;">' +
-                '<b>1.</b> Limpieza y desinfección<br>' +
-                '<b>2.</b> Chequeo de peligro químico<br>' +
-                '<b>3.</b> Escaneo del rollo<br>' +
-                '<b>4.</b> Chequeo del rollo y de peligro físico<br>' +
-                '<b>5.</b> Alistamiento, verificación de la báscula y amperaje del ferroníquel' +
+                (esRelevo
+                  ? '<b>1.</b> Limpieza y desinfección<br>' +
+                    '<b>2.</b> Chequeo de peligro químico<br>' +
+                    '<b>3.</b> Rollo montado (solo se pita otro si hace falta)<br>' +
+                    '<b>4.</b> Alistamiento, verificación de la báscula y amperaje del ferroníquel'
+                  : '<b>1.</b> Limpieza y desinfección<br>' +
+                    '<b>2.</b> Chequeo de peligro químico<br>' +
+                    '<b>3.</b> Escaneo del rollo<br>' +
+                    '<b>4.</b> Chequeo del rollo y de peligro físico<br>' +
+                    '<b>5.</b> Alistamiento, verificación de la báscula y amperaje del ferroníquel') +
               '</div>' +
+              (esRelevo
+                ? '<div style="text-align:left;font-size:13px;color:#64748b;margin-top:12px;">' +
+                    'Acaba de recibir esta máquina, así que el protocolo se corre completo con su usuario. ' +
+                    'El rollo solo se vuelve a pitar si hay que cambiarlo.' +
+                  '</div>'
+                : '') +
               '<div style="text-align:left;font-size:13px;color:#64748b;margin-top:12px;">' +
                 'Al continuar, la limpieza y desinfección queda registrada como actividad y empieza a contar el tiempo.' +
               '</div>',
@@ -2738,24 +3284,24 @@ function scriptProtocoloArranque(maquinaCodigo) {
                 icon: 'success', title: 'Limpieza y desinfección iniciada',
                 text: 'Quedó registrada como actividad. El tiempo ya está corriendo.',
                 timer: 2200, showConfirmButton: false
-              }).then(function() { cronometroLimpieza(idOrden, datos.horaInicio); });
+              }).then(function() { cronometroLimpieza(idOrden, datos.horaInicio, esRelevo); });
             });
           });
       });
     }
 
-    function cronometroLimpieza(idOrden, horaInicio) {
+    function cronometroLimpieza(idOrden, horaInicio, esRelevo) {
       cronometroProtocolo(idOrden, {
         titulo: '🧼 Limpieza y desinfección',
-        subtitulo: 'Protocolo de arranque · paso 1 de 5',
+        subtitulo: esRelevo ? 'Relevo de operario · paso 1 de 4' : 'Protocolo de arranque · paso 1 de 5',
         horaInicio: horaInicio,
         textoBoton: '■ Terminar limpieza y desinfección',
-        alTerminar: function() { preguntarPeligroQuimico(idOrden); }
+        alTerminar: function() { preguntarPeligroQuimico(idOrden, esRelevo); }
       });
     }
 
     // ---------------- Paso 2: peligro quimico ----------------
-    function preguntarPeligroQuimico(idOrden) {
+    function preguntarPeligroQuimico(idOrden, esRelevo) {
       Swal.fire({
         icon: 'question',
         title: '¿Detecta algún peligro químico?',
@@ -2776,14 +3322,16 @@ function scriptProtocoloArranque(maquinaCodigo) {
               cancelButtonText: 'Salir', cancelButtonColor: '#c0392b',
               allowOutsideClick: false, allowEscapeKey: false
             }).then(function(r2) {
-              if (r2.isConfirmed) preguntarPeligroQuimico(idOrden);
+              if (r2.isConfirmed) preguntarPeligroQuimico(idOrden, esRelevo);
             });
           });
           return;
         }
         if (resultado.dismiss === Swal.DismissReason.cancel) {
           guardarPasoProtocolo(idOrden, { paso: 'peligro_quimico', respuesta: 'No' }, function() {
-            pasoEscanearRolloProtocolo(idOrden);
+            // En el relevo el paso 3 no es el escaneo sino la confirmacion del rollo ya montado.
+            if (esRelevo) pasoRolloRelevo(idOrden);
+            else pasoEscanearRolloProtocolo(idOrden);
           });
         }
       });
@@ -2873,8 +3421,72 @@ function scriptProtocoloArranque(maquinaCodigo) {
       });
     }
 
+    // ---------------- Paso 3 del relevo: el rollo que ya esta montado ----------------
+    // Diferencia con el paso 3 del arranque (18/09/2026, decision del usuario): aca la ejecucion YA
+    // esta corriendo y la maquina ya tiene un rollo puesto, asi que pitar uno nuevo NO es
+    // obligatorio -- se muestra cual esta montado y el operario que recibe la maquina decide si
+    // sigue con ese o lo cambia. Si lo cambia entra por el mismo "+ Rollo" de siempre
+    // (esNuevoRollo = true, con su chequeo 4.1/4.2) y no por el camino de Iniciar: la ejecucion ya
+    // arranco, no se puede volver a arrancar.
+    function pasoRolloRelevo(idOrden) {
+      fetch('/api/selladora/orden/' + idOrden + '/rollo/actual')
+        .then(function(r) { return r.json(); })
+        .then(function(datos) { ventanaRolloRelevo(idOrden, (datos && datos.ok) ? datos.rollo : null); })
+        .catch(function() { ventanaRolloRelevo(idOrden, null); });
+    }
+
+    function ventanaRolloRelevo(idOrden, rollo) {
+      // Sin rastro del rollo montado (base sin SEL_RolloEjecucion, o una orden que arranco antes de
+      // que esa tabla existiera) no se puede dar por bueno a ciegas: se pide pitarlo, que es el
+      // camino seguro y ademas deja el rastro que le faltaba a esta ejecucion.
+      if (!rollo || !rollo.serial) {
+        Swal.fire({
+          icon: 'warning', title: 'Pite el rollo montado',
+          text: 'No se pudo determinar qué rollo está montado en la máquina. Escanéelo para continuar.',
+          confirmButtonText: '📷 Escanear rollo', confirmButtonColor: '#71bf44',
+          allowOutsideClick: false, allowEscapeKey: false
+        }).then(function() { escanearRolloRelevo(idOrden); });
+        return;
+      }
+      Swal.fire({
+        title: 'Rollo montado',
+        html: '<div style="text-align:left;">' +
+                filaRollo('Serial', rollo.serial) +
+                filaRollo('Peso (Kg)', rollo.cantidad != null ? rollo.cantidad : '—') +
+                filaRollo('Lote', rollo.lote || '—') +
+                filaRollo('Referencia', rollo.referencia || '—') +
+                filaRollo('Montado', rollo.hora || '—') +
+              '</div>' +
+              '<div style="text-align:left;font-size:13px;color:#64748b;margin-top:10px;">' +
+                'Verifique que este es el rollo que está en la máquina. Si hubo que cambiarlo, pite el nuevo.' +
+              '</div>',
+        showDenyButton: true,
+        confirmButtonText: '✔ Sigo con este rollo', confirmButtonColor: '#71bf44',
+        denyButtonText: '📷 Pitar otro rollo', denyButtonColor: '#b46200',
+        allowOutsideClick: false, allowEscapeKey: false
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) {
+          // Queda el rastro de QUE rollo recibio este operario -- es lo unico que el relevo agrega
+          // a la trazabilidad cuando no se cambia el rollo: no se vuelve a descontar inventario ni
+          // se duplica la fila de materia prima, porque el rollo es el mismo que ya estaba.
+          guardarPasoProtocolo(idOrden, { paso: 'rollo_mismo', respuesta: 'Si', serial: rollo.serial }, function() {
+            pasoAlistamientoProtocolo(idOrden, true);
+          });
+          return;
+        }
+        if (resultado.isDenied) escanearRolloRelevo(idOrden);
+      });
+    }
+
+    function escanearRolloRelevo(idOrden) {
+      abrirEscaneoRollo(idOrden, true, {
+        antesDeConfirmar: preguntarEstadoRolloNuevo,
+        alAnadir: function() { pasoAlistamientoProtocolo(idOrden, true); }
+      });
+    }
+
     // ---------------- Paso 5: alistamiento ----------------
-    function pasoAlistamientoProtocolo(idOrden) {
+    function pasoAlistamientoProtocolo(idOrden, esRelevo) {
       protocoloIntentar(
         function() { return protocoloPost('/api/selladora/orden/' + idOrden + '/pausar', { tipo: 'alistamiento', subtipo: 'arranque' }); },
         function(datos) {
@@ -2883,22 +3495,24 @@ function scriptProtocoloArranque(maquinaCodigo) {
               icon: 'success', title: 'Alistamiento iniciado',
               text: 'Quedó registrado como actividad. El tiempo ya está corriendo.',
               timer: 2200, showConfirmButton: false
-            }).then(function() { cronometroAlistamiento(idOrden, datos.horaInicio); });
+            }).then(function() { cronometroAlistamiento(idOrden, datos.horaInicio, esRelevo); });
           });
         });
     }
 
-    function cronometroAlistamiento(idOrden, horaInicio) {
+    function cronometroAlistamiento(idOrden, horaInicio, esRelevo) {
       cronometroProtocolo(idOrden, {
         titulo: '⚙️ Alistamiento',
-        subtitulo: 'Protocolo de arranque · paso 5 de 5',
+        subtitulo: esRelevo ? 'Relevo de operario · paso 4 de 4' : 'Protocolo de arranque · paso 5 de 5',
         horaInicio: horaInicio,
         textoBoton: '■ Terminar alistamiento',
         // CAMBIO 14/09/2026: entre el alistamiento y la temperatura se intercalo la verificacion
         // de la bascula. La temperatura sigue siendo el ultimo paso porque es la que redirige a
         // producir.
         alTerminar: function() {
-          verificarBascula(idOrden, { paso: 'peso_patron', alTerminar: function() { pasoAmperajeProtocolo(idOrden); } });
+          ${VERIFICACION_BASCULA_ACTIVA
+            ? `verificarBascula(idOrden, { paso: 'peso_patron', alTerminar: function() { pasoAmperajeProtocolo(idOrden); } });`
+            : `pasoAmperajeProtocolo(idOrden);`}
         }
       });
     }
@@ -3096,8 +3710,20 @@ function scriptProtocoloArranque(maquinaCodigo) {
     function reanudarProtocoloArranque(pendiente, pedido) {
       if (!pendiente || !pendiente.paso) return;
       var idOrden = pendiente.idOrden;
-      if (pendiente.paso === 'limpieza') { cronometroLimpieza(idOrden, pendiente.horaInicio); return; }
-      if (pendiente.paso === 'alistamiento') { cronometroAlistamiento(idOrden, pendiente.horaInicio); return; }
+      // relevo = este protocolo lo disparo una retoma/reanuda de la ejecucion, no el boton Iniciar
+      // (lo decide el servidor, ver protocoloPendienteDeRelevo). Cambia dos cosas: el paso del
+      // rollo no obliga a pitar uno nuevo, y los cronometros se rotulan "paso N de 4".
+      var relevo = !!pendiente.relevo;
+      // 'inicio' solo existe en el relevo: la ronda esta marcada en la base pero todavia no
+      // arranco ni la limpieza. Se entra derecho por la ventana de presentacion del protocolo --
+      // esa ya explica sola lo que va a pasar y trae su propio Cancelar, asi que no hace falta el
+      // aviso previo de mas abajo.
+      if (pendiente.paso === 'inicio') { comenzarProtocoloArranque(idOrden, relevo); return; }
+      if (pendiente.paso === 'limpieza') { cronometroLimpieza(idOrden, pendiente.horaInicio, relevo); return; }
+      if (pendiente.paso === 'alistamiento') { cronometroAlistamiento(idOrden, pendiente.horaInicio, relevo); return; }
+      // 'alistamiento_inicio' tambien es del relevo: el rollo ya quedo resuelto pero el cronometro
+      // del alistamiento nunca alcanzo a abrirse (la tableta se apago entre los dos pasos).
+      if (pendiente.paso === 'alistamiento_inicio') { pasoAlistamientoProtocolo(idOrden, relevo); return; }
       if (pendiente.paso === 'peso_patron') {
         verificarBascula(idOrden, { paso: 'peso_patron', alTerminar: function() { pasoAmperajeProtocolo(idOrden); } });
         return;
@@ -3106,16 +3732,28 @@ function scriptProtocoloArranque(maquinaCodigo) {
 
       var textos = {
         peligro_quimico: 'Falta responder el chequeo de peligro químico para poder seguir.',
-        rollo: 'Falta escanear el rollo y responder su chequeo para poder seguir.',
+        rollo: relevo
+          ? 'Falta confirmar el rollo que está montado para poder seguir.'
+          : 'Falta escanear el rollo y responder su chequeo para poder seguir.',
         peso_patron: 'Falta verificar la báscula contra el elemento patrón para poder seguir.'
       };
       var continuar = function() {
-        if (pendiente.paso === 'peligro_quimico') preguntarPeligroQuimico(idOrden);
+        if (pendiente.paso === 'peligro_quimico') preguntarPeligroQuimico(idOrden, relevo);
+        else if (relevo) pasoRolloRelevo(idOrden);
         else pasoEscanearRolloProtocolo(idOrden);
       };
       if (pedido) { continuar(); return; }
+      // Historial de notificaciones (18/09/2026). Con clave porque este aviso vuelve a salir en
+      // CADA carga de pagina mientras el protocolo siga a medias: sin ella, el panel se llenaria
+      // del mismo renglon cada vez que el operario cambia de pantalla.
+      if (typeof registrarNotificacion === 'function') {
+        registrarNotificacion('protocolo',
+          relevo ? 'Protocolo de relevo sin terminar' : 'Protocolo de arranque sin terminar',
+          textos[pendiente.paso] || '', 'protocolo:' + idOrden + ':' + pendiente.paso);
+      }
       Swal.fire({
-        icon: 'info', title: 'Protocolo de arranque sin terminar',
+        icon: 'info',
+        title: relevo ? 'Protocolo de relevo sin terminar' : 'Protocolo de arranque sin terminar',
         text: textos[pendiente.paso] || 'El protocolo de arranque de esta orden quedó a medias.',
         showCancelButton: true,
         confirmButtonText: 'Continuar protocolo', confirmButtonColor: '#71bf44',
@@ -3148,10 +3786,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
           <div class="sub">Programación máquina</div>
           <a class="volver" href="/">‹ Selladoras</a>
         </div>
-        <div class="header-salir-grupo">
-          <div class="header-usuario">👤 ${usuario}</div>
-          <a class="salir" href="/logout">Cerrar sesión</a>
-        </div>
+        ${bloqueUsuarioHeader(usuario)}
       </div>
     </div>
   </header>
@@ -3171,6 +3806,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
     <div id="cola-ordenes">${renderColaOrdenes(colaOrdenes || [], maquinaCodigo, miOperario)}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptNotificaciones(maquinaCodigo)}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
@@ -3260,6 +3896,7 @@ function renderTabletFija(usuario, maquinas, maquinaActual, error) {
     </div>
   </main>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptNotificaciones(null)}</script>
   <script>${scriptAvisoPedidoNuevo(null)}</script>
   ${error ? `<script>Swal.fire({ icon: 'error', title: 'Error', text: ${jsString(error)}, confirmButtonColor: '#71bf44' });</script>` : ''}
 </body>
@@ -3389,12 +4026,24 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
 
   const filasHistorial = historial.length
     ? historial.map(h => `
-        <div class="hist-fila">
-          <span class="valor serial">${h.Serial ?? '—'}</span>
-          <span>${h.Referencia ?? '—'}</span>
-          <span>${h.Lote ?? '—'}</span>
+        <div class="hist-rollo">
+          <div class="hist-rollo-datos">
+            <div class="hist-rollo-serial">${h.Serial ?? '—'}</div>
+            <div class="hist-rollo-meta">${h.Referencia ?? '—'}${h.Lote ? ' · Lote ' + h.Lote : ''}</div>
+          </div>
+          <div class="hist-rollo-kg">${h.Cantidad != null ? Number(h.Cantidad).toFixed(2) : '—'}<small>Kg consumidos</small></div>
         </div>`).join('')
     : `<div class="pesaje-vacio">Sin materia prima registrada todavía.</div>`;
+
+  // Ajuste del consumo real del rollo (18/09/2026, ver AJUSTE_CANTIDAD_CONSUMIDA_ROLLO_18092026.md):
+  // solo en PendienteValidacion. Antes (Activa) la maquina sigue gastando rollo, asi que todavia no
+  // se sabe cuanto se consumio; despues (Finalizada) el digitador ya cerro el proceso y calculo la
+  // merma con estos mismos kilos -- corregirlos ahi descuadraria una merma ya cerrada, igual que
+  // pasa con "Volver a pesar" y con la correccion de bolsas.
+  const botonAjusteConsumo = orden.Estado === 'PendienteValidacion'
+    ? `<button type="button" class="btn-accion btn-isla btn-info" style="margin-bottom:10px;"
+         onclick="abrirAjusteConsumo(${orden.IdOrden})">⚖ Ajustar consumo de rollo</button>`
+    : '';
 
   // FIX 01/09/2026: el boton de Pausa se movio aca (junto a Finalizar) desde el bloque de Imprimir
   // etiqueta/Cierre bulto -- a pedido del usuario. Solo aparece si NO esta ya pausada (mientras esta
@@ -3524,15 +4173,12 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
           ${esAdmin && SIMULADOR_PLC_VISIBLE ? `<a class="volver" href="/admin/simulador-plc?maquina=${maquinaCodigo}">🧪 Simulador de PLC</a>` : ''}
         </div>
         ${avanceCard}
-        <div class="header-salir-grupo">
-          <div class="header-usuario">👤 ${usuario}</div>
-          <a class="salir" href="/logout">Cerrar sesión</a>
-        </div>
+        ${bloqueUsuarioHeader(usuario)}
       </div>
     </div>
   </header>
   <main>
-    ${acciones ? `<div class="islas-fila">
+    ${acciones ? `<div class="islas-fila islas-fila-ajustada">
       <div class="isla">
         <div class="label">Producción</div>
         <div class="orden-acciones">${acciones}</div>
@@ -3540,6 +4186,12 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
       ${botonesResiduosHTML ? `<div class="isla">
         <div class="label">Residuos</div>
         <div class="orden-acciones">${botonesResiduosHTML}</div>
+      </div>` : ''}
+      ${activa ? `<div class="isla">
+        <div class="label">Verificación</div>
+        <div class="orden-acciones">
+          <button type="button" class="btn-accion btn-verificar" onclick="abrirVerificacion()">🔍 Verificar</button>
+        </div>
       </div>` : ''}
     </div>` : ''}
     ${pesoBox}
@@ -3555,15 +4207,18 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Especificaciones</h2>
     <div class="ejecucion-box"><div class="ejecucion-grid">${especificaciones}</div></div>
-    <h2 style="font-size:15px;margin:22px 0 10px;">Historial de materia prima</h2>
+    <h2 style="font-size:15px;margin:22px 0 10px;">Historial rollo</h2>
+    ${botonAjusteConsumo}
     <div class="ejecucion-box">${filasHistorial}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptNotificaciones(maquinaCodigo)}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
   <script>${scriptProtocoloArranque(maquinaCodigo)}</script>
   <script>${scriptConfirmarFinalizar()}</script>
+  <script>${scriptAjusteConsumo()}</script>
   <script>${scriptAvisoSuspension(maquinaCodigo)}</script>
   ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo, calidadFlags, protocoloPendiente ? null : pausaActiva, calidadHabilitada)}</script><script>${scriptPesoEnVivo()}</script><script>${scriptResumenBultoActivo(orden.IdOrden, maquinaCodigo)}</script>` : ''}
   ${protocoloPendiente ? `<script>
@@ -4213,10 +4868,7 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, usu
           <div class="sub">${orden.Elemento}</div>
           <a class="volver" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}">‹ Pedido ${orden.NumeroPedido || '—'}</a>
         </div>
-        <div class="header-salir-grupo">
-          <div class="header-usuario">👤 ${usuario}</div>
-          <a class="salir" href="/logout">Cerrar sesión</a>
-        </div>
+        ${bloqueUsuarioHeader(usuario)}
       </div>
     </div>
   </header>
@@ -4225,6 +4877,7 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, usu
     ${renderSeccionTraslado(bultos, pesajesPorBulto)}
   </main>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptNotificaciones(maquinaCodigo)}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
   <script>${scriptReimprimir(orden.IdOrden, maquinaCodigo)}</script>
   <script>${scriptTraslado(orden.IdOrden, maquinaCodigo)}</script>
@@ -4809,7 +5462,7 @@ async function obtenerHistorialMPGrupo(p, miembros) {
     const historialResult = await p.request()
       .input('elemento', nElemento).input('lote', tLote).input('lineaOriginal', nLineaOriginal)
       .query(`
-        SELECT mp.Detalle AS Serial, e.Nombre AS Referencia, mp.LoteMP AS Lote
+        SELECT mp.Detalle AS Serial, e.Nombre AS Referencia, mp.LoteMP AS Lote, mp.Cantidad
         FROM PRDProduccionMateriaPrima mp
         INNER JOIN INVElementos e ON mp.MateriaPrima = e.Codigo
         WHERE mp.Elemento = @elemento AND mp.Lote = @lote AND mp.Linea = @lineaOriginal
@@ -5249,13 +5902,24 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
 
   const filasHistorial = (historial || []).length
     ? historial.map(h => `
-        <div class="hist-fila">
-          <span class="valor serial">${h.Serial ?? '—'}</span>
-          <span>${h.Referencia ?? '—'}</span>
-          <span>${h.Lote ?? '—'}</span>
-          <span style="color:var(--texto-suave);">${h.ReferenciaSalida ?? '—'}</span>
+        <div class="hist-rollo">
+          <div class="hist-rollo-datos">
+            <div class="hist-rollo-serial">${h.Serial ?? '—'}</div>
+            <div class="hist-rollo-meta">${h.Referencia ?? '—'}${h.Lote ? ' · Lote ' + h.Lote : ''} · sale como ${h.ReferenciaSalida ?? '—'}</div>
+          </div>
+          <div class="hist-rollo-kg">${h.Cantidad != null ? Number(h.Cantidad).toFixed(2) : '—'}<small>Kg consumidos</small></div>
         </div>`).join('')
     : `<div class="pesaje-vacio">Sin materia prima registrada todavía.</div>`;
+
+  // Ajuste del consumo real -- ver la nota en renderOrdenDetalle. En un grupo la materia prima vive
+  // toda bajo la ancla (los hermanos se crearon con sinMateriaPrima=true), asi que da igual desde
+  // que miembro se pida: resolverAnclaMateriaPrima lo redirige solo. Se usa el primer miembro en
+  // PendienteValidacion porque el Finalizar pasa a las 3 referencias juntas.
+  const miembroParaAjuste = (miembros || []).find(m => m.Estado === 'PendienteValidacion') || null;
+  const botonAjusteConsumo = miembroParaAjuste
+    ? `<button type="button" class="btn-accion btn-isla btn-info" style="margin-bottom:10px;"
+         onclick="abrirAjusteConsumo(${miembroParaAjuste.IdOrden})">⚖ Ajustar consumo de rollo</button>`
+    : '';
 
   const accionesProduccion = [
     miembroActivoAhora
@@ -5321,10 +5985,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
           <a class="volver" href="/selladora/${maquinaCodigo}">‹ ${maquinaNombre}</a>
         </div>
         ${avanceCard}
-        <div class="header-salir-grupo">
-          <div class="header-usuario">👤 ${usuario}</div>
-          <a class="salir" href="/logout">Cerrar sesión</a>
-        </div>
+        ${bloqueUsuarioHeader(usuario)}
       </div>
     </div>
   </header>
@@ -5344,7 +6005,8 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Referencias de salida</h2>
     ${tarjetasReferencia}
-    <h2 style="font-size:15px;margin:22px 0 10px;">Historial de materia prima (todo el grupo)</h2>
+    <h2 style="font-size:15px;margin:22px 0 10px;">Historial rollo (todo el grupo)</h2>
+    ${botonAjusteConsumo}
     <div class="ejecucion-box">${filasHistorial}</div>
   </main>
   <script src="/sweetalert2.min.js"></script>
@@ -5353,9 +6015,11 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
        pedido del usuario): este apartado tiene que bastarse solo, y sin ellos el operario que se
        quedara aca no se enteraba de un pedido nuevo, de una suspension pedida por Programación ni
        de un protocolo de arranque a medias. -->
+  <script>${scriptNotificaciones(maquinaCodigo)}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptConfirmarFinalizar()}</script>
+  <script>${scriptAjusteConsumo()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
   <!-- scriptProtocoloArranque aporta preguntarEstadoRolloNuevo, el chequeo del rollo (buen estado /
        peligro fisico) que el boton "+ Rollo" de arriba exige antes de confirmar el rollo -- y
@@ -5444,10 +6108,7 @@ function renderBultosGrupo(idGrupo, numeroPedido, maquinaCodigo, datosPorReferen
           <div class="sub">${datosPorReferencia.length} referencias de salida</div>
           <a class="volver" href="/selladora/${maquinaCodigo}/grupo/${idGrupo}">‹ Pedido ${numeroPedido || '—'}</a>
         </div>
-        <div class="header-salir-grupo">
-          <div class="header-usuario">👤 ${usuario}</div>
-          <a class="salir" href="/logout">Cerrar sesión</a>
-        </div>
+        ${bloqueUsuarioHeader(usuario)}
       </div>
     </div>
   </header>
@@ -5457,6 +6118,7 @@ function renderBultosGrupo(idGrupo, numeroPedido, maquinaCodigo, datosPorReferen
     ${traslados}
   </main>
   <script src="/sweetalert2.min.js"></script>
+  <script>${scriptNotificaciones(maquinaCodigo)}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
   <!-- El idOrden que reciben estos dos es solo el de respaldo: cada tarjeta de bulto y cada
        seccion de traslado traen el IdOrden de SU referencia, y ese es el que se usa. -->
@@ -5701,7 +6363,7 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
       const historialResult = await p.request()
         .input('elemento', nElemento).input('lote', tLote).input('lineaOriginal', nLineaOriginal)
         .query(`
-          SELECT mp.Detalle AS Serial, e.Nombre AS Referencia, mp.LoteMP AS Lote
+          SELECT mp.Detalle AS Serial, e.Nombre AS Referencia, mp.LoteMP AS Lote, mp.Cantidad
           FROM PRDProduccionMateriaPrima mp
           INNER JOIN INVElementos e ON mp.MateriaPrima = e.Codigo
           WHERE mp.Elemento = @elemento AND mp.Lote = @lote AND mp.Linea = @lineaOriginal
@@ -6361,7 +7023,26 @@ app.post('/api/selladora/orden/:idOrden/tomar-control-ejecucion', requireLogin, 
     // ver el CASE de arriba), se pregunta en la cola de la maquina si hay alguna actividad por hacer
     // antes de producir o si entra directo (a pedido del usuario). Si ya estaba 'En pausa', no se
     // pregunta -- el cronometro de esa pausa ya la cubre, se veria al entrar a Informacion.
-    const destino = Estado === 'En pausa' ? `/selladora/${Maquina}` : `/selladora/${Maquina}?preguntarActividad=${idOrden}`;
+    // Relevo de operario (18/09/2026, a pedido del usuario): quien recibe la maquina vuelve a
+    // correr el protocolo de arranque completo, con la particularidad de que el rollo solo se pita
+    // si hace falta -- la maquina ya tiene uno montado (ver protocoloPendienteDeRelevo y
+    // pasoRolloRelevo). Aca solo se deja la marca en la base; la ventana la abre la tableta al
+    // cargar la pagina, igual que un protocolo a medias. Asi el relevo sobrevive a que la tableta
+    // se recargue, se apague o cambie de pantalla, que es el mismo criterio de todo el protocolo.
+    //
+    // Si la ejecucion vuelve 'En pausa' la marca queda igual, pero el protocolo espera: no puede
+    // arrancar su limpieza sobre una ejecucion ya pausada (ver protocoloPendienteDeRelevo), y sale
+    // solo cuando el operario reanude.
+    const relevoMarcado = await marcarRelevoProtocolo(p, {
+      idOrden, operario: miOperario, esOtroOperario: Operario !== miOperario
+    });
+    // Con el relevo marcado NO se pregunta ademas por la actividad inicial: el protocolo ya trae
+    // sus dos actividades cronometradas (limpieza y alistamiento) una detras de otra, y preguntar
+    // por una pausa suelta antes de empezar era pedir lo mismo dos veces. Si no se pudo marcar
+    // (falta la tabla, o hay un protocolo a medias que sale solo), se comporta como antes.
+    const destino = (relevoMarcado || Estado === 'En pausa')
+      ? `/selladora/${Maquina}`
+      : `/selladora/${Maquina}?preguntarActividad=${idOrden}`;
     res.redirect(destino);
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, '/'));
@@ -6464,6 +7145,49 @@ app.post('/api/selladora/orden/:idOrden/rollo', requireLogin, async (req, res) =
     res.json({ ok: true, redirect: `/selladora/${maquinaCodigo}` });
   } catch (err) {
     res.json({ ok: false, error: err.message });
+  }
+});
+
+// El rollo que esta montado ahora mismo, para el paso 3 del protocolo de relevo (pasoRolloRelevo):
+// el operario que acaba de recibir la maquina lo confirma en vez de tener que pitarlo otra vez.
+// SEL_RolloEjecucion es la unica tabla con serial + hora del montaje (PRDProduccionMateriaPrima
+// guarda el serial sin hora), y de ahi sale tambien la referencia de la materia prima, por serial.
+//
+// En sellado paralelo el rollo vive en la ejecucion del ANCLA -- es un solo rollo fisico para las
+// 3 referencias -- asi que se pregunta por la orden ancla, no por la que tenia el boton a mano.
+//
+// Nunca responde error: si no se puede saber que rollo esta montado devuelve rollo = null, y la
+// tableta ya sabe que hacer con eso (pedir que lo piten, que es el camino seguro).
+app.get('/api/selladora/orden/:idOrden/rollo/actual', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  try {
+    const p = await getPool();
+    const ancla = await obtenerAnclaGrupoSellado(p, idOrden);
+    const dt = await p.request().input('idOrden', ancla ? ancla.IdOrden : idOrden).query(`
+      SELECT TOP 1 re.Serial, re.Cantidad, re.LoteMP, re.FechaHora,
+             (SELECT TOP 1 e.Nombre FROM PRDProduccionMateriaPrima mp
+                INNER JOIN INVElementos e ON e.Codigo = mp.MateriaPrima
+                WHERE mp.Detalle = re.Serial ORDER BY mp.Linea DESC) AS Referencia
+      FROM SEL_RolloEjecucion re
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = re.id_ejecucion
+      WHERE ej.IdOrden = @idOrden
+      ORDER BY re.Id DESC
+    `);
+    if (dt.recordset.length === 0) return res.json({ ok: true, rollo: null });
+    const r = dt.recordset[0];
+    res.json({
+      ok: true,
+      rollo: {
+        serial: r.Serial,
+        cantidad: r.Cantidad != null ? Number(r.Cantidad) : null,
+        lote: r.LoteMP,
+        referencia: r.Referencia,
+        hora: fechaHoraLocalBD(r.FechaHora)
+      }
+    });
+  } catch (err) {
+    console.error('No se pudo leer el rollo montado (¿falta ejecutar 07_crear_sel_rolloejecucion.sql?):', err.message);
+    res.json({ ok: true, rollo: null });
   }
 });
 
@@ -7098,7 +7822,12 @@ const PASOS_PROTOCOLO_VALIDOS = new Set([
   //                             misma clave, una verificacion periodica haria creer al retome que
   //                             el paso del arranque ya se hizo.
   // Para un reporte que las quiera juntas: Paso LIKE 'peso_patron%'.
-  'peso_patron', 'peso_patron_periodico'
+  'peso_patron', 'peso_patron_periodico',
+  // Relevo de operario (18/09/2026): 'relevo' es la MARCA que abre una ronda nueva del protocolo
+  // cuando alguien retoma una ejecucion en curso -- obtenerProtocoloPendiente la usa como linea
+  // divisoria y solo evalua los pasos posteriores. 'rollo_mismo' es la respuesta propia de esa
+  // ronda: el operario confirmo que sigue con el rollo que ya estaba montado, sin pitar otro.
+  'relevo', 'rollo_mismo'
 ]);
 
 app.post('/api/selladora/orden/:idOrden/protocolo/respuesta', requireLogin, async (req, res) => {
@@ -7200,17 +7929,32 @@ async function obtenerProtocoloPendiente(p, idOrden) {
     const abierta = dtAbierta.recordset[0];
     const tipoAbierto = abierta ? String(abierta.Tipo || '').toLowerCase() : '';
     const subtipoAbierto = abierta ? String(abierta.Subtipo || '').toLowerCase() : '';
-    if (tipoAbierto === 'limpieza' && EstadoOrden === 'Pendiente') {
-      return { idOrden: Number(idOrden), paso: 'limpieza', horaInicio: abierta.HoraInicio };
-    }
-    if (tipoAbierto === 'alistamiento' && subtipoAbierto === 'arranque') {
-      return { idOrden: Number(idOrden), paso: 'alistamiento', horaInicio: abierta.HoraInicio };
-    }
 
+    // Los pasos ya guardados se leen ANTES de mirar los cronometros abiertos (18/09/2026): son los
+    // que dicen si lo que esta corriendo pertenece al arranque original o a una ronda de RELEVO
+    // (ver marcarRelevoProtocolo), y de eso dependen el rotulo del cronometro y lo que sigue.
     const dtPasos = await p.request().input('idEjecucion', IdEjecucion).query(
-      `SELECT Paso, Respuesta FROM SEL_ProtocoloArranque WHERE id_ejecucion = @idEjecucion ORDER BY Id ASC`
+      `SELECT Paso, Respuesta, FechaHora FROM SEL_ProtocoloArranque WHERE id_ejecucion = @idEjecucion ORDER BY Id ASC`
     );
     const pasos = dtPasos.recordset;
+    const idxRelevo = pasos.map(x => x.Paso).lastIndexOf('relevo');
+    const enRelevo = idxRelevo >= 0;
+
+    // La limpieza del relevo corre con la orden ya Activa -- por eso el Estado 'Pendiente' dejo de
+    // ser condicion suficiente para reconocer el cronometro del paso 1.
+    if (tipoAbierto === 'limpieza' && (EstadoOrden === 'Pendiente' || enRelevo)) {
+      return { idOrden: Number(idOrden), paso: 'limpieza', horaInicio: abierta.HoraInicio, relevo: enRelevo };
+    }
+    if (tipoAbierto === 'alistamiento' && subtipoAbierto === 'arranque') {
+      return { idOrden: Number(idOrden), paso: 'alistamiento', horaInicio: abierta.HoraInicio, relevo: enRelevo };
+    }
+
+    if (enRelevo) {
+      return await protocoloPendienteDeRelevo(p, {
+        idOrden, idEjecucion: IdEjecucion, marca: pasos[idxRelevo], pasos: pasos.slice(idxRelevo + 1), abierta
+      });
+    }
+
     if (pasos.length === 0) return null; // este protocolo nunca arranco -- boton Iniciar normal
 
     if (EstadoOrden === 'Pendiente') {
@@ -7237,7 +7981,8 @@ async function obtenerProtocoloPendiente(p, idOrden) {
     // una verificacion periodica de otra orden haria creer que el paso del arranque ya se hizo.
     // Solo cuenta como hecha si quedo CONFORME: una que fallo deja el arranque a medias, que es
     // justo lo que el usuario pidio al elegir que bloquee.
-    if (pasos.some(x => x.Paso === 'alistamiento')
+    if (VERIFICACION_BASCULA_ACTIVA
+        && pasos.some(x => x.Paso === 'alistamiento')
         && !pasos.some(x => x.Paso === 'peso_patron' && x.Respuesta === 'Conforme')) {
       return { idOrden: Number(idOrden), paso: 'peso_patron' };
     }
@@ -7251,6 +7996,119 @@ async function obtenerProtocoloPendiente(p, idOrden) {
     return null;
   }
 }
+
+// ¿En que paso va una ronda de RELEVO del protocolo (18/09/2026)? -- la que se marca cuando otro
+// operario (o el mismo, tras cerrar sesion) retoma una ejecucion que ya venia corriendo, ver
+// marcarRelevoProtocolo. Se evalua SOLO con los pasos guardados DESPUES de la marca 'relevo': los
+// del arranque original estan todos completos, y mirandolos juntos la ronda nueva se daria por
+// terminada apenas empieza.
+//
+// El orden es el mismo del arranque, con dos diferencias:
+//   - el rollo no obliga a pitar uno nuevo (ver pasoRolloRelevo en la tableta): el paso se da por
+//     resuelto confirmando el que ya estaba montado o montando otro;
+//   - la orden ya esta Activa, o sea que su Estado no sirve para deducir nada -- todo sale de los
+//     pasos guardados y del tiempo muerto abierto.
+async function protocoloPendienteDeRelevo(p, { idOrden, idEjecucion, marca, pasos, abierta }) {
+  const base = { idOrden: Number(idOrden), relevo: true };
+  const hay = (paso) => pasos.some(x => x.Paso === paso);
+
+  // Cualquier OTRA actividad abierta (un descanso, un mantenimiento) deja el relevo en espera: el
+  // paso 1 arranca con POST /pausar, que rechaza una ejecucion que ya esta en pausa -- abrir la
+  // ventana aca dejaria al operario dandole a "Reintentar" contra un error que no puede resolver.
+  // Al cerrar esa actividad, la siguiente carga de la pagina retoma el relevo donde iba. Los
+  // cronometros del propio protocolo (limpieza y alistamiento/arranque) no llegan hasta aca: los
+  // atrapa obtenerProtocoloPendiente antes de llamar a esta funcion.
+  if (abierta) return null;
+
+  if (!hay('limpieza')) return { ...base, paso: 'inicio' };
+  const quimico = [...pasos].reverse().find(x => x.Paso === 'peligro_quimico');
+  if (!quimico || quimico.Respuesta !== 'No') return { ...base, paso: 'peligro_quimico' };
+  if (!(await rolloResueltoEnRelevo(p, idEjecucion, marca, pasos))) return { ...base, paso: 'rollo' };
+  if (!hay('alistamiento')) return { ...base, paso: 'alistamiento_inicio' };
+  // Mismo criterio que el arranque: solo cuenta una verificacion CONFORME -- una fallida deja el
+  // protocolo a medias, que es justo lo que se pidio al elegir que bloquee.
+  if (VERIFICACION_BASCULA_ACTIVA
+      && !pasos.some(x => x.Paso === 'peso_patron' && x.Respuesta === 'Conforme')) return { ...base, paso: 'peso_patron' };
+  if (!hay('amperaje') && !hay('temperatura')) return { ...base, paso: 'amperaje' };
+  return null; // ronda de relevo completa
+}
+
+// ¿El paso del rollo de esta ronda de relevo ya quedo resuelto? Son dos caminos:
+//   - 'rollo_mismo' -> el operario confirmo que sigue con el rollo que ya estaba montado;
+//   - un rollo montado DESPUES de la marca -> pito otro (SEL_RolloEjecucion es la unica tabla que
+//     guarda serial + hora del montaje).
+// A proposito NO basta con que existan las respuestas del chequeo 4.1/4.2 ('rollo_estado'): esas
+// se guardan ANTES de confirmar el rollo, asi que una tableta que se apague justo ahi habria
+// dejado el chequeo escrito sin rollo montado y el relevo se saltaria el paso. Si esa tabla no
+// existe en esta base no hay con que comprobarlo, y solo ahi se cae a 'rollo_estado' como unica
+// pista -- mejor eso que pedir el rollo en un bucle del que no se puede salir.
+async function rolloResueltoEnRelevo(p, idEjecucion, marca, pasos) {
+  if (pasos.some(x => x.Paso === 'rollo_mismo')) return true;
+  try {
+    const dt = await p.request().input('idEjecucion', idEjecucion).input('desde', marca.FechaHora).query(`
+      SELECT TOP 1 1 AS X FROM SEL_RolloEjecucion
+      WHERE id_ejecucion = @idEjecucion AND FechaHora >= @desde
+    `);
+    return dt.recordset.length > 0;
+  } catch (err) {
+    console.error('Relevo: no se pudo leer SEL_RolloEjecucion (¿falta ejecutar 07_crear_sel_rolloejecucion.sql?):', err.message);
+    return pasos.some(x => x.Paso === 'rollo_estado');
+  }
+}
+
+// Marca el arranque de una ronda de relevo: una fila 'relevo' en SEL_ProtocoloArranque que
+// obtenerProtocoloPendiente usa como linea divisoria. La llama tomar-control-ejecucion. Devuelve
+// true si quedo marcada -- y entonces la tableta entra al protocolo en vez de a la vieja pregunta
+// de la actividad inicial.
+//
+// NO se marca si esa orden ya tiene un protocolo pendiente: seria el arranque original a medias (o
+// una ronda de relevo anterior sin terminar), y marcar otra vez lo mandaria a repetir desde la
+// limpieza pasos que ya estaban hechos. Ese protocolo pendiente sale solo al cargar la pagina, que
+// es el comportamiento que ya existia.
+//
+// En sellado paralelo el protocolo corre sobre la ANCLA del grupo, igual que al Iniciar: es un
+// solo proceso fisico (una limpieza, un rollo, un alistamiento) para las 3 referencias.
+async function marcarRelevoProtocolo(p, { idOrden, operario, esOtroOperario }) {
+  try {
+    const ancla = await obtenerAnclaGrupoSellado(p, idOrden);
+    const idOrdenProtocolo = ancla ? ancla.IdOrden : idOrden;
+    if (await obtenerProtocoloPendiente(p, idOrdenProtocolo)) return false;
+    const dtEj = await p.request().input('idOrden', idOrdenProtocolo).query(
+      `SELECT TOP 1 IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden ORDER BY IdEjecucion ASC`
+    );
+    if (dtEj.recordset.length === 0) return false;
+    await p.request()
+      .input('idEjecucion', dtEj.recordset[0].IdEjecucion)
+      .input('idOrden', idOrdenProtocolo)
+      .input('operario', operario || null)
+      .input('respuesta', esOtroOperario ? 'Retoma' : 'Reanuda')
+      .query(`
+        INSERT INTO SEL_ProtocoloArranque (id_ejecucion, IdOrden, Operario, Paso, Respuesta)
+        VALUES (@idEjecucion, @idOrden, @operario, 'relevo', @respuesta)
+      `);
+    return true;
+  } catch (err) {
+    // Sin la tabla no hay protocolo posible -- el relevo se comporta como antes del 18/09/2026
+    // (pregunta de actividad inicial y a producir). Se degrada, no se rompe.
+    console.error('No se pudo marcar el relevo del protocolo de arranque:', err.message);
+    return false;
+  }
+}
+
+// DESACTIVACION TEMPORAL (18/09/2026, a pedido del usuario): la verificacion de la bascula contra
+// el elemento patron queda APAGADA. El codigo se deja entero en su sitio -- para volver a
+// activarla basta poner esta constante en true, no hay que reponer nada.
+//
+// Lo que apaga, todo desde aca:
+//   - obtenerProtocoloPendiente y protocoloPendienteDeRelevo dejan de exigir 'peso_patron', o sea
+//     que un protocolo sin esa verificacion cuenta como completo. Las ordenes que ahora mismo
+//     estan trancadas en ese paso siguen de largo al amperaje.
+//   - el cronometro de alistamiento pasa derecho al amperaje en vez de abrir la ventana (paso 6).
+//   - scriptComandos no arranca vigilarPesoPatron(), asi que nadie sondea la revision periodica de
+//     cada 30-40 min. El endpoint /peso-patron-pendiente sigue existiendo y respondiendo.
+//
+// Lo que NO toca: las verificaciones ya guardadas en SEL_ProtocoloArranque se quedan como estan.
+const VERIFICACION_BASCULA_ACTIVA = false;
 
 // Tolerancia con la que se acepta que el peso de la bascula "concuerda" con el elemento patron
 // (decision del usuario, 14/09/2026: por porcentaje, +-1%). ES EL UNICO SITIO donde vive ese
@@ -7454,6 +8312,71 @@ app.post('/api/selladora/orden/:idOrden/finalizar', requireLogin, async (req, re
     res.redirect(`/selladora/${maquinaCodigo}`);
   } catch (err) {
     res.status(400).send(renderErrorSimple(err.message, maquinaCodigo ? `/selladora/${maquinaCodigo}` : '/'));
+  }
+});
+
+// ---------------- Ajuste de la cantidad realmente consumida de un rollo ----------------
+// Ver AJUSTE_CANTIDAD_CONSUMIDA_ROLLO_18092026.md y sel-inventario-mp.js (ajustarConsumoRollo).
+//
+// Permiso: requireLogin a secas, igual que las otras correcciones de la tableta ("Volver a pesar",
+// corregir bolsas) -- decision del usuario, 18/09/2026 (pregunta abierta 5 del documento). Hoy
+// requireAdmin solo tapa herramientas de administracion (tablet fija, simulador de PLC), no
+// acciones de produccion.
+
+// Los rollos de la orden con su cantidad original y la registrada hoy, mas la salida real ya
+// producida (el piso que el consumo total no puede cruzar). Solo lectura: pinta la ventana.
+app.get('/api/selladora/orden/:idOrden/rollos-consumo', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  try {
+    const p = await getPool();
+    const estado = await obtenerEstadoAjusteConsumo(p, idOrden);
+    if (estado.estado !== 'PendienteValidacion') {
+      return res.json({
+        ok: false,
+        error: estado.estado === 'Activa'
+          ? 'Esta orden todavía está activa: la máquina sigue consumiendo rollo, así que aún no se sabe cuánto se gastó. Finalícela primero.'
+          : 'El consumo solo se puede ajustar mientras la orden está pendiente de validación. Esta ya fue cerrada por el digitador -- el ajuste tiene que hacerse desde el escritorio.'
+      });
+    }
+    res.json({ ok: true, ...estado });
+  } catch (err) {
+    // Si todavia no se corrio 20260918_agregar_ajuste_consumo_rollo.sql, el fallo es por
+    // SEL_AjusteConsumoRollo / SEL_RolloEjecucion.CantidadOriginal -- se dice cual es el script en
+    // vez de soltar el error crudo de SQL Server en la cara del operario.
+    const falta = /SEL_AjusteConsumoRollo|CantidadOriginal/i.test(err.message || '');
+    res.json({
+      ok: false,
+      error: falta
+        ? 'Falta correr el script sql/pendientes/20260918_agregar_ajuste_consumo_rollo.sql contra esta base antes de poder ajustar el consumo.'
+        : err.message
+    });
+  }
+});
+
+// Aplica el ajuste. Toda la logica (validaciones, transaccion y los 8 puntos que hay que dejar
+// consistentes) vive en sel-inventario-mp.js -- aca solo se traduce el error a JSON.
+app.post('/api/selladora/orden/:idOrden/rollo/ajustar-consumo', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  const usuario = req.session.usuario;
+  try {
+    const p = await getPool();
+    const resultado = await ajustarConsumoRollo(p, {
+      idOrden,
+      serial: req.body.serial,
+      cantidadNueva: req.body.cantidad,
+      motivo: req.body.motivo,
+      generadoPor: usuario.generadoPor,
+      usuario: usuario.nombre
+    });
+    res.json(resultado);
+  } catch (err) {
+    const falta = /SEL_AjusteConsumoRollo|CantidadOriginal/i.test(err.message || '');
+    res.json({
+      ok: false,
+      error: falta
+        ? 'Falta correr el script sql/pendientes/20260918_agregar_ajuste_consumo_rollo.sql contra esta base antes de poder ajustar el consumo.'
+        : err.message
+    });
   }
 });
 

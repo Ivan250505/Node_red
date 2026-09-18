@@ -177,6 +177,46 @@ Notas:
   como las dio el operario. Las dos actividades cronometradas no se repiten ahí: ya salen en la
   bitácora y en "Paradas del turno".
 
+### 10.1 Relevo de operario: el protocolo se repite al retomar (18/09/2026)
+
+Cuando alguien **retoma** o **reanuda** una ejecución que ya venía corriendo (botones
+"🔓 Retomar ejecución" / "▶ Reanudar ejecución" de la cola de la máquina), el protocolo de arranque
+vuelve a correrse **completo** con el operario que recibe la máquina. La vieja pregunta *¿va a
+realizar alguna actividad antes de producir?* ya no sale en ese caso: el protocolo trae sus dos
+actividades cronometradas (limpieza y alistamiento) y preguntar además por una pausa suelta era
+pedir lo mismo dos veces.
+
+Es el mismo protocolo, con **una** diferencia: la máquina ya tiene un rollo montado, así que pitar
+uno nuevo **no es obligatorio**. En el paso del rollo la tableta muestra cuál está puesto (serial,
+peso, lote, referencia y hora en que se montó, todo de `SEL_RolloEjecucion`) y el operario elige:
+
+- **✔ Sigo con este rollo** — queda el rastro en `SEL_ProtocoloArranque` (`Paso='rollo_mismo'`, con
+  el serial). No se descuenta inventario ni se duplica la fila de materia prima: es el mismo rollo.
+- **📷 Pitar otro rollo** — entra por el mismo "+ Rollo" de siempre, con su chequeo de estado y de
+  peligro físico, y el protocolo sigue en el alistamiento sin recargar la página.
+
+Si no se puede saber qué rollo está montado (base sin `SEL_RolloEjecucion`, o una orden que arrancó
+antes de que esa tabla existiera) no se da por bueno a ciegas: se pide pitarlo.
+
+Cómo se sostiene entre recargas — mismo criterio que el resto del protocolo, nada vive en el
+navegador:
+
+- Al tomar control se escribe una **marca** `Paso='relevo'` en `SEL_ProtocoloArranque`
+  (`Respuesta='Retoma'` si cambió de operario, `'Reanuda'` si es el mismo). `obtenerProtocoloPendiente`
+  la usa como línea divisoria: la ronda nueva se evalúa **solo** con los pasos guardados después de
+  la marca. No hace falta ningún script SQL nuevo — `Paso` es `VARCHAR(30)` sin CHECK.
+- Si la orden ya tenía un protocolo a medias **no** se marca otra ronda: sale ese, como antes.
+- Si la ejecución vuelve **En pausa**, la marca queda pero el protocolo espera a que se reanude —
+  su paso 1 arranca con `POST /pausar`, que rechaza una ejecución ya pausada.
+- En sellado paralelo la marca va sobre la orden **ancla**, igual que al Iniciar: un solo proceso
+  físico para las 3 referencias.
+- La verificación de báscula del relevo se guarda como `peso_patron`, así que también reinicia el
+  reloj de la verificación periódica que sale sola cada 30–40 min durante la producción.
+
+La ventana de presentación trae "Cancelar", igual que en el arranque: la orden ya está produciendo y
+no tiene sentido secuestrar la pantalla. Mientras la ronda no se termine, vuelve a salir en cada
+carga de la página.
+
 ## 11. Volver a pesar un paquete (09/09/2026)
 
 En la página de **Bultos**, tocar un paquete ya no reimprime de una: sale un menú con dos opciones.
@@ -259,3 +299,41 @@ Notas:
   10:00:59 a 10:01:01 da 1 minuto y de 10:00:00 a 10:00:59 da 0 (hoy 9 de las 77 filas dan 0). Sirve
   para paradas de planta; si algún día alimenta un OEE que necesite segundos, hay que soltar y
   recrear la columna otra vez en las dos bases.
+
+## 13. Panel de notificaciones (18/09/2026)
+
+Al lado del nombre del usuario, en el encabezado de todas las páginas, hay una **campana** con el
+contador de no leídas. Al tocarla se despliega un panel sobre la misma pantalla — no saca al
+operario de lo que esté haciendo — con el historial de los avisos que hasta ahora salían y se
+perdían:
+
+| Aviso | Qué se anota |
+|---|---|
+| Pedido nuevo en la cola | Un renglón por pedido (número + referencia). La tarjeta emergente se va sola a los 7 s; el renglón se queda |
+| Suspensión pedida por Programación | Pedido y referencia, una sola vez por orden |
+| Chequeo de calidad | El **resultado**: conforme, o con cuántas no conformes, y el bulto |
+| Protocolo de arranque/relevo a medias | En qué paso quedó |
+
+Los avisos siguen saliendo exactamente igual que antes: el panel es el historial, no los reemplaza.
+
+Detalles que conviene saber antes de tocarlo:
+
+- **Se guarda en la tableta (`localStorage`), no en la base.** No hizo falta tabla ni endpoint: todos
+  esos avisos ya los detecta el propio navegador. La lista es **por máquina** (misma convención que
+  el aviso de pedido nuevo), así que la tableta de la 05 no mezcla su historial con el de la 07; las
+  páginas sin máquina (Selladoras) usan la lista `todas`, y lo anotado ahí no sale en el panel de una
+  máquina concreta ni al revés.
+- **Antirrepetido de 30 minutos por clave.** Hay avisos que vuelven a salir en cada carga de página
+  mientras la condición siga ahí — el protocolo a medias es el caso claro. Con la misma clave dentro
+  de la media hora no se anota otra vez; sin eso el panel se llenaría del mismo renglón.
+- Se guardan las **50 más recientes**; abrir el panel las marca como leídas (las no leídas salen
+  resaltadas hasta ese momento) y "Limpiar" vacía la lista.
+- **El panel se cuelga de `<body>`, no del encabezado**: `header` tiene `overflow: hidden` por la
+  trama de puntos y lo recortaría. El script lo coloca bajo la campana con `getBoundingClientRect`,
+  igual que hace la tarjeta de "pedido nuevo".
+- Los cuatro enganches llaman a `registrarNotificacion` **siempre** con `typeof ... === 'function'`:
+  hay páginas que cargan un aviso sin cargar el panel, y un aviso no se puede caer por no poder
+  anotarse.
+- Si algún día esto tiene que ser multiusuario de verdad (que Programación le mande un mensaje a un
+  operario concreto), el cambio es sustituir `leerNotificaciones`/`guardarNotificaciones` por un par
+  de endpoints contra una tabla — el resto del panel no se entera.

@@ -408,6 +408,10 @@ async function confirmarRollo(pool, { idOrden, idEjecucionActivo, serial, esNuev
     // FIX 16/09/2026: para "Iniciar" (esNuevoRollo=false) esto YA NO corre acá -- se movió dentro
     // de materializarInicioOrden (no hay bulto todavía en este punto para engancharle el id_bulto).
     // Para "Añadir Rollo" sigue exactamente igual, sin cambios -- ese bulto ya existe de antes.
+    // CantidadOriginal (18/09/2026, ver AJUSTE_CANTIDAD_CONSUMIDA_ROLLO_18092026.md): arranca igual
+    // a Cantidad y NUNCA se vuelve a tocar. Cantidad sí se corrige cuando el operario ajusta lo que
+    // de verdad consumió (ajustarConsumoRollo), y sin guardar acá lo que se escaneó se perdería R --
+    // dos ajustes seguidos se encadenarían y devolverían al inventario más de lo que salió.
     if (esNuevoRollo) {
       const tBodegaTimeline = await obtenerBodegaDeRollo(tx, consulta.serial);
       await tx.request()
@@ -419,10 +423,10 @@ async function confirmarRollo(pool, { idOrden, idEjecucionActivo, serial, esNuev
         .input('operario', codOperario > 0 ? codOperario : null)
         .query(`
           IF OBJECT_ID('SEL_RolloEjecucion', 'U') IS NOT NULL
-          INSERT INTO SEL_RolloEjecucion (id_ejecucion, id_bulto, Serial, Cantidad, LoteMP, Bodega, Operario, EsInicio)
+          INSERT INTO SEL_RolloEjecucion (id_ejecucion, id_bulto, Serial, Cantidad, CantidadOriginal, LoteMP, Bodega, Operario, EsInicio)
           SELECT @idEjecucion,
                  (SELECT TOP 1 id FROM SEL_Bultos WHERE id_ejecucion = @idEjecucion AND estado = 'Activo' ORDER BY id DESC),
-                 @serial, @cantidad, @loteMP, @bodega, @operario, 0
+                 @serial, @cantidad, @cantidad, @loteMP, @bodega, @operario, 0
         `);
     }
 
@@ -507,10 +511,10 @@ async function materializarInicioOrden(pool, { idOrden, idEjecucion, codOperario
       .input('operario', codOperario > 0 ? codOperario : null)
       .query(`
         IF OBJECT_ID('SEL_RolloEjecucion', 'U') IS NOT NULL
-        INSERT INTO SEL_RolloEjecucion (id_ejecucion, id_bulto, Serial, Cantidad, LoteMP, Bodega, Operario, EsInicio)
+        INSERT INTO SEL_RolloEjecucion (id_ejecucion, id_bulto, Serial, Cantidad, CantidadOriginal, LoteMP, Bodega, Operario, EsInicio)
         SELECT @idEjecucion,
                (SELECT TOP 1 id FROM SEL_Bultos WHERE id_ejecucion = @idEjecucion AND estado = 'Activo' ORDER BY id DESC),
-               @serial, @cantidad, @loteMP, @bodega, @operario, 1
+               @serial, @cantidad, @cantidad, @loteMP, @bodega, @operario, 1
       `);
 
     await tx.commit();
