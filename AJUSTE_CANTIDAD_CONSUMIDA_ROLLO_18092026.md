@@ -16,9 +16,11 @@ Implementado **solo del lado Node** (este repo no tiene el código VB de Mirane)
 | Recálculo del control | `sel-inventario-mp.js` → `recalcularControlSellado` |
 | Endpoints `GET /rollos-consumo` y `POST /rollo/ajustar-consumo` | `server.js` |
 | Ventanas de la tableta | `server.js` → `scriptAjusteConsumo` |
-| Tabla `SEL_AjusteConsumoRollo` + `SEL_RolloEjecucion.CantidadOriginal` | `sql/pendientes/20260918_agregar_ajuste_consumo_rollo.sql` |
+| Tabla `SEL_AjusteConsumoRollo` + `SEL_RolloEjecucion.CantidadOriginal` | `sql/aplicados/20260918_agregar_ajuste_consumo_rollo.sql` |
 
-**Falta correr el script SQL en producción.** Ya está aplicado y probado en `carlixplastPrueba`.
+**El script SQL ya está aplicado en las dos bases** (Prueba y producción, 18/09/2026). Lo que falta
+para que la funcionalidad se vea es que el servidor de producción corra el código nuevo: el esquema
+es aditivo, así que mientras tanto la base está lista y el código viejo simplemente no lo usa.
 
 ### Preguntas abiertas, resueltas
 

@@ -8347,7 +8347,7 @@ app.get('/api/selladora/orden/:idOrden/rollos-consumo', requireLogin, async (req
     res.json({
       ok: false,
       error: falta
-        ? 'Falta correr el script sql/pendientes/20260918_agregar_ajuste_consumo_rollo.sql contra esta base antes de poder ajustar el consumo.'
+        ? 'Falta correr el script sql/aplicados/20260918_agregar_ajuste_consumo_rollo.sql contra esta base antes de poder ajustar el consumo.'
         : err.message
     });
   }
@@ -8374,7 +8374,7 @@ app.post('/api/selladora/orden/:idOrden/rollo/ajustar-consumo', requireLogin, as
     res.json({
       ok: false,
       error: falta
-        ? 'Falta correr el script sql/pendientes/20260918_agregar_ajuste_consumo_rollo.sql contra esta base antes de poder ajustar el consumo.'
+        ? 'Falta correr el script sql/aplicados/20260918_agregar_ajuste_consumo_rollo.sql contra esta base antes de poder ajustar el consumo.'
         : err.message
     });
   }

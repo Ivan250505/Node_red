@@ -38,15 +38,15 @@ vea de un golpe qué tan viejo es cada uno.
 | `20260915_agregar_amperaje_ferroniquel.sql` | ✅ | ✅ |
 | `20260915_corregir_duracionminutos_tiempomuerto.sql` | ✅ | ✅ |
 | `20260916_igualar_prueba_con_produccion.sql` | — *(solo Prueba)* | ✅ |
-| `pendientes/20260918_agregar_ajuste_consumo_rollo.sql` | ⏳ **falta** | ✅ |
+| `20260918_agregar_ajuste_consumo_rollo.sql` | ✅ | ✅ |
 
-**Falta correr `20260918_agregar_ajuste_consumo_rollo.sql` en producción** (18/09/2026). Ya está
-aplicado y probado de punta a punta en `carlixplastPrueba`. Sin él, el botón "Ajustar consumo de
-rollo" de la tableta avisa que falta el script y no deja hacer nada -- el resto de la aplicación
-sigue funcionando igual. Es aditivo (una columna nullable en `SEL_RolloEjecucion` y la tabla nueva
-`SEL_AjusteConsumoRollo`) y se puede re-ejecutar sin daño.
+`20260918_agregar_ajuste_consumo_rollo.sql` se aplicó en **las dos bases el 18/09/2026** (Prueba
+primero, con la prueba de punta a punta; producción después). En producción rellenó las 2 filas que
+tenía `SEL_RolloEjecucion`, sin ninguna discrepancia. Ojo: la base ya está lista, pero la
+funcionalidad no aparece hasta que el servidor de producción corra el código del commit `ff13ab1` --
+mientras tanto el esquema nuevo simplemente no se usa.
 
-Sigue pendiente también `20260916_renombrar_tipoproceso_sellado_a_selladora.sql`: comprobado el
+Sigue pendiente `20260916_renombrar_tipoproceso_sellado_a_selladora.sql`: comprobado el
 18/09/2026 contra Prueba, conviven 38 controles con `TipoProceso = 'Sellado'` y 5 con `'SELLADORA'`.
 Mientras no se corra, el VB de Mirane (que filtra por `'Sellado'`) no encuentra los controles que
 crea Node y `RecalcularMermaSellado` sale en silencio sin calcular la merma.

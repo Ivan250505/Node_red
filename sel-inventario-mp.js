@@ -897,7 +897,7 @@ async function abrirOReanudarBitacora(p, maquinaCodigo, operarioCodigo) {
 // ===========================================================================================
 // Ajuste de la cantidad realmente consumida de un rollo
 // Ver AJUSTE_CANTIDAD_CONSUMIDA_ROLLO_18092026.md (documento de diseno, 18/09/2026) y
-// sql/pendientes/20260918_agregar_ajuste_consumo_rollo.sql.
+// sql/aplicados/20260918_agregar_ajuste_consumo_rollo.sql.
 //
 // El problema: consultarSerial (scan-rollo.js) toma INVExistencias.Cantidad COMPLETA y
 // generarSalidaRollo la descuenta entera -- el sistema asume que el rollo se gasto al 100%. Si el
