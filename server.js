@@ -34,6 +34,25 @@ const dbConfig = {
   }
 };
 
+// Identidad de la base conectada, para colgarla de las claves de localStorage del navegador
+// (21/09/2026, a pedido del usuario: "el apartado de notificaciones solo debe mirar los nuevos
+// pedidos segun la base de datos que este conectada, a pesar de que se cambie").
+//
+// EL PROBLEMA: las notificaciones y la foto de la cola viven en la tableta, no en la base, y hasta
+// ahora se guardaban solo POR MAQUINA. Al cambiar de base en el .env (produccion <-> pruebas, o
+// una copia en otro servidor) el navegador seguia leyendo la misma lista: el panel mostraba
+// pedidos que en la base nueva no existen, y la foto de la cola de la base vieja hacia que medio
+// listado de la nueva saliera de golpe como "pedido nuevo" (los IdOrden no coinciden entre bases).
+//
+// LA SOLUCION: servidor+puerto+base entran en la clave. Cada base tiene su propio historial y su
+// propia foto, sin mezclarse. Va el servidor y no solo el nombre porque dos maquinas distintas
+// suelen tener una base llamada igual ('carlixplast' en las dos) con datos que no tienen nada que
+// ver. Se sanea a [a-z0-9_-] para que la clave siga siendo legible en devtools.
+const CLAVE_BASE_DATOS = [process.env.DB_SERVER, process.env.DB_PORT || 1433, process.env.DB_DATABASE]
+  .map(function (parte) { return String(parte == null ? '' : parte).trim().toLowerCase(); })
+  .join('_')
+  .replace(/[^a-z0-9_-]+/g, '-') || 'sin-base';
+
 const app = express();
 app.use(express.static('public'));
 app.use(express.urlencoded({ extended: false }));
@@ -461,7 +480,15 @@ function estilosBase() {
       width: auto; padding: 4px 10px; font-size: 12px; font-weight: 600;
       background: var(--gris-fondo); color: var(--texto-suave); box-shadow: none; border-radius: 8px;
     }
-    .notif-lista { max-height: min(60vh, 420px); overflow-y: auto; }
+    /* Con muchos pedidos anotados el listado se desplaza dentro del panel (21/09/2026, a pedido
+    del usuario). El max-height de aca es el de partida: el script lo recalcula al abrir con el
+    alto que de verdad queda libre bajo la campana, para que el panel nunca se salga por abajo de
+    la pantalla. overscroll-behavior: contain corta el encadenamiento -- al llegar al final del
+    listado el gesto NO pasa a desplazar la pagina de atras (que ademas cerraria el panel). */
+    .notif-lista {
+      max-height: min(60vh, 420px); overflow-y: auto;
+      overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+    }
     .notif-item { display: flex; gap: 10px; padding: 11px 14px; border-bottom: 1px solid #f4f6f8; }
     .notif-item:last-child { border-bottom: none; }
     .notif-item.no-leida { background: #f0f8ff; }
@@ -1323,19 +1350,42 @@ function scriptActualizarCola(maquinaCodigo) {
 //
 // DONDE SE GUARDA: en la tableta (localStorage), no en la base. No hace falta tabla nueva ni
 // endpoint -- todos estos avisos los detecta ya el propio navegador. Misma convencion de clave que
-// el aviso de pedido nuevo: una lista POR MAQUINA, para que la tableta de la 05 no mezcle su
-// historial con el de la 07. Las paginas sin maquina (Selladoras) usan la lista 'todas', asi que lo
-// anotado ahi no sale en el panel de una maquina concreta, ni al reves.
+// el aviso de pedido nuevo: una lista POR BASE Y POR MAQUINA, para que la tableta de la 05 no
+// mezcle su historial con el de la 07. Las paginas sin maquina (Selladoras) usan la lista 'todas',
+// asi que lo anotado ahi no sale en el panel de una maquina concreta, ni al reves.
+//
+// POR BASE (21/09/2026, a pedido del usuario): si se cambia la base del .env, el panel arranca
+// limpio contra la base nueva en vez de seguir mostrando pedidos que ahi no existen -- y lo que
+// quedo anotado contra la base anterior se borra, no se guarda para cuando se vuelva. Ver
+// CLAVE_BASE_DATOS arriba para el por que de meter tambien el servidor en la clave.
 //
 // Si algun dia esto tiene que ser multiusuario de verdad (que Programacion le mande un mensaje a un
 // operario concreto), el cambio es sustituir leerNotificaciones/guardarNotificaciones por un par de
 // endpoints contra una tabla -- el resto del panel no se entera.
 function scriptNotificaciones(maquinaCodigo) {
   return `
-    var NOTIF_CLAVE = 'carlixplast.notificaciones.' + (${jsString(maquinaCodigo || '')} || 'todas');
+    var NOTIF_PREFIJO = 'carlixplast.notificaciones.';
+    var NOTIF_PREFIJO_BASE = NOTIF_PREFIJO + ${jsString(CLAVE_BASE_DATOS)} + '.';
+    var NOTIF_CLAVE = NOTIF_PREFIJO_BASE + (${jsString(maquinaCodigo || '')} || 'todas');
     var NOTIF_MAXIMO = 50;                // se descartan las mas viejas, no crece sin fin
     var NOTIF_ANTIRREPETIDO_MS = 1800000; // 30 min -- ver registrarNotificacion
     var notifPanel = null;
+
+    // Lo anotado contra OTRAS bases (y lo de antes del 21/09/2026, cuando la clave no llevaba
+    // base) ya no se va a leer nunca: el panel solo mira la clave de la base conectada. Se borra
+    // para que no se quede ocupando el localStorage de la tableta para siempre.
+    //
+    // Se compara contra el prefijo CON base, no solo con el de la familia: las otras maquinas de
+    // esta misma base tienen que sobrevivir -- el mismo navegador abre el Dashboard ('todas') y la
+    // pagina de una maquina, y cada uno lleva su propia lista.
+    try {
+      for (var notifI = localStorage.length - 1; notifI >= 0; notifI--) {
+        var notifK = localStorage.key(notifI);
+        if (notifK && notifK.indexOf(NOTIF_PREFIJO) === 0 && notifK.indexOf(NOTIF_PREFIJO_BASE) !== 0) {
+          localStorage.removeItem(notifK);
+        }
+      }
+    } catch (e) {}
 
     var NOTIF_ICONOS = {
       pedido: '📦', suspension: '⏸', calidad: '✅', calidad_alerta: '⚠️', protocolo: '⚙️'
@@ -1434,7 +1484,17 @@ function scriptNotificaciones(maquinaCodigo) {
       document.removeEventListener('pointerdown', notifClicFuera, true);
       document.removeEventListener('keydown', notifTecla, true);
       window.removeEventListener('resize', cerrarNotificaciones);
-      window.removeEventListener('scroll', cerrarNotificaciones, true);
+      window.removeEventListener('scroll', notifScroll, true);
+    }
+
+    // El panel se cierra si la PAGINA se mueve debajo (quedaria flotando lejos de la campana, que
+    // es de donde cuelga). Pero desplazar el listado de adentro tambien dispara este evento --va en
+    // fase de captura--, y hasta el 21/09/2026 eso cerraba el panel al primer arrastre: con mas
+    // notificaciones de las que caben en pantalla no habia forma de llegar a las de abajo.
+    function notifScroll(evento) {
+      var destino = evento.target;
+      if (notifPanel && destino && destino.nodeType === 1 && notifPanel.contains(destino)) return;
+      cerrarNotificaciones();
     }
 
     function notifClicFuera(evento) {
@@ -1455,8 +1515,19 @@ function scriptNotificaciones(maquinaCodigo) {
       var caja = boton.getBoundingClientRect();
       var ancho = notifPanel.offsetWidth;
       var izquierda = Math.min(Math.max(12, caja.right - ancho), window.innerWidth - ancho - 12);
-      notifPanel.style.top = (caja.bottom + 8) + 'px';
+      var arriba = caja.bottom + 8;
+      notifPanel.style.top = arriba + 'px';
       notifPanel.style.left = izquierda + 'px';
+
+      // El listado se queda con el alto que de verdad sobra entre la campana y el borde de abajo,
+      // y lo que no quepa se desplaza. El 60vh del CSS no alcanzaba: el panel arranca ya bajo el
+      // encabezado, asi que con la pantalla apaisada de la tableta el final del listado quedaba
+      // fuera de la vista y no habia como llegar a el. Piso de 140px para que, aunque el hueco sea
+      // minimo, siempre se vea al menos una notificacion entera.
+      var lista = notifPanel.querySelector('.notif-lista');
+      var cabecera = notifPanel.querySelector('.notif-cabecera');
+      var libre = window.innerHeight - arriba - 12 - (cabecera ? cabecera.offsetHeight : 0);
+      lista.style.maxHeight = Math.max(140, libre) + 'px';
     }
 
     function alternarNotificaciones(boton) {
@@ -1485,7 +1556,7 @@ function scriptNotificaciones(maquinaCodigo) {
       document.addEventListener('pointerdown', notifClicFuera, true);
       document.addEventListener('keydown', notifTecla, true);
       window.addEventListener('resize', cerrarNotificaciones);
-      window.addEventListener('scroll', cerrarNotificaciones, true);
+      window.addEventListener('scroll', notifScroll, true);
     }
 
     function limpiarNotificaciones() {
@@ -1610,11 +1681,36 @@ function scriptAvisoPedidoNuevo(maquinaCodigo) {
   return `
     (function() {
       var MAQUINA = ${JSON.stringify(maquinaCodigo || '')};
-      // La foto de la cola se guarda por maquina: la tableta de la 05 no se entera de lo que le
-      // programen a la 07. Al ser localStorage la comparten todas las pestanas del mismo WebView,
-      // asi que navegar entre Informacion/Bultos/Programacion no reinicia el aviso ni lo repite.
-      var CLAVE = 'carlixplast.cola.vistas.' + (MAQUINA || 'todas');
+      // La foto de la cola se guarda por base y por maquina: la tableta de la 05 no se entera de lo
+      // que le programen a la 07. Al ser localStorage la comparten todas las pestanas del mismo
+      // WebView, asi que navegar entre Informacion/Bultos/Programacion no reinicia el aviso ni lo
+      // repite.
+      //
+      // La base entra en la clave (21/09/2026, ver CLAVE_BASE_DATOS) porque los IdOrden no
+      // coinciden entre bases: con una sola foto compartida, al cambiar de base en el .env la cola
+      // entera de la base nueva salia de golpe como "pedido nuevo" -- ordenes viejas que llevaban
+      // dias ahi, avisadas como recien entradas. Con la clave por base eso no pasa: la base nueva
+      // no tiene foto todavia, y sin foto previa revisar() solo la toma (ver mas abajo) sin avisar
+      // de nada.
+      var PREFIJO = 'carlixplast.cola.vistas.';
+      var PREFIJO_BASE = PREFIJO + ${jsString(CLAVE_BASE_DATOS)} + '.';
+      var CLAVE = PREFIJO_BASE + (MAQUINA || 'todas');
       var INTERVALO_MS = 10000;
+
+      // Fotos de otras bases (y las de antes del 21/09/2026, sin base en la clave): ya no se leen,
+      // se borran, para no dejar basura en el localStorage de la tableta. Mismo criterio que el
+      // panel de notificaciones -- se respeta el prefijo CON base para no pisar la foto de las
+      // otras maquinas de ESTA base.
+      //
+      // Consecuencia buscada: volver a una base ya usada no es "seguir donde iba", es empezar de
+      // cero contra ella -- foto nueva en silencio. Se prefiere eso a guardar una foto de hace
+      // dias que, al volver, soltaria de golpe todo lo que se programo mientras tanto.
+      try {
+        for (var i = localStorage.length - 1; i >= 0; i--) {
+          var k = localStorage.key(i);
+          if (k && k.indexOf(PREFIJO) === 0 && k.indexOf(PREFIJO_BASE) !== 0) localStorage.removeItem(k);
+        }
+      } catch (e) {}
       var pendientes = [];
       var audio = null;
 
