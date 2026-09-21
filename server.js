@@ -1868,19 +1868,44 @@ const UNIDADES_MEDIDA_BOLSA = {
   KG: ['kilogramo', 'kilogramos']
 };
 
-// Tolerancia de las medidas, EN LA UNIDAD DE CADA UNA (a pedido del usuario, 15/09/2026: "+-7mm o
-// +-1/4 pulg"). No se pregunta por un valor exacto sino por un RANGO: una bolsa sellada nunca sale
-// clavada al milimetro y exigir el valor justo obligaria a marcar No conforme casi siempre.
+// Tolerancia de las medidas (21/09/2026, a pedido del usuario). SUSTITUYE a la tabla fija de
+// +-1/4 pulgada / +-7 mm que rigio entre el 15 y el 21/09/2026. El criterio nuevo, textual:
+// "menor al 10% de la medida, pero si el 10% es igual o mayor a 1 pulgada, menor a 1 pulgada".
 //
-// Son la misma tolerancia expresada en cada sistema, no dos criterios distintos: 1/4 de pulgada son
-// 6.35 mm, que es el equivalente practico de los 7 mm del sistema metrico.
-//   PUL -> 0.25 pulgadas (1/4")
-//   CM  -> 0.7 cm  (7 mm)
-//   MT  -> 0.007 m (7 mm)
-// KG no esta a proposito: no es una medida de longitud y no hay forma de expresarle 7 mm. Una
-// unidad que no este en esta tabla hace que la pregunta vuelva a ser por el valor exacto, sin
-// rango -- ver calcularMedidasBolsa(). En produccion solo se usan PUL y CM (comprobado 15/09/2026).
-const TOLERANCIA_MEDIDA_POR_UNIDAD = { PUL: 0.25, CM: 0.7, MT: 0.007 };
+// O sea: tolerancia = 10% de la medida, con TOPE de 1 pulgada. El tope entra a partir de las 10
+// pulgadas -- justo ahi el 10% vale 1 pulgada exacta, y de esa medida en adelante manda el tope.
+// Para que sirve el tope: el 10% crece con la medida y, sin techo, una bolsa de 30 pulgadas
+// aceptaria +-3 pulgadas, que ya no es la holgura de un sellado sino otra bolsa.
+//
+// QUE CAMBIA FRENTE A LA TABLA FIJA (no es una interpolacion de la anterior, es otro criterio):
+// las dos se cruzan donde el 10% igualaba la tolerancia vieja -- 2,5 pulgadas y 7 cm. Por DEBAJO
+// de eso el criterio nuevo es mas estricto (el 10% de 2 pulgadas son 0,2, antes se aceptaba 0,25)
+// y por ENCIMA mas holgado, hasta toparse en 1 pulgada.
+//
+// El 10% no depende de la unidad -- es una proporcion --, pero el TOPE si: 1 pulgada son 2,54 cm y
+// 0,0254 m. Es el mismo criterio fisico escrito en cada sistema, no tres criterios distintos
+// (mismo espiritu que la tabla que reemplaza). En produccion solo se usan PUL y CM (comprobado
+// 15/09/2026).
+//
+// KG se queda fuera a proposito, igual que antes: no es una medida de longitud, no hay forma de
+// aplicarle un tope en pulgadas, y su pregunta sigue siendo por el valor exacto. Aplicarle el 10%
+// seria inventarse un criterio de peso que nadie ha pedido -- ver calcularMedidasBolsa().
+const PORCENTAJE_TOLERANCIA_MEDIDA = 10;
+const TOPE_TOLERANCIA_MEDIDA_POR_UNIDAD = { PUL: 1, CM: 2.54, MT: 0.0254 };
+
+// Tolerancia que aplica a UNA medida concreta, en su propia unidad. null = esa unidad no tiene
+// criterio de rango (KG, o una unidad nueva que no este en la tabla de topes): quien llama vuelve
+// a preguntar por el valor exacto.
+//
+// El criterio del usuario es "MENOR a" -- el limite no entra. No se resta ningun epsilon a
+// proposito: nadie mide a mano hasta la milesima, y la app no calcula la conformidad (el operario
+// responde Conforme / No conforme mirando la bolsa), asi que el rango que se le muestra es la
+// forma practica del criterio, no una comparacion que haga el programa.
+function toleranciaMedida(valor, codigoUnidad) {
+  const tope = TOPE_TOLERANCIA_MEDIDA_POR_UNIDAD[codigoUnidad];
+  if (tope == null) return null;
+  return Math.min(valor * PORCENTAJE_TOLERANCIA_MEDIDA / 100, tope);
+}
 
 // Columnas y OUTER APPLY que traen esas medidas en las consultas de la orden. Ambas asumen que la
 // tabla SEL_OrdenProduccion viene con el alias `ord`, que es como se llama en las tres consultas
@@ -1918,8 +1943,9 @@ const JOINS_MEDIDAS_BOLSA = `
 // Preguntas de medida que aplican a UNA orden, ya redactadas ("¿El ancho de la bolsa esta entre
 // 9,75 y 10,25 pulgadas?"). `orden` es una fila que traiga las columnas de COLUMNAS_MEDIDAS_BOLSA.
 //
-// Se pregunta por un RANGO y no por el valor exacto (15/09/2026): ver
-// TOLERANCIA_MEDIDA_POR_UNIDAD. Se devuelve tambien valorEsperado ("10 pulgadas (9,75–10,25)")
+// Se pregunta por un RANGO y no por el valor exacto (15/09/2026): ver toleranciaMedida(), que
+// desde el 21/09/2026 la calcula por medida (10%, con tope de 1 pulgada) en vez de sacarla de una
+// tabla por unidad. Se devuelve tambien valorEsperado ("10 pulgadas (9–11)")
 // aparte del titulo, porque es lo que se guarda en la base junto con la respuesta: dentro de un mes
 // la referencia puede haber cambiado de medida y el registro tiene que seguir diciendo contra que
 // se comparo ese dia y con que holgura.
@@ -1932,7 +1958,9 @@ function calcularMedidasBolsa(orden) {
     if (!isFinite(n) || n === 0) return null;
     const valor = n.toLocaleString('es-CO', { maximumFractionDigits: 2 });
     const unidad = formasUnidad[n === 1 ? 0 : 1];
-    const tolerancia = TOLERANCIA_MEDIDA_POR_UNIDAD[codigoUnidad];
+    // Depende de CADA medida desde el 21/09/2026 (10% con tope de 1 pulgada), ya no de una tabla
+    // por unidad: por eso se calcula aqui dentro, con n, y no una vez para toda la bolsa.
+    const tolerancia = toleranciaMedida(n, codigoUnidad);
 
     // Sin tolerancia conocida para esa unidad (ej. KG): se pregunta por el valor exacto, como
     // antes. Es preferible a inventar un rango en una unidad que no es de longitud.
@@ -8123,20 +8151,23 @@ async function marcarRelevoProtocolo(p, { idOrden, operario, esOtroOperario }) {
   }
 }
 
-// DESACTIVACION TEMPORAL (18/09/2026, a pedido del usuario): la verificacion de la bascula contra
-// el elemento patron queda APAGADA. El codigo se deja entero en su sitio -- para volver a
-// activarla basta poner esta constante en true, no hay que reponer nada.
+// Interruptor de la verificacion de la bascula contra el elemento patron. Estuvo APAGADA del
+// 18/09/2026 al 21/09/2026 a pedido del usuario; desde el 21/09/2026 vuelve a estar ENCENDIDA. Se
+// deja como constante para poder apagarla y prenderla otra vez sin tocar nada mas.
 //
-// Lo que apaga, todo desde aca:
+// En false apaga tres cosas, todas desde aca:
 //   - obtenerProtocoloPendiente y protocoloPendienteDeRelevo dejan de exigir 'peso_patron', o sea
-//     que un protocolo sin esa verificacion cuenta como completo. Las ordenes que ahora mismo
-//     estan trancadas en ese paso siguen de largo al amperaje.
-//   - el cronometro de alistamiento pasa derecho al amperaje en vez de abrir la ventana (paso 6).
+//     que un protocolo sin esa verificacion cuenta como completo;
+//   - el cronometro de alistamiento pasa derecho al amperaje en vez de abrir la ventana (paso 6);
 //   - scriptComandos no arranca vigilarPesoPatron(), asi que nadie sondea la revision periodica de
 //     cada 30-40 min. El endpoint /peso-patron-pendiente sigue existiendo y respondiendo.
 //
-// Lo que NO toca: las verificaciones ya guardadas en SEL_ProtocoloArranque se quedan como estan.
-const VERIFICACION_BASCULA_ACTIVA = false;
+// Prenderla NO reabre protocolos que ya cerraron: obtenerProtocoloPendiente sale antes por el paso
+// 'amperaje'/'temperatura' (ver el FIX 16/09/2026 ahi mismo). Las ordenes que quedaron con el
+// alistamiento hecho pero SIN amperaje durante el apagon si pasan por la verificacion, que es
+// justo lo que se quiere. Y la revision periodica sale en la primera ronda de sondeo de cada
+// maquina que ya tenga verificaciones guardadas, porque su ultima quedo pasada de los 30-40 min.
+const VERIFICACION_BASCULA_ACTIVA = true;
 
 // Tolerancia con la que se acepta que el peso de la bascula "concuerda" con el elemento patron
 // (decision del usuario, 14/09/2026: por porcentaje, +-1%). ES EL UNICO SITIO donde vive ese
