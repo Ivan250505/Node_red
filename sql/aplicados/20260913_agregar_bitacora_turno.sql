@@ -25,8 +25,13 @@
 --     que ya esta abierta. El usuario lo pidio explicitamente -- "puede pasar que se vaya el
 --     internet o retome la orden", y eso no puede partir la bitacora en dos.
 --   - NO se cierra al cerrar sesion, justamente por lo anterior.
---   - Se cierra por RELEVO (otro operario toma esa maquina) o por CAMBIO DE TURNO (el bulto nuevo
---     ya cae fuera de la franja del turno con que se abrio).
+--   - Se cierra por CAMBIO DE TURNO (el bulto nuevo ya cae fuera de la franja del turno con que se
+--     abrio). FIX 20/09/2026 (reunion 18/09 -- el serial final de la OT/bitacora quedo como
+--     "OT+Fecha+Maquina+Turno", SIN operario en la llave): un RELEVO (otro operario toma la
+--     maquina) dentro del MISMO turno YA NO cierra la bitacora -- varios operarios pueden convivir
+--     en una misma bitacora, quien hizo cada bulto se sigue viendo por bulto (SEL_Bultos/
+--     SEL_EjecucionOrden.Operario, PRDProduccionOperarios). La columna Operario de esta tabla queda
+--     como "quien la abrio", no como "quien esta trabajando ahora".
 --
 -- Ejecutar contra la base de Mirane. Es IDEMPOTENTE: se puede correr varias veces y sobre las dos
 -- bases (Carlixplast / CarlixplastPrueba) sin romper nada.

@@ -107,6 +107,12 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
   const datosOrden = await obtenerDatosOrden(tx, idOrden);
   if (!datosOrden) throw new Error('Orden no encontrada.');
   const { elemento: nElemento, maquina: nMaquina, numeroPedido: tNumeroPedido } = datosOrden;
+  // FIX 20/09/2026 (a pedido del usuario -- guardar IdBitacora directo en el bulto, no calcularlo
+  // por join de ventana de tiempo cada vez que se consulta): se resuelve UNA vez aqui, en el primer
+  // bulto de la ejecucion (igual que ya se hace con OrdenProduccion/TipoPedido) -- de ahi en
+  // adelante trg_SEL_Bultos_CierreBulto solo la COPIA del bulto anterior, no la recalcula. Null si
+  // no hay operario (no se abre bitacora) o si abrirOReanudarBitacora falla -- nunca bloquea Iniciar.
+  let nIdBitacora = null;
 
   // FIX 24/08/2026: al Iniciar, este operario pasa a ser el "operario actual" de la maquina --
   // ver agregar_operarioactualmaquina.sql. trg_SEL_Bultos_CierreBulto la consulta para cada bulto
@@ -134,7 +140,7 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
     // aunque el error real quede tragado en silencio adentro de la funcion. Se le pasa un objeto
     // que abre un Request nuevo sobre el POOL global (independiente de tx) -- asi un fallo ahi
     // queda genuinamente aislado, tal como la funcion ya prometia en su propio comentario.
-    await abrirOReanudarBitacora({ request: () => new sql.Request() }, nMaquina, codOperario);
+    nIdBitacora = await abrirOReanudarBitacora({ request: () => new sql.Request() }, nMaquina, codOperario);
   }
 
   const fHoy = new Date();
@@ -220,10 +226,10 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
     .input('agno', nAgno).input('mes', nMes).input('dia', nDia).input('numBulto', nNumBulto)
     .input('elemento', nElemento).input('serialPadre', tSerialPadre).input('maquina', nMaquina)
     .input('idEjecucion', idEjecucion).input('numeroPedido', tNumeroPedidoBultoSQL).input('horaInicio', fHoy)
-    .input('estadoInicial', estadoInicial)
+    .input('estadoInicial', estadoInicial).input('idBitacora', nIdBitacora)
     .query(`
-      INSERT INTO SEL_Bultos (agno, mes, dia, number_paqu, num_bulto, refsalida, estado, serialArmado, serialPadre, id_maquina, id_ejecucion, NumeroPedido, HoraInicio)
-      VALUES (@agno, @mes, @dia, 0, @numBulto, @elemento, @estadoInicial, @serialPadre, @serialPadre, @maquina, @idEjecucion, @numeroPedido, @horaInicio)
+      INSERT INTO SEL_Bultos (agno, mes, dia, number_paqu, num_bulto, refsalida, estado, serialArmado, serialPadre, id_maquina, id_ejecucion, NumeroPedido, HoraInicio, IdBitacora)
+      VALUES (@agno, @mes, @dia, 0, @numBulto, @elemento, @estadoInicial, @serialPadre, @serialPadre, @maquina, @idEjecucion, @numeroPedido, @horaInicio, @idBitacora)
     `);
 
   const nTurnoBulto = await resolverTurnoPorHora(tx, nMaquina, fHoy);
@@ -245,6 +251,7 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
     .input('numeroPedido', tNumeroPedido || null)
     .input('ordenProduccion', tOrdenProduccion || null)
     .input('tipoPedido', nTipoPedidoBulto)
+    .input('idBitacora', nIdBitacora)
     .query(`
       -- FIX 03/09/2026 (a pedido del usuario -- mismo cambio que frmScanRollo.vb:CrearBultoInicial):
       -- HoraFinal ya no se inserta en NULL -- se deja igual a HoraInicio (placeholder, duracion "0"
@@ -253,10 +260,10 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
       -- el bulto, trg_SEL_Bultos_CierreBulto sobreescribe este placeholder con el HoraFinal real.
       INSERT INTO PRDProduccion (Fecha, Maquina, Turno, Duracion, Lote, Elemento, Linea, Cantidad, PesoCono, Unidades, Detalle,
         ClienteProduccion, Destino, Grafilado, Abierto, Servicio, Retal, GeneradoPor,
-        FechaModificado, HoraInicio, HoraFinal, Torta, BolsasxGolpe, TipoPedido, NumeroPedido, OrdenProduccion)
+        FechaModificado, HoraInicio, HoraFinal, Torta, BolsasxGolpe, TipoPedido, NumeroPedido, OrdenProduccion, IdBitacora)
       VALUES (@fecha, @maquina, @turno, 0, @lote, @elemento, @linea, 0, 0, 0, @serialPadre,
         @cliente, @destino, 0, 0, 0, 0, @generadoPor,
-        GETDATE(), @horaInicio, @horaInicio, 0, @bolsas, @tipoPedido, @numeroPedido, @ordenProduccion)
+        GETDATE(), @horaInicio, @horaInicio, 0, @bolsas, @tipoPedido, @numeroPedido, @ordenProduccion, @idBitacora)
     `);
 
   if (codOperario > 0) {

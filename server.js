@@ -1041,7 +1041,7 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
             <div class="orden-pedido">🔗 Pedido ${ancla.NumeroPedido || '—'} ${badgeEstadoOrden(ancla.Estado)}</div>
             <div class="orden-elemento">${referencias}</div>
             <div class="orden-elemento" style="color:var(--texto-suave);">Un solo proceso -- ${miembros.length} referencias de salida</div>
-            ${ancla.OrdenProduccion ? `<div class="orden-elemento" style="color:var(--texto-suave);">OT: ${ancla.OrdenProduccion}</div>` : ''}
+            ${ancla.OrdenProduccion ? `<div class="orden-elemento" style="color:var(--texto-suave);">OP: ${ancla.OrdenProduccion}</div>` : ''}
             ${infoFinalizadaGrupo}
           </div>
           <div class="orden-acciones">
@@ -1115,7 +1115,7 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
         <div class="orden-info">
           <div class="orden-pedido">Pedido ${o.NumeroPedido || '—'} ${badge}</div>
           <div class="orden-elemento">${o.Elemento}</div>
-          ${o.OrdenProduccion ? `<div class="orden-elemento" style="color:var(--texto-suave);">OT: ${o.OrdenProduccion}</div>` : ''}
+          ${o.OrdenProduccion ? `<div class="orden-elemento" style="color:var(--texto-suave);">OP: ${o.OrdenProduccion}</div>` : ''}
           ${infoOperarioAsignado}
           ${infoFinalizada}
         </div>
@@ -3574,7 +3574,31 @@ function scriptProtocoloArranque(maquinaCodigo) {
               '<div style="font-size:30px;font-weight:800;" id="peso-patron-leido">—<span style="font-size:16px;font-weight:600;"> kg</span></div>' +
             '</div>' +
           '</div>' +
+        '</div>' +
+        // FIX 17/09/2026 (a pedido del usuario -- pruebas desde PC sin bascula fisica conectada,
+        // pesoBasculaActual() siempre da null ahi): enlaces casi ocultos para forzar el registro sin
+        // depender de una lectura real. A proposito discretos (gris, chico) -- es un atajo de
+        // prueba, no un boton mas del flujo normal.
+        '<div style="text-align:center;margin-top:14px;">' +
+          '<a href="#" id="debug-forzar-conforme" style="font-size:10px;color:#cbd5e1;text-decoration:underline;margin-right:14px;">forzar Conforme (sin báscula)</a>' +
+          '<a href="#" id="debug-forzar-noconforme" style="font-size:10px;color:#cbd5e1;text-decoration:underline;">forzar NoConforme (sin báscula)</a>' +
         '</div>';
+
+      function forzarSinBascula(esConforme) {
+        Swal.close();
+        guardarPasoProtocolo(idOrden, { paso: paso, respuesta: esConforme ? 'Conforme' : 'NoConforme' }, function() {
+          if (esConforme) {
+            Swal.fire({ icon: 'warning', title: 'Forzado sin báscula', text: 'Se guardó Conforme sin leer una báscula real (atajo de prueba).', timer: 2400, showConfirmButton: false }).then(alTerminar);
+            return;
+          }
+          Swal.fire({
+            icon: 'error', title: 'Forzado NoConforme (sin báscula)',
+            html: 'Se guardó NoConforme como atajo de prueba.<br><br>Oprima <b>TARA</b> en el transmisor de peso, verifique el elemento patrón y vuelva a capturar.',
+            confirmButtonText: 'Volver a capturar', confirmButtonColor: '#c0392b',
+            allowOutsideClick: false, allowEscapeKey: false
+          }).then(function() { verificarBascula(idOrden, opciones); });
+        });
+      }
 
       Swal.fire({
         icon: 'info',
@@ -3594,6 +3618,10 @@ function scriptProtocoloArranque(maquinaCodigo) {
             var p = pesoBasculaActual();
             elLeido.innerHTML = (p == null ? '—' : p.toFixed(3)) + '<span style="font-size:16px;font-weight:600;"> kg</span>';
           }, 400);
+          var elForzarSi = document.getElementById('debug-forzar-conforme');
+          var elForzarNo = document.getElementById('debug-forzar-noconforme');
+          if (elForzarSi) elForzarSi.onclick = function(e) { e.preventDefault(); forzarSinBascula(true); };
+          if (elForzarNo) elForzarNo.onclick = function(e) { e.preventDefault(); forzarSinBascula(false); };
         },
         preConfirm: function() {
           var esperado = PESO_PATRON_KG;

@@ -476,11 +476,14 @@ async function obtenerOCrearOrdenProduccion(db, { elemento, fecha, lineaAncla, l
       .query(`SELECT ISNULL(MAX(Consecutivo), 0) + 1 AS NC FROM PRDOrdenesProduccion WHERE Lote = @lote AND Destino = @destino`);
     const nConsecutivo = dtCons.recordset[0].NC;
 
-    // FIX 16/09/2026 (reporte del usuario -- seguia generando "OP..." pese al renombrado de
-    // prefijo del 15/09, que solo toco codigos YA guardados en la BD, no este generador; mismo
-    // cambio portado a ObtenerOCrearOrdenProduccion en Produccion.vb): prefijo "OT" para toda
-    // Orden de Trabajo nueva de aca en adelante.
-    const tOP = `OT${lote}${String(nConsecutivo).padStart(4, '0')}${tSigla}`;
+    // REVERTIDO 18/09/2026 (a pedido del usuario, mismo cambio portado a
+    // ObtenerOCrearOrdenProduccion en Produccion.vb): se deshace el renombrado de prefijo
+    // "OP"->"OT" del 15-16/09. Vuelve a ser "OP" -- "OT" queda libre para un concepto nuevo
+    // (bitacora por turno, exclusiva de Selladora/Node, tabla aparte, pendiente de construir).
+    // Solo afecta codigos NUEVOS generados de aca en adelante; los ya guardados con prefijo
+    // "OT..." (creados entre el 15 y el 18/09) requieren una migracion de datos aparte si se
+    // quieren normalizar -- no se tocan aca.
+    const tOP = `OP${lote}${String(nConsecutivo).padStart(4, '0')}${tSigla}`;
 
     // FIX 15/09/2026 (a pedido del usuario): HoraInicioReal NO es GETDATE() -- el trabajo real
     // empieza en el alistamiento/limpieza del protocolo de arranque (pasos 1-2), que corren ANTES
@@ -830,6 +833,32 @@ async function resolverTurnoMaquina(p, maquinaCodigo, momento) {
   return { turno: elegida.codigo, descripcion: elegida.descripcion, fechaTurno: fechaISOLocal(fechaBase) };
 }
 
+// Letra de turno para el serial de la bitacora (D/V/M/T/N) -- mismo mapeo NOMTurnos ya usado en
+// Mirane (ver ConsProduccionSeguimiento.vb:LetraTurnoCodigo): 6=Mañana, 7=Tarde, 8=Noche,
+// 9=Pleno Noche, 10=Pleno Dia. Null si el codigo no se reconoce (esquema viejo 1-5, no aplica aca).
+function letraTurno(codigoTurno) {
+  switch (Number(codigoTurno)) {
+    case 6: return 'M';
+    case 7: return 'T';
+    case 8: return 'N';
+    case 9: return 'V';
+    case 10: return 'D';
+    default: return null;
+  }
+}
+
+// Serial de la bitacora / "Orden de Trabajo" (a pedido del usuario, reunion 18/09/2026 +
+// confirmacion 20/09/2026): OT + Fecha(yyyyMMdd) + SE + Maquina(2 digitos) + Letra de turno.
+// Ejemplo: OT20260917SE05D. Devuelve null si no hay turno resuelto (maquina sin horario
+// configurado) -- no se inventa la letra.
+function construirSerialBitacora(maquinaCodigo, fechaTurnoISO, turnoCodigo) {
+  const letra = letraTurno(turnoCodigo);
+  if (!letra) return null;
+  const fecha = String(fechaTurnoISO).replace(/-/g, '');
+  const maquina = String(maquinaCodigo).padStart(2, '0');
+  return `OT${fecha}SE${maquina}${letra}`;
+}
+
 async function cerrarBitacora(p, idBitacora, motivo) {
   await p.request().input('id', idBitacora).input('motivo', motivo).query(
     `UPDATE SEL_BitacoraTurno SET HoraCierre = GETDATE(), MotivoCierre = @motivo
@@ -837,16 +866,16 @@ async function cerrarBitacora(p, idBitacora, motivo) {
   );
 }
 
-// Abre la bitacora del turno, o REUSA la que ya este abierta si es del mismo operario y del mismo
-// turno. Se llama desde "Iniciar" (crearBultoInicial, scan-rollo.js) y desde "tomar control de la
-// maquina" (tomar-control-ejecucion, server.js) -- los dos puntos donde el operario pasa a ser el
-// dueño de la maquina.
+// Abre la bitacora del turno, o REUSA la que ya este abierta si es del mismo turno (SIN importar
+// el operario -- ver FIX 20/09/2026 abajo). Se llama desde "Iniciar" (crearBultoInicial,
+// scan-rollo.js) y desde "tomar control de la maquina" (tomar-control-ejecucion, server.js) -- los
+// dos puntos donde el operario pasa a ser el dueño de la maquina.
 //
 // Lo de reusar es un requisito explicito del usuario (12/09/2026): "no cuando el operario cierra
 // sesion porque puede pasar que se vaya el internet o retome la orden". Un corte de red, un
 // re-login o volver a tomar control a mitad del turno NO pueden partir la bitacora en dos.
-// Por eso tampoco hay nada que cierre la bitacora en /logout: solo la cierra un RELEVO (otro
-// operario toma la maquina) o el CAMBIO DE TURNO.
+// Por eso tampoco hay nada que cierre la bitacora en /logout: solo la cierra el CAMBIO DE TURNO
+// (un relevo de operario dentro del MISMO turno ya NO la cierra, ver FIX 20/09/2026).
 //
 // Nunca revienta hacia afuera: si algo falla, se registra en consola y el operario igual toma
 // control de la maquina. La bitacora es un registro, no puede bloquear la produccion.
@@ -862,23 +891,37 @@ async function abrirOReanudarBitacora(p, maquinaCodigo, operarioCodigo) {
 
     if (dtAbierta.recordset.length > 0) {
       const abierta = dtAbierta.recordset[0];
-      const mismoOperario = abierta.Operario === operarioCodigo;
       // Turno en null a los dos lados tambien cuenta como "el mismo" -- si no, una maquina sin
       // horarios abriria una bitacora nueva en cada toma de control.
       const mismoTurno = (abierta.Turno == null ? null : Number(abierta.Turno)) === turnoAhora.turno
         && abierta.FechaTurno === turnoAhora.fechaTurno;
-      if (mismoOperario && mismoTurno) return abierta.IdBitacora;  // retome: la misma bitacora sigue
-      await cerrarBitacora(p, abierta.IdBitacora, mismoOperario ? 'cambio_turno' : 'relevo');
+      // FIX 20/09/2026 (a pedido del usuario, reunion 18/09 -- el serial final de la OT/bitacora
+      // quedo como "OT+Fecha+Maquina+Turno", SIN operario en la llave -- se descarto por "muy
+      // enredado" partir la OT cuando cambia el operario dentro del mismo turno): un relevo YA NO
+      // cierra la bitacora, solo el cambio de turno/fecha la cierra. Varios operarios pueden
+      // convivir en la misma bitacora -- quien hizo cada bulto se sigue viendo por bulto
+      // (SEL_Bultos/SEL_EjecucionOrden.Operario, PRDProduccionOperarios), igual que ya se ajusto en
+      // el reporte de seguimiento. El "protocolo de relevo" (limpieza/alistamiento que debe repetir
+      // el operario entrante, SEL_ProtocoloArranque paso 'relevo') sigue intacto -- es un control de
+      // calidad/seguridad aparte, no tiene que ver con la identidad de la bitacora.
+      if (mismoTurno) return abierta.IdBitacora;  // sigue la misma bitacora del turno, sin importar el operario
+      await cerrarBitacora(p, abierta.IdBitacora, 'cambio_turno');
     }
 
+    // FIX 20/09/2026 (a pedido del usuario, reunion 18/09): serial nuevo de la OT/bitacora, ver
+    // construirSerialBitacora. Requiere sql/pendientes/20260920_agregar_serial_bitacora_turno.sql
+    // -- si esa columna todavia no existe, el INSERT de abajo falla y cae al catch de siempre (no
+    // bloquea Iniciar/tomar control, ver comentario de la funcion).
+    const serial = construirSerialBitacora(maquinaCodigo, turnoAhora.fechaTurno, turnoAhora.turno);
     const dtNueva = await p.request()
       .input('maquina', maquinaCodigo).input('operario', operarioCodigo)
       .input('turno', turnoAhora.turno).input('fechaTurno', turnoAhora.fechaTurno)
+      .input('serial', serial)
       .query(`
         DECLARE @Insertados TABLE (Id INT);
-        INSERT INTO SEL_BitacoraTurno (Maquina, Operario, Turno, FechaTurno)
+        INSERT INTO SEL_BitacoraTurno (Maquina, Operario, Turno, FechaTurno, Serial)
         OUTPUT INSERTED.IdBitacora INTO @Insertados
-        VALUES (@maquina, @operario, @turno, @fechaTurno);
+        VALUES (@maquina, @operario, @turno, @fechaTurno, @serial);
         SELECT Id FROM @Insertados;
       `);
     return dtNueva.recordset[0].Id;
