@@ -847,16 +847,34 @@ function letraTurno(codigoTurno) {
   }
 }
 
+// FIX 22/09/2026 (bug real encontrado por el usuario -- comparó contra el catalogo completo de
+// PRDMaquinas): el numero de la selladora en el serial NO es el Codigo interno de PRDMaquinas --
+// casi nunca coinciden (ej. Codigo=7 es "SELLADORA 05", Codigo=34 es "SELLADORA 19"). El numero
+// real es el que trae el propio Nombre ("SELLADORA 05" -> "05"). Se saca de ahi, no de @maquina.
+// Devuelve null si la maquina no tiene un numero al final del Nombre (ej. "EXTRUSORA PP") -- la
+// bitacora es exclusiva de Selladora por ahora (reunion 18/09: "solamente aplica para el PLC"),
+// asi que en la practica esto siempre resuelve para selladoras, que sí siguen el patron "NOMBRE NN".
+async function numeroMaquinaParaSerial(p, maquinaCodigo) {
+  const dt = await p.request().input('maquina', maquinaCodigo).query(
+    `SELECT Nombre FROM PRDMaquinas WHERE Codigo = @maquina`
+  );
+  if (dt.recordset.length === 0) return null;
+  const m = String(dt.recordset[0].Nombre).match(/(\d+)\s*$/);
+  return m ? m[1].padStart(2, '0') : null;
+}
+
 // Serial de la bitacora / "Orden de Trabajo" (a pedido del usuario, reunion 18/09/2026 +
-// confirmacion 20/09/2026): OT + Fecha(yyyyMMdd) + SE + Maquina(2 digitos) + Letra de turno.
-// Ejemplo: OT20260917SE05D. Devuelve null si no hay turno resuelto (maquina sin horario
-// configurado) -- no se inventa la letra.
-function construirSerialBitacora(maquinaCodigo, fechaTurnoISO, turnoCodigo) {
+// confirmacion 20/09/2026): OT + Fecha(yyyyMMdd) + SE + Numero de la maquina (del Nombre, ver
+// numeroMaquinaParaSerial) + Letra de turno. Ejemplo: OT20260917SE05D. Devuelve null si no hay
+// turno resuelto (maquina sin horario configurado) o si no se pudo sacar el numero del Nombre --
+// no se inventa ninguno de los dos.
+async function construirSerialBitacora(p, maquinaCodigo, fechaTurnoISO, turnoCodigo) {
   const letra = letraTurno(turnoCodigo);
   if (!letra) return null;
+  const numeroMaquina = await numeroMaquinaParaSerial(p, maquinaCodigo);
+  if (!numeroMaquina) return null;
   const fecha = String(fechaTurnoISO).replace(/-/g, '');
-  const maquina = String(maquinaCodigo).padStart(2, '0');
-  return `OT${fecha}SE${maquina}${letra}`;
+  return `OT${fecha}SE${numeroMaquina}${letra}`;
 }
 
 async function cerrarBitacora(p, idBitacora, motivo) {
@@ -912,7 +930,7 @@ async function abrirOReanudarBitacora(p, maquinaCodigo, operarioCodigo) {
     // construirSerialBitacora. Requiere sql/pendientes/20260920_agregar_serial_bitacora_turno.sql
     // -- si esa columna todavia no existe, el INSERT de abajo falla y cae al catch de siempre (no
     // bloquea Iniciar/tomar control, ver comentario de la funcion).
-    const serial = construirSerialBitacora(maquinaCodigo, turnoAhora.fechaTurno, turnoAhora.turno);
+    const serial = await construirSerialBitacora(p, maquinaCodigo, turnoAhora.fechaTurno, turnoAhora.turno);
     const dtNueva = await p.request()
       .input('maquina', maquinaCodigo).input('operario', operarioCodigo)
       .input('turno', turnoAhora.turno).input('fechaTurno', turnoAhora.fechaTurno)
