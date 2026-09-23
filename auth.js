@@ -14,7 +14,8 @@ async function validarLogin(pool, codigo, passwordEscrito) {
   const result = await pool.request()
     .input('codigo', codigo)
     .query(`
-      SELECT Codigo, Clave, CAST(Clave AS VARBINARY(50)) AS ClaveBin, Nombre, Estado, Tercero, CodigoOperarioPRD
+      SELECT Codigo, Clave, CAST(Clave AS VARBINARY(50)) AS ClaveBin, Nombre, Estado, Tercero, CodigoOperarioPRD,
+             IdCargo, Cargo
       FROM SISUsuarios
       WHERE Codigo = @codigo
     `);
@@ -31,7 +32,9 @@ async function validarLogin(pool, codigo, passwordEscrito) {
     codigo: usuario.Codigo,
     nombre: usuario.Nombre || usuario.Codigo,
     generadoPor: usuario.Tercero,
-    codigoOperarioPRD: usuario.CodigoOperarioPRD || null
+    codigoOperarioPRD: usuario.CodigoOperarioPRD || null,
+    idCargo: usuario.IdCargo != null ? Number(usuario.IdCargo) : null,
+    cargo: usuario.Cargo || null
   };
 }
 
@@ -52,4 +55,51 @@ function requireAdmin(req, res, next) {
   res.status(403).send('Acceso restringido al usuario administrador.');
 }
 
-module.exports = { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO };
+// ---------------------------------------------------------------------------------------------
+// Autorizacion de un pedido por un lider (22/09/2026). Ver SEL_AutorizacionPedido.
+//
+// Son los TRES cargos que el usuario definio, por IdCargo de SISCargos y NO por el texto del
+// cargo: en SISUsuarios conviven 'Lider de Sellado' con tilde y 'Lider de Impresion' sin ella, asi
+// que comparar textos deja lideres por fuera en cuanto alguien escriba una tilde distinta.
+//
+// Si manana hay que sumar o quitar un cargo, se cambia ESTA lista y nada mas -- el servidor la
+// exporta a la tableta para pintar el mensaje de "quien puede autorizar", asi que no hay una
+// segunda copia que se pueda desincronizar.
+const CARGOS_AUTORIZAN_PEDIDO = [
+  { idCargo: 16, nombre: 'Director de Calidad e Inocuidad' },
+  { idCargo: 27, nombre: 'Jefe de Planta' },
+  { idCargo: 31, nombre: 'Lider de Sellado' }
+];
+
+// Valida usuario+clave y ADEMAS que tenga uno de los cargos de arriba.
+//
+// Devuelve { ok: true, usuario } o { ok: false, error }. A diferencia de validarLogin (que
+// devuelve null para todo fallo), aca se distingue la causa: "esa clave no es" y "usted no tiene
+// el cargo" son dos problemas distintos para quien esta parado frente a la tableta, y mezclarlos
+// hace que un lider con el cargo mal puesto se quede intentando su contrasena una y otra vez.
+async function validarAutorizadorPedido(pool, codigo, passwordEscrito) {
+  const tCodigo = (codigo || '').trim();
+  if (!tCodigo || !passwordEscrito) {
+    return { ok: false, error: 'Escriba usuario y contraseña.' };
+  }
+
+  // validarLogin ya resuelve el descifrado TripleDES y el Estado != 'Activo'.
+  const usuario = await validarLogin(pool, tCodigo, passwordEscrito);
+  if (!usuario) {
+    return { ok: false, error: 'Usuario o contraseña incorrectos.' };
+  }
+
+  const permitido = CARGOS_AUTORIZAN_PEDIDO.find(c => c.idCargo === usuario.idCargo);
+  if (!permitido) {
+    return {
+      ok: false,
+      error: `${usuario.nombre} no puede autorizar: su cargo es "${usuario.cargo || 'sin cargo asignado'}". ` +
+             `Solo pueden ${CARGOS_AUTORIZAN_PEDIDO.map(c => c.nombre).join(', ')}.`
+    };
+  }
+
+  return { ok: true, usuario: { ...usuario, cargoAutorizado: permitido.nombre } };
+}
+
+module.exports = { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO,
+                   validarAutorizadorPedido, CARGOS_AUTORIZAN_PEDIDO };

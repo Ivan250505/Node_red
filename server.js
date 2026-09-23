@@ -6,7 +6,8 @@ const express = require('express');
 const session = require('express-session');
 const sql = require('mssql');
 const { desencriptar } = require('./crypto-mirane');
-const { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO } = require('./auth');
+const { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO,
+        validarAutorizadorPedido, CARGOS_AUTORIZAN_PEDIDO } = require('./auth');
 const { registrarEvento } = require('./accesos');
 const { consultarSerial, confirmarRollo, alternarReferenciaGrupo, materializarInicioOrden } = require('./scan-rollo');
 const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
@@ -987,6 +988,8 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptNotificaciones(null)}</script>
+  <script>${scriptAutorizacion()}</script>
+  <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(null)}</script>
   ${error ? `<script>Swal.fire({ icon: 'error', title: 'Error', text: ${jsString(error)}, confirmButtonColor: '#71bf44' });</script>` : ''}
 </body>
@@ -2789,6 +2792,249 @@ function abrirCalidad() {
 // AJUSTE_CANTIDAD_CONSUMIDA_ROLLO_18092026.md). Dos ventanas: la lista de rollos de la orden y el
 // teclado para digitar C. Se usa igual desde la pagina de una referencia suelta y desde la de un
 // grupo -- el endpoint resuelve solo el ancla bajo la que vive la materia prima.
+// Observaciones libres del operario (22/09/2026). Se inyecta en las SEIS paginas con encabezado,
+// porque la mitad de su trabajo (interceptar "Cerrar sesion") tiene que pasar en todas -- no solo
+// donde esta el boton. Ver SEL_ObservacionOperario y los endpoints /observacion y /mi-orden-activa.
+// Autorizacion de un pedido por un lider (22/09/2026). Se inyecta en las mismas paginas que
+// scriptObservaciones() porque sus dos consumidores viven en sitios distintos: el boton y el
+// Finalizar estan en la pagina del pedido, pero el bloqueo de "Cerrar sesion" tiene que existir en
+// todas. Ver SEL_AutorizacionPedido y los endpoints /autorizacion.
+//
+// OJO: lo de aca es para EXPLICAR, no para proteger. El bloqueo de verdad esta en el servidor
+// (POST /finalizar y GET /logout); esta pantalla solo evita que el operario llegue hasta alla para
+// recibir un error.
+function scriptAutorizacion() {
+  return `
+    function estadoAutorizacion(idOrden) {
+      return fetch('/api/selladora/orden/' + idOrden + '/autorizacion')
+        .then(function(r) { return r.json(); });
+    }
+
+    // Ventana de firma: usuario + clave de un lider. Resuelve true si quedo firmado.
+    function pedirFirmaAutorizacion(idOrden, datos) {
+      var cargos = (datos.cargosPermitidos || []).join(', ');
+      return Swal.fire({
+        title: '🔑 Autorización del pedido',
+        html: '<div style="text-align:left;font-size:14px;">' +
+                '<div style="background:#fff4e5;border-left:5px solid #f39c12;padding:10px 12px;border-radius:8px;margin-bottom:14px;">' +
+                  'Pedido <b>' + datos.pedido + '</b>. Esta firma se pide <b>una sola vez por pedido</b> y ' +
+                  'es la que permite finalizarlo y cerrar sesión.' +
+                '</div>' +
+                '<label style="display:block;font-weight:600;margin-bottom:4px;">Usuario</label>' +
+                '<input id="aut-usuario" class="swal2-input" style="margin:0 0 10px;width:100%;" ' +
+                  'autocapitalize="characters" autocomplete="off" spellcheck="false">' +
+                '<label style="display:block;font-weight:600;margin-bottom:4px;">Contraseña</label>' +
+                '<input id="aut-clave" type="password" class="swal2-input" style="margin:0;width:100%;" autocomplete="off">' +
+                '<div style="font-size:12px;color:#64748b;margin-top:10px;">Solo pueden autorizar: ' + cargos + '.</div>' +
+              '</div>',
+        width: 480,
+        showCancelButton: true,
+        confirmButtonText: 'Autorizar',
+        confirmButtonColor: '#71bf44',
+        cancelButtonText: 'Cancelar',
+        cancelButtonColor: '#c0392b',
+        allowOutsideClick: false,
+        didOpen: function() {
+          var u = document.getElementById('aut-usuario');
+          if (u) u.focus();
+        },
+        preConfirm: function() {
+          var codigo = (document.getElementById('aut-usuario').value || '').trim();
+          var clave = document.getElementById('aut-clave').value || '';
+          if (!codigo || !clave) { Swal.showValidationMessage('Escriba usuario y contraseña.'); return false; }
+          Swal.showLoading();
+          return fetch('/api/selladora/orden/' + idOrden + '/autorizacion', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ codigo: codigo, password: clave })
+          })
+            .then(function(r) { return r.json(); })
+            .then(function(resp) {
+              // El error del servidor se muestra DENTRO de la ventana, sin cerrarla: asi el lider
+              // corrige la clave sin tener que volver a abrir todo el flujo.
+              if (!resp.ok) { Swal.showValidationMessage(resp.error || 'No se pudo autorizar.'); return false; }
+              return resp;
+            })
+            .catch(function() { Swal.showValidationMessage('Error de conexión.'); return false; });
+        }
+      }).then(function(r) {
+        if (!r.isConfirmed || !r.value) return false;
+        return Swal.fire({
+          icon: 'success', title: 'Pedido autorizado',
+          html: 'Firmó <b>' + r.value.firma.nombre + '</b><br>' +
+                '<span style="font-size:13px;color:#64748b;">' + (r.value.firma.cargo || '') + '</span>',
+          timer: 2200, showConfirmButton: false
+        }).then(function() { return true; });
+      });
+    }
+
+    // Puerta unica: devuelve una promesa que resuelve true SOLO si el pedido quedo autorizado.
+    // La usan el Finalizar y el cierre de sesion.
+    function exigirAutorizacion(idOrden) {
+      return estadoAutorizacion(idOrden).then(function(datos) {
+        if (!datos.ok) {
+          return Swal.fire({ icon: 'error', title: 'No se pudo comprobar', text: datos.error, confirmButtonColor: '#71bf44' })
+            .then(function() { return false; });
+        }
+        if (datos.autorizado) return true;
+        return pedirFirmaAutorizacion(idOrden, datos);
+      }).catch(function() {
+        return Swal.fire({ icon: 'error', title: 'Error de conexión', text: 'No se pudo comprobar la autorización.', confirmButtonColor: '#71bf44' })
+          .then(function() { return false; });
+      });
+    }
+
+    // El boton de la pantalla. Se puede usar en cualquier momento, antes de finalizar o de salir.
+    function abrirAutorizacion(idOrden) {
+      estadoAutorizacion(idOrden).then(function(datos) {
+        if (!datos.ok) {
+          Swal.fire({ icon: 'error', title: 'No se pudo comprobar', text: datos.error, confirmButtonColor: '#71bf44' });
+          return;
+        }
+        if (!datos.autorizado) { pedirFirmaAutorizacion(idOrden, datos); return; }
+        // Ya firmado: se muestra quien y cuando, y se deja volver a firmar (la tabla guarda la
+        // historia, no sobreescribe) por si hubo que revisar el pedido otra vez.
+        var f = datos.firma;
+        var cuando = f.fecha ? new Date(f.fecha).toLocaleString() : '—';
+        Swal.fire({
+          icon: 'success',
+          title: 'Pedido ya autorizado',
+          html: '<div style="text-align:left;font-size:14px;">' +
+                  '<div>Pedido <b>' + datos.pedido + '</b></div>' +
+                  '<div style="margin-top:8px;">Firmó <b>' + (f.nombre || f.usuario) + '</b></div>' +
+                  '<div style="font-size:13px;color:#64748b;">' + (f.cargo || '') + '</div>' +
+                  '<div style="font-size:13px;color:#64748b;margin-top:6px;">' + cuando + '</div>' +
+                '</div>',
+          showCancelButton: true,
+          confirmButtonText: 'Cerrar', confirmButtonColor: '#71bf44',
+          cancelButtonText: 'Volver a autorizar', cancelButtonColor: '#0078d7'
+        }).then(function(r) {
+          if (r.dismiss === Swal.DismissReason.cancel) pedirFirmaAutorizacion(idOrden, datos);
+        });
+      });
+    }
+  `;
+}
+
+function scriptObservaciones() {
+  return `
+    // Ventana de escritura. Devuelve una promesa que resuelve en true si se guardo, false si el
+    // operario salio sin escribir. 'opciones' permite reusarla para las dos puertas de entrada:
+    //   - titulo/texto  : cambian segun quien la abre.
+    //   - origen        : 'Manual' (boton) o 'CierreSesion' (al salir).
+    //   - botonOmitir   : etiqueta del boton de "no escribir" -- null para no mostrarlo.
+    function ventanaObservacion(idOrden, opciones) {
+      var o = opciones || {};
+      return Swal.fire({
+        title: o.titulo || 'Observación',
+        html: o.texto ? '<div style="font-size:14px;color:#57606a;margin-bottom:10px;">' + o.texto + '</div>' : '',
+        input: 'textarea',
+        inputPlaceholder: 'Escriba lo que observó (máquina, material, calidad, lo que sea)…',
+        inputAttributes: { maxlength: 500, 'aria-label': 'Observación' },
+        showCancelButton: true,
+        showDenyButton: !!o.botonOmitir,
+        confirmButtonText: o.botonGuardar || 'Guardar',
+        confirmButtonColor: '#71bf44',
+        denyButtonText: o.botonOmitir || '',
+        denyButtonColor: '#8b949e',
+        cancelButtonText: 'Cancelar',
+        cancelButtonColor: '#c0392b',
+        allowOutsideClick: false,
+        // Sin esto una observacion vacia se guardaria como fila en blanco, que es peor que no
+        // tener fila: aparece en el reporte y no dice nada.
+        preConfirm: function(valor) {
+          var t = (valor || '').trim();
+          if (!t) { Swal.showValidationMessage('Escriba la observación o use el otro botón.'); return false; }
+          return t;
+        }
+      }).then(function(r) {
+        if (r.isDenied) return false;   // "salir sin escribir"
+        if (!r.isConfirmed) return null; // cancelar: se queda donde estaba
+        return fetch('/api/selladora/orden/' + idOrden + '/observacion', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ observacion: r.value, origen: o.origen || 'Manual' })
+        })
+          .then(function(resp) { return resp.json(); })
+          .then(function(datos) {
+            if (!datos.ok) {
+              return Swal.fire({ icon: 'error', title: 'No se pudo guardar', text: datos.error, confirmButtonColor: '#71bf44' })
+                .then(function() { return null; });
+            }
+            return true;
+          })
+          .catch(function() {
+            return Swal.fire({ icon: 'error', title: 'Error de conexión', text: 'No se pudo guardar la observación.', confirmButtonColor: '#71bf44' })
+              .then(function() { return null; });
+          });
+      });
+    }
+
+    // Puerta 1: el boton de la pantalla de la orden.
+    function abrirObservacion(idOrden) {
+      ventanaObservacion(idOrden, { titulo: '📝 Registrar observación', origen: 'Manual' })
+        .then(function(guardo) {
+          if (guardo === true) {
+            Swal.fire({ icon: 'success', title: 'Observación registrada', timer: 1600, showConfirmButton: false });
+          }
+        });
+    }
+
+    // Puerta 2: "Cerrar sesion". Si el operario tiene una orden Activa a su nombre se le pregunta
+    // antes de salir; si no, la salida es la de siempre y no se nota ningun cambio.
+    //
+    // REGLA: esto NUNCA puede dejar a nadie encerrado en la tableta. Cualquier fallo (endpoint
+    // caido, Swal sin cargar, red) termina en location.href = '/logout', igual que el enlace crudo.
+    function engancharSalidaConObservacion() {
+      var enlaces = document.querySelectorAll('a.salir');
+      if (!enlaces.length) return;
+      enlaces.forEach(function(enlace) {
+        enlace.addEventListener('click', function(evento) {
+          if (typeof Swal === 'undefined') return; // sin Swal: que el enlace funcione como siempre
+          evento.preventDefault();
+          var salir = function() { location.href = '/logout'; };
+          fetch('/api/mi-orden-activa')
+            .then(function(r) { return r.json(); })
+            .then(function(datos) {
+              if (!datos.ok || !datos.orden) return salir();
+              // Primero la FIRMA (22/09/2026): sin ella el servidor no deja cerrar sesion con un
+              // pedido activo, asi que preguntar por la observacion antes seria hacerle escribir al
+              // operario algo que despues no lo va a dejar salir igual. Si no se firma, se queda.
+              exigirAutorizacion(datos.orden.idOrden).then(function(autorizado) {
+                if (!autorizado) return;
+                preguntarObservacionYSalir(datos.orden, salir);
+              });
+            })
+            .catch(salir);
+        });
+      });
+    }
+
+    // La observacion de salida, ya con el pedido autorizado. Separada para que el encadenado de
+    // arriba se lea de corrido: firma -> observacion -> salir.
+    function preguntarObservacionYSalir(orden, salir) {
+      ventanaObservacion(orden.idOrden, {
+        titulo: '¿Alguna observación antes de salir?',
+        texto: 'Va a cerrar sesión con el pedido <b>' + orden.pedido + '</b> activo en ' +
+               orden.maquina + '. Si pasó algo en el turno, déjelo escrito aquí.',
+        origen: 'CierreSesion',
+        botonGuardar: 'Registrar y salir',
+        botonOmitir: 'Salir sin observación'
+      }).then(function(resultado) {
+        // true  -> se guardo, sale. false -> eligio no escribir, sale.
+        // null  -> cancelo o fallo el guardado: se queda, que es lo que pidio.
+        if (resultado === true || resultado === false) salir();
+      });
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', engancharSalidaConObservacion);
+    } else {
+      engancharSalidaConObservacion();
+    }
+  `;
+}
+
 function scriptAjusteConsumo() {
   return `
     function kg(n) { return (Number(n) || 0).toFixed(2); }
@@ -2953,6 +3199,42 @@ function scriptConfirmarFinalizar() {
   return `
     function confirmarFinalizar(evento, formulario) {
       evento.preventDefault();
+
+      // Sin la firma del lider no tiene sentido ni preguntar (22/09/2026): el POST lo rechazaria el
+      // servidor. Se pide primero y solo si queda firmada se sigue con la confirmacion de siempre.
+      //
+      // El IdOrden sale del ACTION del formulario y no de una variable del servidor: esta funcion
+      // se genera una sola vez por pagina (scriptConfirmarFinalizar() no recibe parametros) pero la
+      // cola de la maquina pinta un formulario de Finalizar por cada orden. Cerrar sobre un id fijo
+      // firmaria siempre el mismo pedido sin importar en cual se apreto.
+      // Se parte la ruta en vez de usar una expresion regular: dentro de un template literal cada
+      // backslash hay que escribirlo doble, y el que se escribe de menos no da error -- se pierde
+      // en silencio y deja un regex que parece correcto pero no captura nada. Partir por barras no
+      // tiene esa trampa (y este comentario, por lo mismo, no lleva ni un backslash).
+      var partes = String(formulario.action || '').split('/');
+      var iOrden = partes.indexOf('orden');
+      var idOrdenFin = (iOrden >= 0 && partes[iOrden + 1]) ? Number(partes[iOrden + 1]) : 0;
+      if (!idOrdenFin) {
+        // Sin id no se puede comprobar nada aqui; se deja seguir y que decida el servidor, que
+        // tiene su propia guardia. Nunca se traga el Finalizar en silencio.
+        confirmarFinalizarPaso2(formulario);
+        return false;
+      }
+
+      if (typeof exigirAutorizacion !== 'function') {
+        // Pagina sin el script de autorizacion cargado: igual que arriba, decide el servidor.
+        confirmarFinalizarPaso2(formulario);
+        return false;
+      }
+
+      exigirAutorizacion(idOrdenFin).then(function(autorizado) {
+        if (!autorizado) return;
+        confirmarFinalizarPaso2(formulario);
+      });
+      return false;
+    }
+
+    function confirmarFinalizarPaso2(formulario) {
       Swal.fire({
         icon: 'warning',
         title: '¿Finalizar este proceso?',
@@ -2963,7 +3245,6 @@ function scriptConfirmarFinalizar() {
         confirmButtonColor: '#c00000',
         cancelButtonColor: '#71bf44'
       }).then(resultado => { if (resultado.isConfirmed) formulario.submit(); });
-      return false;
     }
 
     function confirmarTomarControlEjecucion(evento, formulario, esElMismo, nombreOperarioAnterior) {
@@ -3959,6 +4240,8 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptNotificaciones(maquinaCodigo)}</script>
+  <script>${scriptAutorizacion()}</script>
+  <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
@@ -4049,6 +4332,8 @@ function renderTabletFija(usuario, maquinas, maquinaActual, error) {
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptNotificaciones(null)}</script>
+  <script>${scriptAutorizacion()}</script>
+  <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(null)}</script>
   ${error ? `<script>Swal.fire({ icon: 'error', title: 'Error', text: ${jsString(error)}, confirmButtonColor: '#71bf44' });</script>` : ''}
 </body>
@@ -4192,6 +4477,20 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   // se sabe cuanto se consumio; despues (Finalizada) el digitador ya cerro el proceso y calculo la
   // merma con estos mismos kilos -- corregirlos ahi descuadraria una merma ya cerrada, igual que
   // pasa con "Volver a pesar" y con la correccion de bolsas.
+  // Observacion libre del operario (22/09/2026). Sin condicion de estado a proposito: lo que el
+  // operario vio no depende de si la orden esta corriendo o ya se finalizo, y anotar nunca cambia
+  // nada -- solo agrega una fila a SEL_ObservacionOperario. La OTRA puerta de entrada es la
+  // pregunta al cerrar sesion, que vive en scriptObservaciones() y sale en todas las paginas.
+  const botonObservacion = `<button type="button" class="btn-accion btn-isla btn-info"
+         onclick="abrirObservacion(${orden.IdOrden})">📝 Observación</button>`;
+
+  // Autorizacion del pedido (22/09/2026). Se puede firmar en cualquier momento; es obligatoria
+  // antes de Finalizar y antes de cerrar sesion con el pedido activo. El boton no cambia de
+  // aspecto segun este firmado o no: el estado se consulta al abrirlo, porque esta pagina se
+  // pinta una vez y la firma puede llegar desde otra tableta mientras esta abierta.
+  const botonAutorizacion = `<button type="button" class="btn-accion btn-isla btn-info"
+         onclick="abrirAutorizacion(${orden.IdOrden})">🔑 Autorización</button>`;
+
   const botonAjusteConsumo = orden.Estado === 'PendienteValidacion'
     ? `<button type="button" class="btn-accion btn-isla btn-info" style="margin-bottom:10px;"
          onclick="abrirAjusteConsumo(${orden.IdOrden})">⚖ Ajustar consumo de rollo</button>`
@@ -4356,6 +4655,20 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
         </div>
         <a class="btn-accion btn-isla btn-info" href="/selladora/${maquinaCodigo}/orden/${orden.IdOrden}/bultos">📦 Ver bultos</a>
       </div>
+      <div class="isla isla-con-boton">
+        <div class="isla-texto">
+          <div class="label">Observaciones</div>
+          <div class="isla-detalle">Deje por escrito lo que vio en el turno</div>
+        </div>
+        ${botonObservacion}
+      </div>
+      <div class="isla isla-con-boton">
+        <div class="isla-texto">
+          <div class="label">Autorización del pedido</div>
+          <div class="isla-detalle">Necesaria para finalizar y para cerrar sesión</div>
+        </div>
+        ${botonAutorizacion}
+      </div>
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Especificaciones</h2>
     <div class="ejecucion-box"><div class="ejecucion-grid">${especificaciones}</div></div>
@@ -4365,6 +4678,8 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptNotificaciones(maquinaCodigo)}</script>
+  <script>${scriptAutorizacion()}</script>
+  <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
@@ -5030,6 +5345,8 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, usu
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptNotificaciones(maquinaCodigo)}</script>
+  <script>${scriptAutorizacion()}</script>
+  <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
   <script>${scriptReimprimir(orden.IdOrden, maquinaCodigo)}</script>
   <script>${scriptTraslado(orden.IdOrden, maquinaCodigo)}</script>
@@ -5061,6 +5378,42 @@ app.post('/login', async (req, res) => {
 
 app.get('/logout', async (req, res) => {
   const usuario = req.session && req.session.usuario;
+
+  // Sin la firma del lider no se cierra sesion con un pedido activo (22/09/2026). Igual que en
+  // Finalizar, el bloqueo tiene que estar aqui y no solo en el modal: /logout es un enlace, y
+  // escribirlo en la barra de direcciones saltaria cualquier guardia que viviera en la pantalla.
+  //
+  // NUNCA deja a nadie encerrado por un fallo tecnico: si la consulta revienta (base caida, script
+  // SQL sin correr) se deja salir, que es como se comportaba antes de que esto existiera. Lo que
+  // se bloquea es la salida SIN firma, no la salida cuando no se pudo comprobar.
+  if (usuario && usuario.codigoOperarioPRD) {
+    try {
+      const p = await getPool();
+      const dtActiva = await p.request().input('operario', usuario.codigoOperarioPRD).query(`
+        SELECT TOP 1 ord.IdOrden, ord.NumeroPedido, ord.Maquina
+        FROM SEL_EjecucionOrden eje
+        INNER JOIN SEL_OrdenProduccion ord ON ord.IdOrden = eje.IdOrden
+        WHERE eje.Operario = @operario AND eje.Estado = 'Activa'
+        ORDER BY eje.IdEjecucion DESC
+      `);
+      if (dtActiva.recordset.length > 0) {
+        const activa = dtActiva.recordset[0];
+        const firma = await obtenerAutorizacionPedido(p, activa.NumeroPedido);
+        if (!firma) {
+          const maquinaCodigo = await obtenerCodigoMaquinaDeOrden(p, activa.IdOrden).catch(() => null);
+          return res.status(403).send(renderErrorSimple(
+            `No puede cerrar sesión: el pedido ${activa.NumeroPedido} sigue activo y todavía no tiene la ` +
+            `autorización de un líder. Pídala con el botón "Autorización" de la pantalla del pedido. ` +
+            `Pueden autorizarla: ` + CARGOS_AUTORIZAN_PEDIDO.map(c => c.nombre).join(', ') + '.',
+            maquinaCodigo ? `/selladora/${maquinaCodigo}` : '/'
+          ));
+        }
+      }
+    } catch (err) {
+      console.error('No se pudo comprobar la autorización antes de cerrar sesión:', err.message);
+    }
+  }
+
   try {
     if (usuario) {
       const p = await getPool();
@@ -6068,6 +6421,24 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
   // que miembro se pida: resolverAnclaMateriaPrima lo redirige solo. Se usa el primer miembro en
   // PendienteValidacion porque el Finalizar pasa a las 3 referencias juntas.
   const miembroParaAjuste = (miembros || []).find(m => m.Estado === 'PendienteValidacion') || null;
+  // Observacion libre del operario (22/09/2026). Sin condicion de estado a proposito: lo que el
+  // operario vio no depende de si la orden esta corriendo o ya se finalizo, y anotar nunca cambia
+  // nada -- solo agrega una fila a SEL_ObservacionOperario. La OTRA puerta de entrada es la
+  // pregunta al cerrar sesion, que vive en scriptObservaciones() y sale en todas las paginas.
+  const miembroParaObservacion = miembroAncla || (miembros || [])[0] || null;
+  const botonObservacion = miembroParaObservacion
+    ? `<button type="button" class="btn-accion btn-isla btn-info"
+         onclick="abrirObservacion(${miembroParaObservacion.IdOrden})">📝 Observación</button>`
+    : '';
+
+  // Autorizacion del pedido (22/09/2026). Se puede firmar en cualquier momento; es obligatoria
+  // antes de Finalizar y antes de cerrar sesion con el pedido activo. El boton no cambia de
+  // aspecto segun este firmado o no: el estado se consulta al abrirlo, porque esta pagina se
+  // pinta una vez y la firma puede llegar desde otra tableta mientras esta abierta.
+  const botonAutorizacion = miembroParaObservacion
+    ? `<button type="button" class="btn-accion btn-isla btn-info"
+         onclick="abrirAutorizacion(${miembroParaObservacion.IdOrden})">🔑 Autorización</button>`
+    : '';
   const botonAjusteConsumo = miembroParaAjuste
     ? `<button type="button" class="btn-accion btn-isla btn-info" style="margin-bottom:10px;"
          onclick="abrirAjusteConsumo(${miembroParaAjuste.IdOrden})">⚖ Ajustar consumo de rollo</button>`
@@ -6154,6 +6525,20 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
         </div>
         <a class="btn-accion btn-isla btn-info" href="/selladora/${maquinaCodigo}/grupo/${idGrupo}/bultos">📦 Ver bultos</a>
       </div>
+      ${botonObservacion ? `<div class="isla isla-con-boton">
+        <div class="isla-texto">
+          <div class="label">Observaciones</div>
+          <div class="isla-detalle">Deje por escrito lo que vio en el turno</div>
+        </div>
+        ${botonObservacion}
+      </div>
+      <div class="isla isla-con-boton">
+        <div class="isla-texto">
+          <div class="label">Autorización del pedido</div>
+          <div class="isla-detalle">Necesaria para finalizar y para cerrar sesión</div>
+        </div>
+        ${botonAutorizacion}
+      </div>` : ''}
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Referencias de salida</h2>
     ${tarjetasReferencia}
@@ -6168,6 +6553,8 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
        quedara aca no se enteraba de un pedido nuevo, de una suspension pedida por Programación ni
        de un protocolo de arranque a medias. -->
   <script>${scriptNotificaciones(maquinaCodigo)}</script>
+  <script>${scriptAutorizacion()}</script>
+  <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptConfirmarFinalizar()}</script>
@@ -6271,6 +6658,8 @@ function renderBultosGrupo(idGrupo, numeroPedido, maquinaCodigo, datosPorReferen
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptNotificaciones(maquinaCodigo)}</script>
+  <script>${scriptAutorizacion()}</script>
+  <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
   <!-- El idOrden que reciben estos dos es solo el de respaldo: cada tarjeta de bulto y cada
        seccion de traslado traen el IdOrden de SU referencia, y ese es el que se usa. -->
@@ -8461,6 +8850,23 @@ app.post('/api/selladora/orden/:idOrden/finalizar', requireLogin, async (req, re
   try {
     const p = await getPool();
     maquinaCodigo = await obtenerCodigoMaquinaDeOrden(p, idOrden);
+
+    // Sin la firma de un lider no se finaliza (22/09/2026). La comprobacion va EN EL SERVIDOR y no
+    // solo en el modal: Finalizar es un form POST normal, asi que un navegador que no corra el
+    // script -- o alguien que mande el POST a mano -- se saltaria un bloqueo que viviera solo en
+    // la pantalla. El de la tableta existe igual, pero para explicar, no para proteger.
+    const ordenParaFirma = await numeroPedidoDeOrden(p, idOrden);
+    if (ordenParaFirma) {
+      const firma = await obtenerAutorizacionPedido(p, ordenParaFirma.NumeroPedido);
+      if (!firma) {
+        throw new Error(
+          `El pedido ${ordenParaFirma.NumeroPedido} no tiene la autorización de un líder, así que no se puede finalizar. ` +
+          `Pídala con el botón "Autorización" de esta pantalla. Pueden autorizarla: ` +
+          CARGOS_AUTORIZAN_PEDIDO.map(c => c.nombre).join(', ') + '.'
+        );
+      }
+    }
+
     // OperarioFinal (distinto del que inicio) -- mismo bloqueo que EjecucionSelladora.vb si el
     // usuario logueado no tiene SISUsuarios.CodigoOperarioPRD configurado.
     await finalizarOrden(p, idOrden, usuario.generadoPor, usuario.codigoOperarioPRD);
@@ -8530,6 +8936,247 @@ app.post('/api/selladora/orden/:idOrden/rollo/ajustar-consumo', requireLogin, as
       ok: false,
       error: falta
         ? 'Falta correr el script sql/aplicados/20260918_agregar_ajuste_consumo_rollo.sql contra esta base antes de poder ajustar el consumo.'
+        : err.message
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Observaciones libres del operario (22/09/2026). Tabla SEL_ObservacionOperario -- ver
+// sql/pendientes/20260922_agregar_observaciones_operario.sql para por que es tabla propia y no una
+// columna del chequeo de calidad.
+//
+// Dos puertas de entrada, las dos decididas por el usuario:
+//   1. El boton "Observacion" de la pantalla de la orden -- Origen 'Manual'.
+//   2. La pregunta al cerrar sesion, cuando el operario tiene una orden Activa a su nombre --
+//      Origen 'CierreSesion'. Ver /api/mi-orden-activa y el script scriptObservaciones().
+//
+// Permiso: requireLogin a secas, igual que el ajuste de consumo y las demas correcciones de la
+// tableta. El que escribe es el operario, no un supervisor.
+
+// Guarda una observacion contra una orden. Todo lo que la acompana (ejecucion, maquina, ancla,
+// bitacora) se deduce ACA y no se recibe del navegador: la tableta solo manda el texto.
+app.post('/api/selladora/orden/:idOrden/observacion', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  const texto = String(req.body.observacion || '').trim();
+  if (!texto) return res.json({ ok: false, error: 'La observación está vacía.' });
+  // 'CierreSesion' solo lo puede poner el flujo de salida; cualquier otra cosa entra como Manual.
+  const origen = req.body.origen === 'CierreSesion' ? 'CierreSesion' : 'Manual';
+
+  try {
+    const p = await getPool();
+    const dtOrden = await p.request().input('idOrden', idOrden)
+      .query(`SELECT Maquina FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+    if (dtOrden.recordset.length === 0) return res.json({ ok: false, error: 'Orden no encontrada.' });
+    const maquina = dtOrden.recordset[0].Maquina;
+
+    // Las tres son opcionales: si alguna falla, la observacion se guarda igual. Perder el texto que
+    // el operario acaba de escribir porque su maquina no tiene bitacora abierta seria absurdo.
+    let idEjecucion = null, idOrdenAncla = null, idBitacora = null;
+    try {
+      const dtEj = await p.request().input('idOrden', idOrden).query(
+        `SELECT TOP 1 IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden ORDER BY IdEjecucion ASC`
+      );
+      if (dtEj.recordset.length > 0) idEjecucion = dtEj.recordset[0].IdEjecucion;
+    } catch (e) { /* sin ejecucion todavia: la orden puede estar Pendiente */ }
+    try {
+      const ancla = await obtenerAnclaGrupoSellado(p, idOrden);
+      if (ancla) idOrdenAncla = ancla.IdOrden;
+    } catch (e) { /* orden suelta, sin grupo de sellado */ }
+    try {
+      const dtBi = await p.request().input('maquina', maquina).query(
+        `SELECT TOP 1 IdBitacora FROM SEL_BitacoraTurno WHERE Maquina = @maquina AND HoraCierre IS NULL`
+      );
+      if (dtBi.recordset.length > 0) idBitacora = dtBi.recordset[0].IdBitacora;
+    } catch (e) { /* maquina sin bitacora abierta -- ver la nota del script SQL */ }
+
+    await p.request()
+      .input('idOrden', idOrden)
+      .input('idOrdenAncla', idOrdenAncla)
+      .input('idEjecucion', idEjecucion)
+      .input('operario', req.session.usuario.codigoOperarioPRD || null)
+      .input('maquina', maquina)
+      .input('idBitacora', idBitacora)
+      .input('observacion', texto.slice(0, 500))
+      .input('origen', origen)
+      .query(`
+        INSERT INTO SEL_ObservacionOperario
+          (IdOrden, IdOrdenAncla, id_ejecucion, Operario, Maquina, IdBitacora, Observacion, Origen)
+        VALUES
+          (@idOrden, @idOrdenAncla, @idEjecucion, @operario, @maquina, @idBitacora, @observacion, @origen)
+      `);
+    res.json({ ok: true });
+  } catch (err) {
+    // Mismo criterio que /protocolo/respuesta y /ajustar-consumo: si falta correr el script, se
+    // dice cual en vez de soltar el "Invalid object name" crudo en la cara del operario.
+    const falta = /Invalid object name|SEL_ObservacionOperario/i.test(err.message || '');
+    res.json({
+      ok: false,
+      error: falta
+        ? 'Falta correr el script sql/pendientes/20260922_agregar_observaciones_operario.sql contra esta base.'
+        : err.message
+    });
+  }
+});
+
+// La orden Activa a nombre de este operario, o null. La usa el "Cerrar sesión" para saber si vale
+// la pena preguntar por una observacion antes de salir.
+//
+// El criterio es EL MISMO que el UPDATE de /logout (Operario = yo AND Estado = 'Activa'): si ese
+// UPDATE va a marcar una ejecucion como PendienteOperador, es exactamente esa la orden por la que
+// hay que preguntar. Si los dos criterios se separan, la pregunta sale sobre una orden y el logout
+// suelta otra.
+app.get('/api/mi-orden-activa', requireLogin, async (req, res) => {
+  const operario = req.session.usuario.codigoOperarioPRD;
+  if (!operario) return res.json({ ok: true, orden: null });
+  try {
+    const p = await getPool();
+    const dt = await p.request().input('operario', operario).query(`
+      SELECT TOP 1 eje.IdOrden, ord.NumeroPedido, ord.Maquina, maq.Nombre AS MaquinaNombre
+      FROM SEL_EjecucionOrden eje
+      INNER JOIN SEL_OrdenProduccion ord ON ord.IdOrden = eje.IdOrden
+      LEFT JOIN PRDMaquinas maq ON maq.Codigo = ord.Maquina
+      WHERE eje.Operario = @operario AND eje.Estado = 'Activa'
+      ORDER BY eje.IdEjecucion DESC
+    `);
+    if (dt.recordset.length === 0) return res.json({ ok: true, orden: null });
+    const o = dt.recordset[0];
+    res.json({
+      ok: true,
+      orden: {
+        idOrden: o.IdOrden,
+        pedido: o.NumeroPedido,
+        maquina: (o.MaquinaNombre || '').trim() || ('Máquina ' + o.Maquina)
+      }
+    });
+  } catch (err) {
+    // Nunca traba la salida: ante cualquier error se responde "no hay orden" y el logout sigue
+    // derecho, que es como se comportaba antes de que existiera la pregunta.
+    console.error('No se pudo consultar la orden activa del operario:', err.message);
+    res.json({ ok: true, orden: null });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Autorizacion de un pedido por un lider (22/09/2026). Tabla SEL_AutorizacionPedido -- ver
+// sql/pendientes/20260922_agregar_autorizacion_pedido.sql.
+//
+// Regla, tal como la definio el usuario: el operario trabaja normal y SIN login. La firma se puede
+// dar en cualquier momento con el boton de la pantalla del pedido, pero sin ella no se puede
+//   - FINALIZAR la orden, ni
+//   - CERRAR SESION con un pedido activo.
+// El alcance es el PEDIDO: una firma vale para las hasta 3 ordenes que un mismo NumeroPedido tiene
+// en sellado paralelo.
+
+// El NumeroPedido de una orden. Se usa en todas las comprobaciones de abajo.
+async function numeroPedidoDeOrden(p, idOrden) {
+  const dt = await p.request().input('idOrden', idOrden)
+    .query(`SELECT NumeroPedido, Maquina FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+  return dt.recordset.length ? dt.recordset[0] : null;
+}
+
+// La firma mas reciente de un pedido, o null. Devuelve null (en vez de reventar) si todavia no se
+// corrio el script SQL: asi una base sin la tabla se comporta como antes del 22/09/2026 en las
+// consultas, y el bloqueo real se decide en pedidoAutorizado(), que SI distingue los dos casos.
+async function obtenerAutorizacionPedido(p, numeroPedido) {
+  try {
+    const dt = await p.request().input('pedido', numeroPedido).query(`
+      SELECT TOP 1 UsuarioAutoriza, NombreAutoriza, CargoAutoriza, FechaHora
+      FROM SEL_AutorizacionPedido WHERE NumeroPedido = @pedido ORDER BY FechaHora DESC, Id DESC
+    `);
+    return dt.recordset.length ? dt.recordset[0] : null;
+  } catch (err) {
+    console.error('No se pudo leer SEL_AutorizacionPedido:', err.message);
+    return null;
+  }
+}
+
+// Registra la firma. Todo lo que la acompana se deduce aca; la tableta solo manda usuario y clave.
+async function guardarAutorizacionPedido(p, { numeroPedido, idOrden, maquina, usuarioAutoriza, operarioEnTurno }) {
+  let idBitacora = null;
+  try {
+    const dtBi = await p.request().input('maquina', maquina).query(
+      `SELECT TOP 1 IdBitacora FROM SEL_BitacoraTurno WHERE Maquina = @maquina AND HoraCierre IS NULL`
+    );
+    if (dtBi.recordset.length > 0) idBitacora = dtBi.recordset[0].IdBitacora;
+  } catch (e) { /* maquina sin bitacora abierta: la firma vale igual */ }
+
+  await p.request()
+    .input('pedido', numeroPedido)
+    .input('idOrden', idOrden)
+    .input('maquina', maquina)
+    .input('idBitacora', idBitacora)
+    .input('usuario', usuarioAutoriza.codigo)
+    .input('nombre', (usuarioAutoriza.nombre || '').slice(0, 60))
+    .input('idCargo', usuarioAutoriza.idCargo)
+    .input('cargo', (usuarioAutoriza.cargo || usuarioAutoriza.cargoAutorizado || '').slice(0, 100))
+    .input('operario', operarioEnTurno || null)
+    .query(`
+      INSERT INTO SEL_AutorizacionPedido
+        (NumeroPedido, IdOrden, Maquina, IdBitacora, UsuarioAutoriza, NombreAutoriza,
+         IdCargoAutoriza, CargoAutoriza, OperarioEnTurno)
+      VALUES
+        (@pedido, @idOrden, @maquina, @idBitacora, @usuario, @nombre, @idCargo, @cargo, @operario)
+    `);
+}
+
+// Estado de la firma de un pedido: si ya esta y quien la dio.
+app.get('/api/selladora/orden/:idOrden/autorizacion', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  try {
+    const p = await getPool();
+    const orden = await numeroPedidoDeOrden(p, idOrden);
+    if (!orden) return res.json({ ok: false, error: 'Orden no encontrada.' });
+    const firma = await obtenerAutorizacionPedido(p, orden.NumeroPedido);
+    res.json({
+      ok: true,
+      pedido: orden.NumeroPedido,
+      autorizado: !!firma,
+      firma: firma ? {
+        usuario: firma.UsuarioAutoriza,
+        nombre: firma.NombreAutoriza,
+        cargo: firma.CargoAutoriza,
+        fecha: firma.FechaHora
+      } : null,
+      // La tableta pinta con esto la lista de quien puede firmar, sin una segunda copia que se
+      // pueda desincronizar de auth.js.
+      cargosPermitidos: CARGOS_AUTORIZAN_PEDIDO.map(c => c.nombre)
+    });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// La firma en si: valida usuario+clave+cargo y la guarda.
+app.post('/api/selladora/orden/:idOrden/autorizacion', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  try {
+    const p = await getPool();
+    const orden = await numeroPedidoDeOrden(p, idOrden);
+    if (!orden) return res.json({ ok: false, error: 'Orden no encontrada.' });
+
+    const intento = await validarAutorizadorPedido(p, req.body.codigo, req.body.password);
+    if (!intento.ok) return res.json({ ok: false, error: intento.error });
+
+    await guardarAutorizacionPedido(p, {
+      numeroPedido: orden.NumeroPedido,
+      idOrden,
+      maquina: orden.Maquina,
+      usuarioAutoriza: intento.usuario,
+      operarioEnTurno: req.session.usuario.codigoOperarioPRD || null
+    });
+
+    res.json({
+      ok: true,
+      pedido: orden.NumeroPedido,
+      firma: { nombre: intento.usuario.nombre, cargo: intento.usuario.cargo }
+    });
+  } catch (err) {
+    const falta = /Invalid object name|SEL_AutorizacionPedido/i.test(err.message || '');
+    res.json({
+      ok: false,
+      error: falta
+        ? 'Falta correr el script sql/pendientes/20260922_agregar_autorizacion_pedido.sql contra esta base.'
         : err.message
     });
   }
