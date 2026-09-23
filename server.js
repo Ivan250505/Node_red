@@ -5954,11 +5954,14 @@ async function obtenerGrupoSelladoDeOrden(p, idOrden) {
 async function obtenerHistorialMPGrupo(p, miembros) {
   let historial = [];
   for (const m of miembros) {
+    // FIX 23/09/2026: la MP se guarda bajo el Lote del ANCLA (primer bulto, por id), no del ultimo
+    // -- antes daba igual porque toda la orden compartia fecha, pero ahora cada bulto nuevo toma la
+    // fecha real del dia (trg_SEL_Bultos_CierreBulto) y el Lote del ultimo puede ser otro dia.
     const ultimoBulto = await p.request().input('idOrden', m.IdOrden).query(`
       SELECT TOP 1 b.refsalida, b.mes, b.dia FROM SEL_Bultos b
       INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
       WHERE ej.IdOrden = @idOrden
-      ORDER BY b.num_bulto DESC
+      ORDER BY b.id ASC
     `);
     if (ultimoBulto.recordset.length === 0) continue;
     const { refsalida: nElemento, mes, dia } = ultimoBulto.recordset[0];
@@ -6890,12 +6893,14 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
 
     // Historial MP -- mismo criterio que EjecucionSelladora.vb:btnVerHistorial_Click +
     // SEL_InventarioMP.vb:MostrarHistorialMP (Elemento/Lote del ultimo bulto + LineaOriginal ancla).
+    // FIX 23/09/2026: Lote del ANCLA (primer bulto, por id), no del ultimo -- ver el mismo fix en
+    // obtenerHistorialMPGrupo.
     let historial = [];
     const ultimoBulto = await p.request().input('idOrden', idOrden).query(`
       SELECT TOP 1 b.refsalida, b.mes, b.dia FROM SEL_Bultos b
       INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
       WHERE ej.IdOrden = @idOrden
-      ORDER BY b.num_bulto DESC
+      ORDER BY b.id ASC
     `);
     if (ultimoBulto.recordset.length > 0) {
       const { refsalida: nElemento, mes, dia } = ultimoBulto.recordset[0];
@@ -6963,7 +6968,7 @@ async function obtenerBultosYPesajes(p, idOrden) {
     FROM SEL_Bultos b
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
     WHERE ej.IdOrden = @idOrden AND b.estado <> 'Anulado'
-    ORDER BY b.num_bulto ASC
+    ORDER BY b.id ASC -- FIX 23/09/2026: num_bulto se reinicia por dia, el orden real es por id
   `);
   const bultos = bultosResult.recordset.map((b, idx) => ({ ...b, numRelativo: idx + 1 }));
 

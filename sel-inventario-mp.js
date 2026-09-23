@@ -220,11 +220,17 @@ async function generarSalidaRollo(db, { idOrden, fecha, lote, elementoProducto, 
 }
 
 // SEL_InventarioMP.vb:259-266
+// FIX 23/09/2026 (a pedido del usuario -- el bulto nuevo toma la fecha REAL del dia en que abre, ver
+// trg_SEL_Bultos_CierreBulto): num_bulto ya se reinicia por dia (igual que Linea en
+// Produccion.vb:GuardarNuevoRollo), asi que MIN(num_bulto) dejo de ser el ancla -- el bulto 1 del
+// dia siguiente saldria "menor" que el ancla real (ej. 20). El ancla es el PRIMER bulto creado de la
+// orden, por id.
 async function obtenerLineaOriginalControlSellado(db, idOrden, numBultoActual) {
   const dt = await db.request().input('idOrden', idOrden).query(`
-    SELECT MIN(b.num_bulto) AS MinBulto FROM SEL_Bultos b
+    SELECT TOP 1 b.num_bulto AS MinBulto FROM SEL_Bultos b
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
     WHERE ej.IdOrden = @idOrden
+    ORDER BY b.id ASC
   `);
   if (dt.recordset.length > 0 && dt.recordset[0].MinBulto != null) return dt.recordset[0].MinBulto;
   return numBultoActual;
@@ -237,11 +243,14 @@ async function obtenerLineaOriginalControlSellado(db, idOrden, numBultoActual) {
 // la etiqueta"), la materia prima agregada despues debe quedar anotada bajo la Fecha/Lote
 // ORIGINAL, o queda invisible para MostrarHistorialMP/Produccion.vb:Buscar() y para el lookup de
 // OrdenProduccion (ambos filtran por Fecha+Lote exactos). Devuelve null si el bulto ancla no existe.
+// FIX 23/09/2026: num_bulto se reinicia por dia -- otro dia de la misma orden puede repetir el
+// num_bulto del ancla, asi que se desempata por id (el ancla siempre es el primero creado).
 async function obtenerFechaLoteOriginalControlSellado(db, idOrden, lineaOriginal) {
   const dt = await db.request().input('idOrden', idOrden).input('lineaOriginal', lineaOriginal).query(`
     SELECT TOP 1 b.agno, b.mes, b.dia FROM SEL_Bultos b
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
     WHERE ej.IdOrden = @idOrden AND b.num_bulto = @lineaOriginal
+    ORDER BY b.id ASC
   `);
   if (dt.recordset.length === 0) return null;
   const { agno, mes, dia } = dt.recordset[0];
@@ -546,9 +555,24 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
     FROM SEL_Bultos b
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
     WHERE ej.IdOrden = @idOrden AND b.estado = 'Cerrado'
-    ORDER BY b.num_bulto ASC
+    ORDER BY b.id ASC
   `);
   if (dtBultos.recordset.length === 0) return;
+
+  // FIX 23/09/2026 (a pedido del usuario): los bultos de una misma orden ya pueden tener fechas/Lotes
+  // distintos (el trigger de cierre abre cada bulto nuevo con la fecha real del dia, y num_bulto se
+  // reinicia por dia) -- el orden cronologico real es por id, y el ancla del proceso (Fecha/Lote/
+  // Linea original) es el PRIMER bulto creado, no el de menor num_bulto. Se resuelve aca, antes del
+  // loop, para poder estampar LoteOriginal/FechaOriginal en las filas de PRDProduccion que se creen
+  // abajo -- misma convencion que Produccion.vb:GuardarNuevoRollo (NULL en la fila ancla, lleno en
+  // todas las demas).
+  const dtPrimero = await db.request().input('idOrden', idOrden).query(`
+    SELECT TOP 1 b.id, b.agno, b.mes, b.dia, b.num_bulto, b.NumeroPedido, b.id_maquina, b.HoraInicio, b.HoraFin FROM SEL_Bultos b
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+    WHERE ej.IdOrden = @idOrden
+    ORDER BY b.id ASC
+  `);
+  const anclaBulto = dtPrimero.recordset.length > 0 ? dtPrimero.recordset[0] : null;
 
   const TIPO_PEDIDO_AR = 4;
 
@@ -614,6 +638,9 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
         `);
     } else {
       const nTurno = await resolverTurnoPorHora(db, nMaquina, fHoraTurno);
+      // FIX 23/09/2026: LoteOriginal/FechaOriginal apuntan al ancla del proceso, salvo en la propia
+      // fila ancla (queda NULL, esa fila ES el original) -- ver comentario de anclaBulto arriba.
+      const esAncla = !anclaBulto || anclaBulto.id === dr.id;
       await db.request()
         .input('fecha', fFechaBulto).input('maquina', nMaquina).input('turno', nTurno > 0 ? String(nTurno) : null)
         .input('duracion', nDuracion).input('lote', tLoteBulto).input('elemento', nElemento).input('linea', nLinea)
@@ -622,13 +649,15 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
         .input('generadoPor', generadoPor).input('horaIni', fHoraIni || null).input('horaFin', fHoraFin || null)
         .input('bolsas', nBolsasxGolpe).input('tipoPedido', TIPO_PEDIDO_AR)
         .input('numeroPedido', tNumeroPedidoBulto || null)
+        .input('loteOriginal', esAncla ? null : String(anclaBulto.mes).padStart(2, '0') + String(anclaBulto.dia).padStart(2, '0'))
+        .input('fechaOriginal', sql.Date, esAncla ? null : new Date(anclaBulto.agno, anclaBulto.mes - 1, anclaBulto.dia))
         .query(`
           INSERT INTO PRDProduccion (Fecha, Maquina, Turno, Duracion, Lote, Elemento, Linea, Cantidad, PesoCono, Unidades, Detalle,
             ClienteProduccion, Destino, Grafilado, Abierto, Servicio, Retal, GeneradoPor, FechaModificado, HoraInicio, HoraFinal,
-            Torta, BolsasxGolpe, TipoPedido, NumeroPedido)
+            Torta, BolsasxGolpe, TipoPedido, NumeroPedido, LoteOriginal, FechaOriginal)
           VALUES (@fecha, @maquina, @turno, @duracion, @lote, @elemento, @linea, @cantidad, 0, @unidades, @serial,
             @cliente, @destino, 0, 0, 0, 0, @generadoPor, GETDATE(), @horaIni, @horaFin,
-            0, @bolsas, @tipoPedido, @numeroPedido)
+            0, @bolsas, @tipoPedido, @numeroPedido, @loteOriginal, @fechaOriginal)
         `);
     }
 
@@ -648,12 +677,7 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
 
   if (nUltimoElemento === 0) return;
 
-  const dtPrimero = await db.request().input('idOrden', idOrden).query(`
-    SELECT TOP 1 b.agno, b.mes, b.dia, b.num_bulto, b.NumeroPedido, b.id_maquina, b.HoraInicio, b.HoraFin FROM SEL_Bultos b
-    INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
-    WHERE ej.IdOrden = @idOrden
-    ORDER BY b.num_bulto ASC
-  `);
+  // dtPrimero (ancla por id) ya se resolvio antes del loop -- ver FIX 23/09/2026 arriba.
   if (dtPrimero.recordset.length === 0) return;
 
   const nAgnoOriginal = dtPrimero.recordset[0].agno;
@@ -724,9 +748,13 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
         .input('idCtrl', nIdCtrl).input('elem', nElem).input('fecha', fFec).input('linea', nLin).input('lote', tLot)
         .input('cant', nCant).input('operario', dr.Operario != null ? Number(dr.Operario) : null).input('bolsas', dr.BolsasxGolpe)
         .input('generadoPor', generadoPor)
+        // FIX 23/09/2026: NumeroSecuencial ya no puede ser la Linea -- con num_bulto reiniciado por
+        // dia, dos bultos del mismo control (dias distintos) pueden compartir Linea. Se usa el
+        // siguiente consecutivo del control, igual que trg_SEL_Bultos_CierreBulto.
         .query(`
           INSERT INTO PRDExtrusionRollos (IdExtrusionControl, Elemento, Fecha, Linea, Lote, NumeroSecuencial, PesoBrutoKg, PesoConoKg, ResiduosKg, Operario, BolsasxGolpe, UsuarioCreacion, FechaHoraCreacion)
-          VALUES (@idCtrl, @elem, @fecha, @linea, @lote, @linea, @cant, 0, 0, @operario, @bolsas, @generadoPor, GETDATE())
+          SELECT @idCtrl, @elem, @fecha, @linea, @lote, ISNULL(MAX(NumeroSecuencial), 0) + 1, @cant, 0, 0, @operario, @bolsas, @generadoPor, GETDATE()
+          FROM PRDExtrusionRollos WHERE IdExtrusionControl = @idCtrl
         `);
     } else {
       await db.request()
