@@ -439,7 +439,7 @@ async function obtenerAnclaGrupoSellado(db, idOrden) {
   return dt.recordset.length > 0 ? dt.recordset[0] : null;
 }
 
-async function obtenerOCrearOrdenProduccion(db, { elemento, fecha, lineaAncla, lote, codigoDestino, generadoPor, idEjecucion }) {
+async function obtenerOCrearOrdenProduccion(db, { elemento, fecha, lineaAncla, lote, codigoDestino, maquina, turno, generadoPor, idEjecucion }) {
   try {
     // FIX 16/09/2026 (REVERTIDO el intento anterior de "reintentar tras choque" -- causaba
     // "transaccion abortada" bloqueando Iniciar/Cerrar bulto completos): tanto scan-rollo.js como
@@ -465,25 +465,34 @@ async function obtenerOCrearOrdenProduccion(db, { elemento, fecha, lineaAncla, l
       .query(`SELECT OrdenProduccion FROM PRDOrdenesProduccion WITH (UPDLOCK, HOLDLOCK) WHERE Fecha = @fecha AND Lote = @lote AND Elemento = @elemento AND LineaAncla = @lineaAncla`);
     if (dtExiste.recordset.length > 0) return dtExiste.recordset[0].OrdenProduccion;
 
-    let tNombreDestino = '';
-    if (codigoDestino > 0) {
-      const dtDest = await db.request().input('codigoDestino', codigoDestino).query(`SELECT Nombre FROM PRDDestinos WHERE Codigo = @codigoDestino`);
-      if (dtDest.recordset.length > 0) tNombreDestino = dtDest.recordset[0].Nombre || '';
+    // FIX 22/09/2026 (a pedido del usuario, reunion 22/09 -- mismo cambio portado a
+    // ObtenerOCrearOrdenProduccion en Produccion.vb): "OP" vuelve a ser "OT" y el serial cambia de
+    // raiz -- ya NO usa el Destino, usa la Maquina (sigla de PRDMaquinas.LetraSerial+CodigoSerial)
+    // y el Turno (letra de NOMTurnos.LetraSerial). Formato nuevo, ejemplo "OT20260922S005M01":
+    //   OT + Año(4) + Lote/MesDia(4) + LetraMaquina+CodigoMaquina(1+3) + LetraTurno(1) + Consecutivo(2)
+    // Si la maquina/turno todavia no tiene su LetraSerial/CodigoSerial asignado, esos pedazos del
+    // codigo quedan en blanco (no se inventan) -- mismo criterio que el lado VB.
+    let tSiglaMaquina = '';
+    if (maquina > 0) {
+      const dtMaq = await db.request().input('maquina', maquina)
+        .query(`SELECT ISNULL(LetraSerial,'') AS LetraSerial, ISNULL(CodigoSerial,'') AS CodigoSerial FROM PRDMaquinas WHERE Codigo = @maquina`);
+      if (dtMaq.recordset.length > 0) tSiglaMaquina = (dtMaq.recordset[0].LetraSerial || '') + (dtMaq.recordset[0].CodigoSerial || '');
     }
-    const tSigla = (tNombreDestino + 'XXX').slice(0, 3).toUpperCase();
 
-    const dtCons = await db.request().input('lote', lote).input('destino', codigoDestino)
-      .query(`SELECT ISNULL(MAX(Consecutivo), 0) + 1 AS NC FROM PRDOrdenesProduccion WHERE Lote = @lote AND Destino = @destino`);
+    let tLetraTurno = '';
+    if (turno > 0) {
+      const dtTurno = await db.request().input('turno', turno)
+        .query(`SELECT ISNULL(LetraSerial,'') AS LetraSerial FROM NOMTurnos WHERE Codigo = @turno`);
+      if (dtTurno.recordset.length > 0) tLetraTurno = dtTurno.recordset[0].LetraSerial || '';
+    }
+
+    // El consecutivo ahora se agrupa por (Fecha, Maquina, Turno) -- antes era por (Lote, Destino) y
+    // no tenia en cuenta la maquina, mezclando procesos de maquinas distintas en la misma secuencia.
+    const dtCons = await db.request().input('fecha', sql.Date, fecha).input('maquina', maquina).input('turno', turno)
+      .query(`SELECT ISNULL(MAX(Consecutivo), 0) + 1 AS NC FROM PRDOrdenesProduccion WHERE Fecha = @fecha AND Maquina = @maquina AND Turno = @turno`);
     const nConsecutivo = dtCons.recordset[0].NC;
 
-    // REVERTIDO 18/09/2026 (a pedido del usuario, mismo cambio portado a
-    // ObtenerOCrearOrdenProduccion en Produccion.vb): se deshace el renombrado de prefijo
-    // "OP"->"OT" del 15-16/09. Vuelve a ser "OP" -- "OT" queda libre para un concepto nuevo
-    // (bitacora por turno, exclusiva de Selladora/Node, tabla aparte, pendiente de construir).
-    // Solo afecta codigos NUEVOS generados de aca en adelante; los ya guardados con prefijo
-    // "OT..." (creados entre el 15 y el 18/09) requieren una migracion de datos aparte si se
-    // quieren normalizar -- no se tocan aca.
-    const tOP = `OP${lote}${String(nConsecutivo).padStart(4, '0')}${tSigla}`;
+    const tOP = `OT${fecha.getFullYear()}${lote}${tSiglaMaquina}${tLetraTurno}${String(nConsecutivo).padStart(2, '0')}`;
 
     // FIX 15/09/2026 (a pedido del usuario): HoraInicioReal NO es GETDATE() -- el trabajo real
     // empieza en el alistamiento/limpieza del protocolo de arranque (pasos 1-2), que corren ANTES
@@ -507,10 +516,10 @@ async function obtenerOCrearOrdenProduccion(db, { elemento, fecha, lineaAncla, l
     await db.request()
       .input('op', tOP).input('lote', lote).input('destino', codigoDestino).input('consecutivo', nConsecutivo)
       .input('fecha', sql.Date, fecha).input('elemento', elemento).input('lineaAncla', lineaAncla).input('generadoPor', generadoPor)
-      .input('horaInicioReal', sql.DateTime, fHoraInicioReal)
+      .input('horaInicioReal', sql.DateTime, fHoraInicioReal).input('maquina', maquina).input('turno', turno)
       .query(`
-        INSERT INTO PRDOrdenesProduccion (OrdenProduccion, Lote, Destino, Consecutivo, Fecha, Elemento, LineaAncla, TipoProceso, GeneradoPor, FechaCreacion, Estado, HoraInicioReal)
-        VALUES (@op, @lote, @destino, @consecutivo, @fecha, @elemento, @lineaAncla, 'SELLADORA', @generadoPor, GETDATE(), 'Activa', ISNULL(@horaInicioReal, GETDATE()))
+        INSERT INTO PRDOrdenesProduccion (OrdenProduccion, Lote, Destino, Consecutivo, Fecha, Elemento, LineaAncla, TipoProceso, GeneradoPor, FechaCreacion, Estado, HoraInicioReal, Maquina, Turno)
+        VALUES (@op, @lote, @destino, @consecutivo, @fecha, @elemento, @lineaAncla, 'SELLADORA', @generadoPor, GETDATE(), 'Activa', ISNULL(@horaInicioReal, GETDATE()), @maquina, @turno)
       `);
 
     // FIX 15/09/2026 (a pedido del usuario): backfill -- los SEL_TiempoMuerto de esta ejecucion
@@ -640,7 +649,7 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
   if (nUltimoElemento === 0) return;
 
   const dtPrimero = await db.request().input('idOrden', idOrden).query(`
-    SELECT TOP 1 b.agno, b.mes, b.dia, b.num_bulto, b.NumeroPedido FROM SEL_Bultos b
+    SELECT TOP 1 b.agno, b.mes, b.dia, b.num_bulto, b.NumeroPedido, b.id_maquina, b.HoraInicio, b.HoraFin FROM SEL_Bultos b
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
     WHERE ej.IdOrden = @idOrden
     ORDER BY b.num_bulto ASC
@@ -663,9 +672,15 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
   // FIX 31/08/2026: reusa tNumeroPedidoOrden (SEL_OrdenProduccion, confiable) en vez de releer
   // SEL_Bultos.NumeroPedido -- mismo criterio que la otra llamada a resolverDestinoOrden mas arriba.
   const nCodDestinoOriginal = await resolverDestinoOrden(db, idOrden, tNumeroPedidoOrden);
+  // FIX 22/09/2026: Maquina/Turno del ancla (el PRIMER bulto, no el ultimo procesado en el loop de
+  // arriba) -- mismo criterio que el resto de esta funcion resuelve la ancla por nLineaOriginal.
+  const nMaquinaOriginal = dtPrimero.recordset[0].id_maquina;
+  const fHoraTurnoOriginal = dtPrimero.recordset[0].HoraFin || dtPrimero.recordset[0].HoraInicio || fFechaOriginal;
+  const nTurnoOriginal = await resolverTurnoPorHora(db, nMaquinaOriginal, fHoraTurnoOriginal);
   const tOP = await obtenerOCrearOrdenProduccion(db, {
     elemento: nUltimoElemento, fecha: fFechaOriginal, lineaAncla: nLineaOriginal, lote: tLoteOriginal,
-    codigoDestino: nCodDestinoOriginal, generadoPor
+    codigoDestino: nCodDestinoOriginal, maquina: nMaquinaOriginal, turno: nTurnoOriginal > 0 ? nTurnoOriginal : null,
+    generadoPor
   });
   if (tOP) {
     await db.request().input('op', tOP).input('idOrden', idOrden).query(`

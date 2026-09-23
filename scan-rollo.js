@@ -197,9 +197,16 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
     ? await obtenerLineaOriginalControlSellado(tx, anclaGrupo.IdOrden, 0)
     : nLineaOriginal;
   const nCodDestinoBulto = await resolverDestinoOrden(tx, idOrden, tNumeroPedido);
+  // FIX 22/09/2026: se mueve la resolucion del turno para ACA (antes corria mas abajo, despues del
+  // INSERT en SEL_Bultos) porque el nuevo formato de serial de OT la necesita para construirse --
+  // mismo valor que se sigue usando mas abajo para PRDProduccion.Turno.
+  const nTurnoBulto = await resolverTurnoPorHora(tx, nMaquina, fHoy);
+  if (nTurnoBulto <= 0) {
+    throw new Error('No se encontró un turno activo configurado para esta máquina a esta hora en TURHorariosMaquinas.\nTurno es un campo obligatorio en PRDProduccion -- corrija la configuración de turnos antes de continuar.');
+  }
   const tOrdenProduccion = await obtenerOCrearOrdenProduccion(tx, {
     elemento: nElementoParaOP, fecha: fFechaSolo, lineaAncla: nLineaAnclaParaOP, lote: tLote,
-    codigoDestino: nCodDestinoBulto, generadoPor, idEjecucion
+    codigoDestino: nCodDestinoBulto, maquina: nMaquina, turno: nTurnoBulto, generadoPor, idEjecucion
   });
 
   if (!sinMateriaPrima) {
@@ -231,11 +238,6 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
       INSERT INTO SEL_Bultos (agno, mes, dia, number_paqu, num_bulto, refsalida, estado, serialArmado, serialPadre, id_maquina, id_ejecucion, NumeroPedido, HoraInicio, IdBitacora)
       VALUES (@agno, @mes, @dia, 0, @numBulto, @elemento, @estadoInicial, @serialPadre, @serialPadre, @maquina, @idEjecucion, @numeroPedido, @horaInicio, @idBitacora)
     `);
-
-  const nTurnoBulto = await resolverTurnoPorHora(tx, nMaquina, fHoy);
-  if (nTurnoBulto <= 0) {
-    throw new Error('No se encontró un turno activo configurado para esta máquina a esta hora en TURHorariosMaquinas.\nTurno es un campo obligatorio en PRDProduccion -- corrija la configuración de turnos antes de continuar.');
-  }
 
   const { codCliente: nCodClienteBulto } = await resolverClienteDestino(tx, tNumeroPedido);
   // FIX 08/09/2026 (a pedido del usuario -- antes TipoPedido quedaba fijo en 4): ver
