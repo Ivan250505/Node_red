@@ -2572,7 +2572,7 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, calid
     // Apartado de Calidad: pantalla emergente con las preguntas agrupadas por apartado (Pelicula,
     // Sellado, Accesorios, Troquelado/Perforaciones -- ver construirApartadosCalidad() en
     // server.js, que decide cuales apartados/preguntas aplican segun los datos reales de esta
-    // orden). Cada pregunta es Conforme/No conforme via checkbox (los dos checkboxes de una misma
+    // orden). Cada pregunta se contesta Si/No via checkbox (los dos checkboxes de una misma
     // pregunta son mutuamente excluyentes -- marcar uno desmarca el otro). No deja confirmar si
     // falta alguna respuesta. Publica comando 'calidad' con TODAS las respuestas (de todos los
     // apartados) en 'datos', mismo mecanismo que los demas botones.
@@ -2598,15 +2598,20 @@ function abrirCalidad() {
       var esUltimo = indice === APARTADOS_CALIDAD.length - 1;
       var avanzando = false;   // distingue "se completo y cerre yo la ventana" de "el operario cancelo"
 
+      // OJO (24/09/2026, a pedido del usuario): lo que cambio es SOLO la etiqueta que lee el
+      // operario -- antes "Conforme / No conforme", ahora "Si / No". Los value= siguen siendo
+      // 'conforme'/'no_conforme' porque son los que el servidor traduce a 'Conforme'/'NoConforme'
+      // (ver el POST de calidad), y esos dos son los unicos que acepta
+      // CK_SEL_ChequeoCalidadDetalle_Respuesta. Cambiarlos aca rompe el guardado.
       var preguntasHtml = ap.preguntas.map(function(p) {
         var marcada = respuestas[p.clave];
         return '<div class="calidad-pregunta">' +
           '<div class="calidad-titulo">' + p.titulo + '</div>' +
           '<div class="calidad-opciones">' +
             '<label class="calidad-opcion"><input type="checkbox" name="' + p.clave + '" value="conforme"' +
-              (marcada === 'conforme' ? ' checked' : '') + '> Conforme</label>' +
+              (marcada === 'conforme' ? ' checked' : '') + '> Sí</label>' +
             '<label class="calidad-opcion no-conforme"><input type="checkbox" name="' + p.clave + '" value="no_conforme"' +
-              (marcada === 'no_conforme' ? ' checked' : '') + '> No conforme</label>' +
+              (marcada === 'no_conforme' ? ' checked' : '') + '> No</label>' +
           '</div>' +
         '</div>';
       }).join('');
@@ -3929,7 +3934,7 @@ function scriptProtocoloArranque(maquinaCodigo) {
     // (window.ultimoPesoBascula, lo mantiene scriptPesoEnVivo desde el WebSocket /ws/peso).
     //
     // Decisiones del usuario, para que no se cambien sin querer:
-    //   - El elemento patron es FIJO: 5 kg para toda la planta (PESO_PATRON_KG en el servidor). El
+    //   - El elemento patron es FIJO: 1 kg para toda la planta (PESO_PATRON_KG en el servidor). El
     //     operario no lo digita -- solo pone la pesa y captura.
     //   - Tolerancia por PORCENTAJE (TOLERANCIA_PESO_PATRON_PCT, +-1%), que llega desde el servidor.
     //   - Si NO concuerda, BLOQUEA: no se puede seguir hasta que de dentro de tolerancia. Por eso
@@ -8668,7 +8673,8 @@ const VERIFICACION_BASCULA_ACTIVA = true;
 // holgada deja pasar una bascula descalibrada.
 const TOLERANCIA_PESO_PATRON_PCT = 1;
 
-// Peso del elemento patron, en kilogramos (dato del usuario, 14/09/2026: "son 5 kg fijos"). Es la
+// Peso del elemento patron, en kilogramos (dato del usuario, 14/09/2026: "son 5 kg fijos"; CAMBIADO
+// a 1 kg el 24/09/2026 a pedido del usuario -- la pesa que quedo en planta es de 1 kg). Es la
 // misma pesa para toda la planta, por eso es una constante y no una tabla.
 //
 // CAMBIO respecto al diseno inicial: primero se decidio que el operario digitara cuanto pesaba la
@@ -8678,7 +8684,7 @@ const TOLERANCIA_PESO_PATRON_PCT = 1;
 //
 // Si algun dia cada maquina usa una pesa distinta, esto es lo que hay que convertir en tabla de
 // configuracion (maquina -> peso patron), y de paso la tolerancia de arriba.
-const PESO_PATRON_KG = 5;
+const PESO_PATRON_KG = 1;
 
 // Cada cuanto vuelve a salir la verificacion durante la produccion (a pedido del usuario:
 // "aleatoriamente cada 30-40 minutos").
