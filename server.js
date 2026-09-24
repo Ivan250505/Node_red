@@ -780,7 +780,7 @@ function estilosBase() {
     .btn-no-conforme { background: #c00000; }
     .btn-pausa { background: var(--naranja); }
     /* Fila de islas cuyo ancho lo manda el CONTENIDO de cada una, no un reparto a partes iguales
-    (18/09/2026, a pedido del usuario, para "Produccion / Residuos / Verificacion" de Informacion).
+    (18/09/2026, a pedido del usuario, para "Produccion / Residuos / Autorizacion" de Informacion).
     Con el flex normal de .isla (1 1 220px) las tres salen del MISMO ancho, porque flex-grow reparte
     el sobrante a partes iguales sin mirar lo que cada una necesita: Produccion, que solo lleva 3
     botones, quedaba con un hueco grande al lado, y Residuos partia los suyos en dos lineas.
@@ -791,7 +791,6 @@ function estilosBase() {
     BOTONES_RESIDUOS_POR_TIPO decide el resto) -- si esa isla pierde o gana un boton, las otras dos
     se reacomodan sin tocar nada. */
     .islas-fila-ajustada > .isla { flex: 1 1 auto; }
-    .btn-verificar { background: var(--azul-osc); }
     .btn-accion:disabled { opacity: 0.5; cursor: not-allowed; }
     .btn-accion:disabled:active { transform: none; }
     .calidad-apartado { text-align: left; margin-bottom: 16px; }
@@ -2406,22 +2405,10 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, calid
       { clave: 'espacio_trabajo', titulo: '📐 Espacio de trabajo' }
     ];
 
-    // Verificacion (18/09/2026): la isla y el boton ya estan en su sitio, la funcionalidad se
-    // definira despues (pedido del usuario: "posteriormente le daremos la funcionalidad"). Hasta
-    // entonces avisa en vez de no hacer nada -- un boton que no responde en la tableta del taller
-    // se lee como que la pantalla se colgo, y el operario lo pulsa una y otra vez.
-    //
-    // PARA CONECTARLO: reemplazar el cuerpo de esta funcion. El boton vive en la isla
-    // "Verificacion" de renderOrdenDetalle y solo se pinta con la orden Activa, asi que aca ya se
-    // puede contar con window.idBultoActivo y con el resto de lo que usa scriptComandos.
-    function abrirVerificacion() {
-      Swal.fire({
-        icon: 'info',
-        title: 'Verificación',
-        text: 'Esta función todavía no está habilitada.',
-        confirmButtonText: 'Entendido', confirmButtonColor: '#71bf44'
-      });
-    }
+    // QUITADO 24/09/2026: aca vivia abrirVerificacion(), el marcador de posicion de la isla
+    // "Verificacion" (18/09/2026, sin funcionalidad). El usuario aclaro que ese boton era el mismo
+    // de Autorizacion, asi que la isla la ocupa ahora → abrirAutorizacion (ver scriptAutorizacion
+    // y renderOrdenDetalle) y el marcador se elimino.
 
     function abrirPausa() {
       // Texto y radio mas grandes que .calidad-opcion (a pedido del usuario, 01/09/2026) -- estilo
@@ -4493,7 +4480,12 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   // antes de Finalizar y antes de cerrar sesion con el pedido activo. El boton no cambia de
   // aspecto segun este firmado o no: el estado se consulta al abrirlo, porque esta pagina se
   // pinta una vez y la firma puede llegar desde otra tableta mientras esta abierta.
-  const botonAutorizacion = `<button type="button" class="btn-accion btn-isla btn-info"
+  // CAMBIO 24/09/2026 (a pedido del usuario): este boton se paso a la fila de
+  // "Produccion / Residuos", ocupando la isla donde estaba "Verificar" -- ese boton era un
+  // marcador de posicion sin funcionalidad y lo que iba a hacer es justo esto, asi que se quito.
+  // Sin btn-isla (ancho fijo de 140px, para las islas de texto+boton): aca vive dentro de
+  // .orden-acciones, igual que Finalizar/Pausa.
+  const botonAutorizacion = `<button type="button" class="btn-accion btn-info"
          onclick="abrirAutorizacion(${orden.IdOrden})">🔑 Autorización</button>`;
 
   const botonAjusteConsumo = orden.Estado === 'PendienteValidacion'
@@ -4634,22 +4626,25 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     </div>
   </header>
   <main>
-    ${acciones ? `<div class="islas-fila islas-fila-ajustada">
-      <div class="isla">
+    ${/* La fila ya no cuelga de `acciones`: la isla de Autorizacion va aca (24/09/2026) y la firma
+          se puede pedir en cualquier estado, tambien con la orden ya finalizada o en validacion,
+          que es cuando `acciones` viene vacio. Produccion y Residuos si siguen apareciendo solo
+          cuando hay algo que mostrar. */ ''}
+    <div class="islas-fila islas-fila-ajustada">
+      ${acciones ? `<div class="isla">
         <div class="label">Producción</div>
         <div class="orden-acciones">${acciones}</div>
-      </div>
+      </div>` : ''}
       ${botonesResiduosHTML ? `<div class="isla">
         <div class="label">Residuos</div>
         <div class="orden-acciones">${botonesResiduosHTML}</div>
       </div>` : ''}
-      ${activa ? `<div class="isla">
-        <div class="label">Verificación</div>
-        <div class="orden-acciones">
-          <button type="button" class="btn-accion btn-verificar" onclick="abrirVerificacion()">🔍 Verificar</button>
-        </div>
-      </div>` : ''}
-    </div>` : ''}
+      <div class="isla">
+        <div class="label">Autorización del pedido</div>
+        <div class="isla-detalle">Necesaria para finalizar y para cerrar sesión</div>
+        <div class="orden-acciones">${botonAutorizacion}</div>
+      </div>
+    </div>
     ${pesoBox}
     ${imprimirYAccionesBox}
     <div class="islas-fila">
@@ -4666,13 +4661,6 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
           <div class="isla-detalle">Deje por escrito lo que vio en el turno</div>
         </div>
         ${botonObservacion}
-      </div>
-      <div class="isla isla-con-boton">
-        <div class="isla-texto">
-          <div class="label">Autorización del pedido</div>
-          <div class="isla-detalle">Necesaria para finalizar y para cerrar sesión</div>
-        </div>
-        ${botonAutorizacion}
       </div>
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Especificaciones</h2>

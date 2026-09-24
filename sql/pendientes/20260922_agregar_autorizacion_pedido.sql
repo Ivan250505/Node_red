@@ -4,10 +4,12 @@
 -- trabaja normal y sin login; lo que queda bloqueado sin esta firma es FINALIZAR la orden y CERRAR
 -- SESION con un pedido activo.
 --
--- QUIEN PUEDE FIRMAR: solo tres cargos de SISCargos, por IdCargo y NO por el texto del cargo:
---     16  Director de Calidad e Inocuidad
---     27  Jefe de Planta
---     31  Lider de Sellado
+-- QUIEN PUEDE FIRMAR: unos pocos cargos de SISCargos, por IdCargo y NO por el texto del cargo:
+--     16  Director de Calidad e Inocuidad   (base Carlixplast)
+--     27  Jefe de Planta                    (base Carlixplast)
+--     31  Lider de Sellado                  (base Carlixplast)
+--      6  Lider de Sellado                  (base carlixplastPrueba -- alla SISCargos solo llega
+--                                            hasta 6; agregado 24/09/2026)
 -- Se filtra por IdCargo porque el texto de SISUsuarios.Cargo no es de fiar para comparar: conviven
 -- 'Lider de Sellado' con tilde y 'Lider de Impresion' sin ella, y basta una tilde para que un
 -- LIKE deje a un lider por fuera. La lista vive en auth.js (CARGOS_AUTORIZAN_PEDIDO).

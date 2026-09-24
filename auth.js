@@ -58,17 +58,25 @@ function requireAdmin(req, res, next) {
 // ---------------------------------------------------------------------------------------------
 // Autorizacion de un pedido por un lider (22/09/2026). Ver SEL_AutorizacionPedido.
 //
-// Son los TRES cargos que el usuario definio, por IdCargo de SISCargos y NO por el texto del
-// cargo: en SISUsuarios conviven 'Lider de Sellado' con tilde y 'Lider de Impresion' sin ella, asi
-// que comparar textos deja lideres por fuera en cuanto alguien escriba una tilde distinta.
+// Los cargos que el usuario definio, por IdCargo de SISCargos y NO por el texto del cargo: en
+// SISUsuarios conviven 'Lider de Sellado' con tilde y 'Lider de Impresion' sin ella, asi que
+// comparar textos deja lideres por fuera en cuanto alguien escriba una tilde distinta.
 //
 // Si manana hay que sumar o quitar un cargo, se cambia ESTA lista y nada mas -- el servidor la
 // exporta a la tableta para pintar el mensaje de "quien puede autorizar", asi que no hay una
 // segunda copia que se pueda desincronizar.
+//
+// OJO CON LOS IDS, QUE NO SON LOS MISMOS EN LAS DOS BASES (comprobado 24/09/2026 consultando
+// SISCargos): 16/27/31 existen en la base de produccion (Carlixplast), pero en carlixplastPrueba
+// SISCargos solo llega hasta 6 y el 'Lider de Sellado' de ahi es el IdCargo 6. Por eso la lista
+// lleva los dos: asi la misma lista sirve en las dos bases sin tocar codigo al cambiar de .env.
+// Si algun dia esto crece, lo que toca es leer los cargos de SISCargos por nombre normalizado en
+// vez de dejar los ids escritos aca.
 const CARGOS_AUTORIZAN_PEDIDO = [
   { idCargo: 16, nombre: 'Director de Calidad e Inocuidad' },
   { idCargo: 27, nombre: 'Jefe de Planta' },
-  { idCargo: 31, nombre: 'Lider de Sellado' }
+  { idCargo: 31, nombre: 'Lider de Sellado' },
+  { idCargo: 6,  nombre: 'Líder de Sellado' }   // carlixplastPrueba (a pedido del usuario, 24/09/2026)
 ];
 
 // Valida usuario+clave y ADEMAS que tenga uno de los cargos de arriba.
