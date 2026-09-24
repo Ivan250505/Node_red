@@ -214,9 +214,11 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
       fecha: fFechaSolo, lote: tLote, elementoProducto: nElemento, linea: nLineaOriginal,
       detalleRollo: serial, cantidad, loteMP: lote, bodega: tBodegaRollo, ordenProduccion: tOrdenProduccion
     });
+    // FIX 23/09/2026: la salida va al Tipo 24 de la OT (ver obtenerOCrearMovimiento24OT) -- ahi
+    // mismo caen despues todos los "Añadir Rollo" de esta orden.
     await generarSalidaRollo(tx, {
       idOrden, fecha: fFechaSolo, lote: tLote, elementoProducto: nElemento, linea: nNumBulto,
-      detalleRollo: serial, cantidad, generadoPor
+      detalleRollo: serial, cantidad, generadoPor, ordenProduccion: tOrdenProduccion
     });
     await registrarControlParcialSellado(tx, {
       idOrden, elemento: nElemento, fecha: fFechaSolo, anio: nAgno, numBultoActual: nNumBulto,
@@ -371,9 +373,16 @@ async function confirmarRollo(pool, { idOrden, idEjecucionActivo, serial, esNuev
         detalleRollo: consulta.serial, cantidad: consulta.cantidad, loteMP: consulta.lote, bodega: tBodegaRollo,
         ordenProduccion: tOrdenProduccionAR
       });
+      // FIX 23/09/2026: al Tipo 24 de la OT, el MISMO del rollo original (antes cada "Añadir Rollo"
+      // abria otro movimiento: fecha de hoy con hora + lote de hoy en la Observacion). Si la orden
+      // venia en curso desde antes del cambio, se adopta su movimiento viejo (el del rollo original:
+      // Observacion con el lote/linea del ancla, en la fecha del ancla).
       await generarSalidaRollo(tx, {
         idOrden, fecha: fHoy, lote: tLote, elementoProducto: datosOrden.elemento, linea: nLineaOriginal,
-        detalleRollo: consulta.serial, cantidad: consulta.cantidad, generadoPor
+        detalleRollo: consulta.serial, cantidad: consulta.cantidad, generadoPor,
+        ordenProduccion: tOrdenProduccionAR,
+        obsAnterior: `Salida Materia Prima Selladora - ${loteMP} - ${datosOrden.elemento} - ${nLineaOriginal}`,
+        fechaAnterior: fechaMP
       });
     } else {
       const nuevaIdEjecucion = await abrirNuevaEjecucion(tx, {

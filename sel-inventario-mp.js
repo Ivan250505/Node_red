@@ -156,8 +156,73 @@ async function descontarExistenciaPorDetalle(db, { bodega, elemento, detalle, ca
     .query(`UPDATE INVExistencias SET Cantidad = @cantidad, Unidades = @unidades WHERE Bodega = @bodega AND Elemento = @elemento AND Linea = @linea`);
 }
 
+// ─── Movimientos 24 por Orden de Trabajo (23/09/2026, a pedido del usuario) ───────────────────────
+// Mismo criterio que Produccion.vb:ObtenerOCrearMovimientoOT: UN movimiento Tipo 24 (salida de MP)
+// por OT -- el rollo original y todos los "Añadir Rollo", de cualquier dia, caen en el MISMO
+// movimiento, fechado en la linea original de la OT (PRDOrdenesProduccion.Fecha). Antes cada
+// "Añadir Rollo" quedaba en otro movimiento (fecha de hoy CON hora y lote de hoy en la Observacion).
+// La LLAVE es la columna INVMovimientos.OrdenProduccion (ver
+// nueva produccion/agregar_ordenproduccion_invmovimientos_23092026.sql) -- no el texto de
+// Observaciones, que se puede editar desde Inventario. En Selladora aplica a TODO proceso (siempre
+// hay OT, se crea en Iniciar). Respaldo solo para ordenes que ya venian en curso: el movimiento con
+// la Observacion vieja y la columna en NULL se adopta (se le llena la columna).
+const OBS_SALIDA_MP_OT_SELLADORA = 'Salida Materia Prima Selladora - OT ';
+
+async function obtenerFechaAnclaOT(db, ordenProduccion, fechaDefecto) {
+  const dt = await db.request().input('ot', ordenProduccion)
+    .query(`SELECT Fecha FROM PRDOrdenesProduccion WHERE OrdenProduccion = @ot`);
+  if (dt.recordset.length > 0 && dt.recordset[0].Fecha) return dt.recordset[0].Fecha;
+  return fechaDefecto;
+}
+
+// Devuelve { numero, fecha } -- fecha es la REAL del movimiento (con la que se escriben las lineas).
+async function obtenerOCrearMovimiento24OT(db, { ordenProduccion, fechaDefecto, obsAnterior, fechaAnterior, generadoPor }) {
+  const TIPO = 24;
+  const tObsOT = OBS_SALIDA_MP_OT_SELLADORA + ordenProduccion;
+
+  let dt = await db.request().input('ot', ordenProduccion).query(`
+    SELECT TOP 1 Fecha, Numero FROM INVMovimientos
+    WHERE Subempresa = ${SUBEMPRESA} AND Tipo = ${TIPO} AND OrdenProduccion = @ot AND ISNULL(Estado, '') <> 'Anulado'
+    ORDER BY Fecha
+  `);
+  if (dt.recordset.length > 0) return { numero: dt.recordset[0].Numero, fecha: dt.recordset[0].Fecha };
+
+  if (obsAnterior && fechaAnterior) {
+    dt = await db.request().input('fecha', sql.Date, fechaAnterior).input('obs', obsAnterior).query(`
+      SELECT Numero FROM INVMovimientos
+      WHERE Subempresa = ${SUBEMPRESA} AND Fecha = @fecha AND Tipo = ${TIPO} AND Observaciones = @obs
+        AND OrdenProduccion IS NULL AND ISNULL(Estado, '') <> 'Anulado'
+    `);
+    if (dt.recordset.length > 0) {
+      const tNumeroAdoptado = dt.recordset[0].Numero;
+      await db.request().input('fecha', sql.Date, fechaAnterior).input('numero', tNumeroAdoptado)
+        .input('ot', ordenProduccion).input('obs', tObsOT)
+        .query(`
+          UPDATE INVMovimientos SET OrdenProduccion = @ot, Observaciones = @obs, FechaModificado = GETDATE()
+          WHERE Subempresa = ${SUBEMPRESA} AND Fecha = @fecha AND Tipo = ${TIPO} AND Numero = @numero
+        `);
+      return { numero: tNumeroAdoptado, fecha: fechaAnterior };
+    }
+  }
+
+  const fechaOT = await obtenerFechaAnclaOT(db, ordenProduccion, fechaDefecto);
+  const tNumero = await obtenerConsecutivoSalidaProduccion(db);
+  const dtConcepto = await db.request().query(`SELECT Concepto FROM SISTiposMovimiento WHERE Codigo = ${TIPO}`);
+  await db.request()
+    .input('fecha', sql.Date, fechaOT).input('numero', tNumero).input('concepto', dtConcepto.recordset[0].Concepto)
+    .input('generadoPor', generadoPor).input('obs', tObsOT).input('ot', ordenProduccion)
+    .query(`
+      INSERT INTO INVMovimientos (SubEmpresa, Fecha, Tipo, Numero, Concepto, Tercero, Sucursal, GeneradoPor, Observaciones, FechaModificado, Estado, OrdenProduccion)
+      VALUES (${SUBEMPRESA}, @fecha, ${TIPO}, @numero, @concepto, 0, 0, @generadoPor, @obs, GETDATE(), 'Registrado', @ot)
+    `);
+  return { numero: tNumero, fecha: fechaOT };
+}
+
 // SEL_InventarioMP.vb:137-236
-async function generarSalidaRollo(db, { idOrden, fecha, lote, elementoProducto, linea, detalleRollo, cantidad, generadoPor }) {
+// ordenProduccion (23/09/2026): con OT, el movimiento es el de la OT (ver obtenerOCrearMovimiento24OT);
+// obsAnterior/fechaAnterior = Observacion vieja del proceso, solo para adoptar el movimiento de una
+// orden que ya venia en curso. Sin OT, igual que antes.
+async function generarSalidaRollo(db, { idOrden, fecha, lote, elementoProducto, linea, detalleRollo, cantidad, generadoPor, ordenProduccion = '', obsAnterior = '', fechaAnterior = null }) {
   if (!detalleRollo || cantidad <= 0 || detalleRollo.length < 5) return;
   const nElementoRollo = parseInt(detalleRollo.slice(-5), 10);
   if (!Number.isFinite(nElementoRollo) || nElementoRollo <= 0) return;
@@ -165,24 +230,34 @@ async function generarSalidaRollo(db, { idOrden, fecha, lote, elementoProducto, 
   const TIPO = 24;
   const tObsMovimiento = `Salida Materia Prima Selladora - ${lote} - ${elementoProducto} - ${linea}`;
 
-  let dt = await db.request().input('fecha', fecha).input('obs', tObsMovimiento)
-    .query(`SELECT Numero FROM INVMovimientos WHERE Subempresa = ${SUBEMPRESA} AND Fecha = @fecha AND Tipo = ${TIPO} AND Observaciones = @obs`);
-
   let tNumero;
-  if (dt.recordset.length > 0) {
-    tNumero = dt.recordset[0].Numero;
+  // Fecha con la que se escriben las lineas: la del movimiento. Con OT se ata como sql.Date (solo
+  // dia); sin OT se deja exactamente como antes.
+  let fMov = fecha;
+  const conFecha = (req) => (ordenProduccion ? req.input('fecha', sql.Date, fMov) : req.input('fecha', fMov));
+  if (ordenProduccion) {
+    const mov = await obtenerOCrearMovimiento24OT(db, { ordenProduccion, fechaDefecto: fecha, obsAnterior, fechaAnterior, generadoPor });
+    tNumero = mov.numero;
+    fMov = mov.fecha;
   } else {
-    tNumero = await obtenerConsecutivoSalidaProduccion(db);
+    let dt = await db.request().input('fecha', fecha).input('obs', tObsMovimiento)
+      .query(`SELECT Numero FROM INVMovimientos WHERE Subempresa = ${SUBEMPRESA} AND Fecha = @fecha AND Tipo = ${TIPO} AND Observaciones = @obs`);
 
-    const dtConcepto = await db.request().query(`SELECT Concepto FROM SISTiposMovimiento WHERE Codigo = ${TIPO}`);
-    const concepto = dtConcepto.recordset[0].Concepto;
+    if (dt.recordset.length > 0) {
+      tNumero = dt.recordset[0].Numero;
+    } else {
+      tNumero = await obtenerConsecutivoSalidaProduccion(db);
 
-    await db.request()
-      .input('fecha', fecha).input('numero', tNumero).input('concepto', concepto).input('generadoPor', generadoPor).input('obs', tObsMovimiento)
-      .query(`
-        INSERT INTO INVMovimientos (SubEmpresa, Fecha, Tipo, Numero, Concepto, Tercero, Sucursal, GeneradoPor, Observaciones, FechaModificado, Estado)
-        VALUES (${SUBEMPRESA}, @fecha, ${TIPO}, @numero, @concepto, 0, 0, @generadoPor, @obs, GETDATE(), 'Registrado')
-      `);
+      const dtConcepto = await db.request().query(`SELECT Concepto FROM SISTiposMovimiento WHERE Codigo = ${TIPO}`);
+      const concepto = dtConcepto.recordset[0].Concepto;
+
+      await db.request()
+        .input('fecha', fecha).input('numero', tNumero).input('concepto', concepto).input('generadoPor', generadoPor).input('obs', tObsMovimiento)
+        .query(`
+          INSERT INTO INVMovimientos (SubEmpresa, Fecha, Tipo, Numero, Concepto, Tercero, Sucursal, GeneradoPor, Observaciones, FechaModificado, Estado)
+          VALUES (${SUBEMPRESA}, @fecha, ${TIPO}, @numero, @concepto, 0, 0, @generadoPor, @obs, GETDATE(), 'Registrado')
+        `);
+    }
   }
 
   const tBodega = await obtenerBodegaDeRollo(db, detalleRollo);
@@ -196,17 +271,17 @@ async function generarSalidaRollo(db, { idOrden, fecha, lote, elementoProducto, 
     }
   }
 
-  const dtDup = await db.request()
-    .input('fecha', fecha).input('numero', tNumero).input('elemento', nElementoRollo).input('detalle', detalleRollo)
+  const dtDup = await conFecha(db.request())
+    .input('numero', tNumero).input('elemento', nElementoRollo).input('detalle', detalleRollo)
     .query(`SELECT COUNT(*) AS Cnt FROM INVMovimientosElementos WHERE Subempresa = ${SUBEMPRESA} AND Fecha = @fecha AND Tipo = ${TIPO} AND Numero = @numero AND Elemento = @elemento AND Detalle = @detalle`);
 
   if (dtDup.recordset[0].Cnt === 0) {
-    const dtLinea = await db.request().input('fecha', fecha).input('numero', tNumero)
+    const dtLinea = await conFecha(db.request()).input('numero', tNumero)
       .query(`SELECT ISNULL(MAX(Linea), 0) + 1 AS NL FROM INVMovimientosElementos WHERE Subempresa = ${SUBEMPRESA} AND Fecha = @fecha AND Tipo = ${TIPO} AND Numero = @numero`);
     const nNuevaLinea = dtLinea.recordset[0].NL;
 
-    await db.request()
-      .input('fecha', fecha).input('numero', tNumero).input('linea', nNuevaLinea)
+    await conFecha(db.request())
+      .input('numero', tNumero).input('linea', nNuevaLinea)
       .input('bodega', tBodega).input('elemento', nElementoRollo).input('cantidad', cantidad).input('detalle', detalleRollo)
       .query(`
         INSERT INTO INVMovimientosElementos (SubEmpresa, Fecha, Tipo, Numero, Linea, Bodega, Elemento, UnidadMedida, Cantidad, Unidades, Detalle)
