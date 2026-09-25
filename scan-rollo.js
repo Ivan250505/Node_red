@@ -403,6 +403,10 @@ async function confirmarRollo(pool, { idOrden, idEjecucionActivo, serial, esNuev
       // pierde nada -- al retomar la orden se termina el Alistamiento pendiente y ahí se
       // materializa. Aplica SOLO al Iniciar -- "Añadir Rollo" nunca creó bulto/PRDProduccion
       // nuevo, no tiene este problema (confirmado con el usuario).
+      // FIX 25/09/2026 (pedido 11227): UNA sola fila pendiente por ejecucion. Si ya hay una sin
+      // procesar (el Iniciar se repitio porque el bulto no llego a crearse), se reemplaza con este
+      // escaneo, que es el rollo que de verdad quedo montado. Antes se insertaba otra, y la que
+      // sobraba quedaba huerfana con Procesado = 0 para siempre.
       await tx.request()
         .input('idOrden', idOrden).input('idEjecucion', nuevaIdEjecucion)
         .input('codOperario', codOperario > 0 ? codOperario : null)
@@ -410,8 +414,15 @@ async function confirmarRollo(pool, { idOrden, idEjecucionActivo, serial, esNuev
         .input('lote', consulta.lote || null).input('bolsasXGolpe', bolsasXGolpe)
         .input('generadoPor', generadoPor)
         .query(`
-          INSERT INTO SEL_RolloPendienteInicio (IdOrden, IdEjecucion, CodOperario, Serial, Cantidad, Lote, BolsasXGolpe, GeneradoPor)
-          VALUES (@idOrden, @idEjecucion, @codOperario, @serial, @cantidad, @lote, @bolsasXGolpe, @generadoPor)
+          IF EXISTS (SELECT 1 FROM SEL_RolloPendienteInicio WITH (UPDLOCK, HOLDLOCK)
+                     WHERE IdEjecucion = @idEjecucion AND Procesado = 0)
+            UPDATE SEL_RolloPendienteInicio SET
+              IdOrden = @idOrden, CodOperario = @codOperario, Serial = @serial, Cantidad = @cantidad,
+              Lote = @lote, BolsasXGolpe = @bolsasXGolpe, GeneradoPor = @generadoPor, FechaHoraEscaneo = GETDATE()
+            WHERE IdEjecucion = @idEjecucion AND Procesado = 0
+          ELSE
+            INSERT INTO SEL_RolloPendienteInicio (IdOrden, IdEjecucion, CodOperario, Serial, Cantidad, Lote, BolsasXGolpe, GeneradoPor)
+            VALUES (@idOrden, @idEjecucion, @codOperario, @serial, @cantidad, @lote, @bolsasXGolpe, @generadoPor)
         `);
 
       idEjecucionDelRollo = nuevaIdEjecucion;

@@ -8302,6 +8302,48 @@ app.post('/api/selladora/orden/:idOrden/reanudar', requireLogin, async (req, res
       && String(dtAbierta.recordset[0].Tipo || '').toLowerCase() === 'alistamiento'
       && String(dtAbierta.recordset[0].Subtipo || '').toLowerCase() === 'arranque';
 
+    // FIX 16/09/2026: al terminar el Alistamiento se crea el bulto/OT/PRDProduccion -- antes esto
+    // pasaba al confirmar el escaneo del rollo, mucho antes de que el Alistamiento siquiera
+    // arrancara. Si por lo que sea ya se habia materializado (no deberia pasar -- /reanudar exige
+    // Estado='En pausa', que ya cambia en cuanto esto corre una vez -- pero por las dudas) o no hay
+    // ninguna fila pendiente, no hace nada.
+    // FIX 25/09/2026: y solo con la orden todavia Pendiente -- el alistamiento de un RELEVO tambien
+    // es 'alistamiento'/'arranque' pero corre con la orden ya Activa, y ahi una fila huerfana con
+    // Procesado = 0 (pedido 11227) crearia un segundo bulto de arranque. Mismo criterio que la
+    // autocuracion de obtenerProtocoloPendiente.
+    // FIX 25/09/2026 (pedido 11227): esto va ANTES de cerrar el tiempo muerto, no despues. Antes, si
+    // la creacion del bulto fallaba, el alistamiento ya habia quedado cerrado: el "Reintentar" de la
+    // tableta ya no lo encontraba abierto, respondia ok sin crear nada y el protocolo seguia (peso
+    // patron, amperaje) con la orden Pendiente y sin bulto -- y el operario volvia a darle Iniciar.
+    // Ahora un fallo deja el cronometro abierto y la ejecucion En pausa; el reintento vuelve a
+    // intentar crear el bulto. Crear la OT con el alistamiento todavia abierto no cambia nada: solo
+    // lee MIN(HoraInicio) de los tiempos muertos (ver obtenerOCrearOrdenProduccion).
+    let seMaterializo = false;
+    if (esFinDeAlistamientoArranque && EstadoOrden === 'Pendiente') {
+      // El escaneo mas reciente es el rollo que de verdad quedo montado (confirmarRollo ya no deja
+      // dos filas pendientes, pero una base con duplicados viejos si puede tenerlas).
+      const dtPendiente = await p.request().input('idEjecucion', IdEjecucion).query(`
+        SELECT TOP 1 Id, IdOrden, CodOperario, Serial, Cantidad, Lote, BolsasXGolpe, GeneradoPor
+        FROM SEL_RolloPendienteInicio WHERE IdEjecucion = @idEjecucion AND Procesado = 0
+        ORDER BY Id DESC
+      `);
+      if (dtPendiente.recordset.length > 0) {
+        const pend = dtPendiente.recordset[0];
+        await materializarInicioOrden(p, {
+          idOrden: pend.IdOrden, idEjecucion: IdEjecucion, codOperario: pend.CodOperario,
+          serial: pend.Serial, cantidad: pend.Cantidad, lote: pend.Lote,
+          bolsasXGolpe: pend.BolsasXGolpe, generadoPor: pend.GeneradoPor
+        });
+        // Se marcan TODAS las pendientes de la ejecucion, no solo la usada: cualquier otra es un
+        // escaneo anterior que este reemplazo, y dejarla con Procesado = 0 es lo que dejo huerfana
+        // la del pedido 11227.
+        await p.request().input('idEjecucion', IdEjecucion).query(
+          `UPDATE SEL_RolloPendienteInicio SET Procesado = 1, FechaHoraProcesado = GETDATE() WHERE IdEjecucion = @idEjecucion AND Procesado = 0`
+        );
+        seMaterializo = true;
+      }
+    }
+
     // DuracionMinutos es una columna CALCULADA (AS DATEDIFF(MINUTE, HoraInicio, HoraFin) PERSISTED)
     // -- SQL Server la resuelve sola en cuanto se guarda HoraFin, no se puede asignar a mano
     // (por eso el error "cannot be modified because it is either a computed column...").
@@ -8314,31 +8356,6 @@ app.post('/api/selladora/orden/:idOrden/reanudar', requireLogin, async (req, res
       UPDATE SEL_TiempoMuerto SET HoraFin = GETDATE()
       WHERE id_ejecucion = @idEjecucion AND HoraFin IS NULL
     `);
-
-    // FIX 16/09/2026: recien AHORA que el Alistamiento de verdad termino se crea el bulto/OT/
-    // PRDProduccion -- antes esto pasaba al confirmar el escaneo del rollo, mucho antes de que el
-    // Alistamiento siquiera arrancara. Si por lo que sea ya se habia materializado (no deberia
-    // pasar -- /reanudar exige Estado='En pausa', que ya cambia en cuanto esto corre una vez -- pero
-    // por las dudas) o no hay ninguna fila pendiente, no hace nada.
-    let seMaterializo = false;
-    if (esFinDeAlistamientoArranque) {
-      const dtPendiente = await p.request().input('idEjecucion', IdEjecucion).query(`
-        SELECT TOP 1 Id, IdOrden, CodOperario, Serial, Cantidad, Lote, BolsasXGolpe, GeneradoPor
-        FROM SEL_RolloPendienteInicio WHERE IdEjecucion = @idEjecucion AND Procesado = 0
-      `);
-      if (dtPendiente.recordset.length > 0) {
-        const pend = dtPendiente.recordset[0];
-        await materializarInicioOrden(p, {
-          idOrden: pend.IdOrden, idEjecucion: IdEjecucion, codOperario: pend.CodOperario,
-          serial: pend.Serial, cantidad: pend.Cantidad, lote: pend.Lote,
-          bolsasXGolpe: pend.BolsasXGolpe, generadoPor: pend.GeneradoPor
-        });
-        await p.request().input('id', pend.Id).query(
-          `UPDATE SEL_RolloPendienteInicio SET Procesado = 1, FechaHoraProcesado = GETDATE() WHERE Id = @id`
-        );
-        seMaterializo = true;
-      }
-    }
 
     // FIX 09/09/2026: al reanudar ya no se pone 'Activa' a ciegas. El paso 1 del protocolo de
     // arranque (limpieza y desinfeccion) pausa la ejecucion cuando la orden TODAVIA esta Pendiente
@@ -8355,6 +8372,9 @@ app.post('/api/selladora/orden/:idOrden/reanudar', requireLogin, async (req, res
 
     res.json({ ok: true });
   } catch (err) {
+    // Queda en la consola (25/09/2026): el fallo de la creacion del bulto del pedido 11227 no dejo
+    // rastro y no hubo forma de saber despues por que fallo.
+    console.error(`No se pudo reanudar la orden ${idOrden}:`, err.message);
     res.json({ ok: false, error: err.message });
   }
 });
@@ -8460,9 +8480,16 @@ async function obtenerProtocoloPendiente(p, idOrden) {
     // nunca corrio (ventana muy angosta pero posible: el servidor se cae justo entre cerrar el
     // tiempo muerto y crear el bulto), NO hay que volver a pedir escanear el rollo -- ya esta
     // guardado en SEL_RolloPendienteInicio. Se materializa aca mismo antes de seguir evaluando.
-    const dtPendienteAutocura = await p.request().input('idEjecucion', IdEjecucion).query(`
+    //
+    // FIX 25/09/2026 (bug real, pedido 11227: el relevo de operario no abria el protocolo): SOLO con
+    // la orden todavia Pendiente. Una orden Activa ya se materializo, y una fila con Procesado = 0
+    // que haya quedado huerfana (en el 11227, un segundo escaneo del rollo del 18/09) hacia que esto
+    // intentara crear el bulto OTRA VEZ en cada consulta; eso reventaba, el catch de abajo devolvia
+    // null y el protocolo -- el de relevo incluido -- nunca salia.
+    const dtPendienteAutocura = EstadoOrden !== 'Pendiente' ? { recordset: [] } : await p.request().input('idEjecucion', IdEjecucion).query(`
       SELECT TOP 1 Id, IdOrden, CodOperario, Serial, Cantidad, Lote, BolsasXGolpe, GeneradoPor
       FROM SEL_RolloPendienteInicio WHERE IdEjecucion = @idEjecucion AND Procesado = 0
+      ORDER BY Id DESC
     `);
     if (dtPendienteAutocura.recordset.length > 0) {
       const dtAlistamientoCerrado = await p.request().input('idEjecucion', IdEjecucion).query(`
@@ -8476,8 +8503,9 @@ async function obtenerProtocoloPendiente(p, idOrden) {
           serial: pend.Serial, cantidad: pend.Cantidad, lote: pend.Lote,
           bolsasXGolpe: pend.BolsasXGolpe, generadoPor: pend.GeneradoPor
         });
-        await p.request().input('id', pend.Id).query(
-          `UPDATE SEL_RolloPendienteInicio SET Procesado = 1, FechaHoraProcesado = GETDATE() WHERE Id = @id`
+        // Todas las pendientes, igual que en /reanudar: las demas son escaneos anteriores reemplazados.
+        await p.request().input('idEjecucion', IdEjecucion).query(
+          `UPDATE SEL_RolloPendienteInicio SET Procesado = 1, FechaHoraProcesado = GETDATE() WHERE IdEjecucion = @idEjecucion AND Procesado = 0`
         );
         await p.request().input('idEjecucion', IdEjecucion).query(
           `UPDATE SEL_EjecucionOrden SET Estado = 'Activa' WHERE IdEjecucion = @idEjecucion`
