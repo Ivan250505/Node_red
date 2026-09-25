@@ -162,7 +162,7 @@ async function descontarExistenciaPorDetalle(db, { bodega, elemento, detalle, ca
 // movimiento, fechado en la linea original de la OT (PRDOrdenesProduccion.Fecha). Antes cada
 // "Añadir Rollo" quedaba en otro movimiento (fecha de hoy CON hora y lote de hoy en la Observacion).
 // La LLAVE es la columna INVMovimientos.OrdenProduccion (ver
-// nueva produccion/agregar_ordenproduccion_invmovimientos_23092026.sql) -- no el texto de
+// nueva produccion/orden_trabajo/1_estructura/agregar_ordenproduccion_invmovimientos_23092026.sql) -- no el texto de
 // Observaciones, que se puede editar desde Inventario. En Selladora aplica a TODO proceso (siempre
 // hay OT, se crea en Iniciar). Respaldo solo para ordenes que ya venian en curso: el movimiento con
 // la Observacion vieja y la columna en NULL se adopta (se le llena la columna).
@@ -355,9 +355,14 @@ async function calcularMaterialTotalSellado(db, elemento, lote, linea, year) {
 async function registrarControlParcialSellado(db, { idOrden, elemento, fecha, anio, numBultoActual, lote, pesoRolloBruto, generadoPor }) {
   const nLineaOriginal = await obtenerLineaOriginalControlSellado(db, idOrden, numBultoActual);
 
+  // FIX 24/09/2026: TipoProceso vuelve a ser 'Sellado' (el PROCESO, igual que Mirane:
+  // TipoProcesoParcial, RecalcularMermaSellado, CerrarProcesoSellado). El cambio del 16/09 a
+  // 'SELLADORA' (tipo de MAQUINA) dejo los controles de la tablet fuera del cierre y de la merma
+  // de Validacion Selladora. La busqueda acepta los dos para los controles que quedaron con
+  // 'SELLADORA' (se corrigen con Mirane: nueva produccion/corregir_tipoproceso_selladora_a_sellado_24092026.sql).
   const dtControl = await db.request()
     .input('elemento', elemento).input('fecha', sql.Date, fecha).input('lineaOriginal', nLineaOriginal).input('lote', lote)
-    .query(`SELECT IdExtrusionControl FROM PRDExtrusionControl WHERE ElementoOriginal = @elemento AND FechaOriginal = @fecha AND LineaOriginal = @lineaOriginal AND LoteOriginal = @lote AND TipoProceso = 'SELLADORA'`);
+    .query(`SELECT IdExtrusionControl FROM PRDExtrusionControl WHERE ElementoOriginal = @elemento AND FechaOriginal = @fecha AND LineaOriginal = @lineaOriginal AND LoteOriginal = @lote AND TipoProceso IN ('Sellado', 'SELLADORA')`);
 
   let nIdControl;
   if (dtControl.recordset.length > 0) {
@@ -370,7 +375,7 @@ async function registrarControlParcialSellado(db, { idOrden, elemento, fecha, an
       .query(`
         INSERT INTO PRDExtrusionControl (ElementoOriginal, FechaOriginal, LineaOriginal, LoteOriginal, MaterialTotalKg, MaterialConsumidoKg, Estado, TipoProceso, UsuarioCreacion, FechaCreacion)
         OUTPUT INSERTED.IdExtrusionControl
-        VALUES (@elemento, @fecha, @lineaOriginal, @lote, @materialTotal, 0, 'EnProceso', 'SELLADORA', @generadoPor, GETDATE())
+        VALUES (@elemento, @fecha, @lineaOriginal, @lote, @materialTotal, 0, 'EnProceso', 'Sellado', @generadoPor, GETDATE())
       `);
     if (dtNuevo.recordset.length === 0) return;
     nIdControl = dtNuevo.recordset[0].IdExtrusionControl;
@@ -576,7 +581,7 @@ async function obtenerOCrearOrdenProduccion(db, { elemento, fecha, lineaAncla, l
       .query(`SELECT ISNULL(MAX(Consecutivo), 0) + 1 AS NC FROM PRDOrdenesProduccion WHERE Fecha = @fecha AND Maquina = @maquina AND Turno = @turno`);
     const nConsecutivo = dtCons.recordset[0].NC;
 
-    const tOP = `OT${fecha.getFullYear()}${lote}${tSiglaMaquina}${tLetraTurno}${String(nConsecutivo).padStart(2, '0')}`;
+    const tOP = `OT-${fecha.getFullYear()}${lote}${tSiglaMaquina}${tLetraTurno}${String(nConsecutivo).padStart(2, '0')}`;
 
     // FIX 15/09/2026 (a pedido del usuario): HoraInicioReal NO es GETDATE() -- el trabajo real
     // empieza en el alistamiento/limpieza del protocolo de arranque (pasos 1-2), que corren ANTES
@@ -603,7 +608,7 @@ async function obtenerOCrearOrdenProduccion(db, { elemento, fecha, lineaAncla, l
       .input('horaInicioReal', sql.DateTime, fHoraInicioReal).input('maquina', maquina).input('turno', turno)
       .query(`
         INSERT INTO PRDOrdenesProduccion (OrdenProduccion, Lote, Destino, Consecutivo, Fecha, Elemento, LineaAncla, TipoProceso, GeneradoPor, FechaCreacion, Estado, HoraInicioReal, Maquina, Turno)
-        VALUES (@op, @lote, @destino, @consecutivo, @fecha, @elemento, @lineaAncla, 'SELLADORA', @generadoPor, GETDATE(), 'Activa', ISNULL(@horaInicioReal, GETDATE()), @maquina, @turno)
+        VALUES (@op, @lote, @destino, @consecutivo, @fecha, @elemento, @lineaAncla, 'Sellado', @generadoPor, GETDATE(), 'Activa', ISNULL(@horaInicioReal, GETDATE()), @maquina, @turno)
       `);
 
     // FIX 15/09/2026 (a pedido del usuario): backfill -- los SEL_TiempoMuerto de esta ejecucion
@@ -796,16 +801,32 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
     // que otra referencia hermana sigue usando. Queda pendiente de definir el criterio de "grupo
     // completo finalizado" antes de tocar Estado. HoraFinReal si es seguro: es solo timestamp del
     // ultimo cierre, sin efecto en reportes que dependan de Estado.
+    // FIX 24/09/2026 (a pedido del usuario -- "una OT activa por maquina", sin agregar restriccion en
+    // Node): la OT pasa a 'PendienteValidacion' (no 'Finalizada'): la maquina queda libre y el cierre
+    // real lo hace el digitador en Validacion Selladora (Mirane: CerrarProcesoSellado ->
+    // SincronizarEstadoOT, que la deja 'Finalizada' cuando TODOS sus controles quedan cerrados y
+    // conserva esta HoraFinReal). Seguro en sellado en paralelo: finalizarOrden finaliza a la vez todas
+    // las referencias activas del grupo que comparten la OT. 'Suspendida' no se toca.
     await db.request().input('op', tOP).query(`
-      UPDATE PRDOrdenesProduccion SET HoraFinReal = GETDATE() WHERE OrdenProduccion = @op
+      UPDATE PRDOrdenesProduccion
+      SET HoraFinReal = GETDATE(),
+          Estado = CASE WHEN Estado = 'Activa' THEN 'PendienteValidacion' ELSE Estado END
+      WHERE OrdenProduccion = @op
     `);
   }
 
   const dtCtrl = await db.request()
     .input('elemento', nUltimoElemento).input('fecha', fFechaOriginal).input('lineaOriginal', nLineaOriginal).input('lote', tLoteOriginal)
-    .query(`SELECT IdExtrusionControl FROM PRDExtrusionControl WHERE ElementoOriginal = @elemento AND FechaOriginal = @fecha AND LineaOriginal = @lineaOriginal AND LoteOriginal = @lote AND TipoProceso = 'SELLADORA'`);
+    .query(`SELECT IdExtrusionControl FROM PRDExtrusionControl WHERE ElementoOriginal = @elemento AND FechaOriginal = @fecha AND LineaOriginal = @lineaOriginal AND LoteOriginal = @lote AND TipoProceso IN ('Sellado', 'SELLADORA')`);
   if (dtCtrl.recordset.length === 0) return;
   const nIdCtrl = dtCtrl.recordset[0].IdExtrusionControl;
+
+  // FIX 24/09/2026: el control tambien queda 'PendienteValidacion' (antes seguia 'EnProceso' hasta que el
+  // digitador cerraba). CerrarProcesoSellado (Mirane) lo cierra sin mirar el estado previo.
+  await db.request().input('idCtrl', nIdCtrl).query(`
+    UPDATE PRDExtrusionControl SET Estado = 'PendienteValidacion', FechaUltimaModificacion = GETDATE()
+    WHERE IdExtrusionControl = @idCtrl AND Estado = 'EnProceso'
+  `);
 
   for (const dr of dtBultos.recordset) {
     const nElem = dr.refsalida;
@@ -981,18 +1002,21 @@ async function numeroMaquinaParaSerial(p, maquinaCodigo) {
   return m ? m[1].padStart(2, '0') : null;
 }
 
-// Serial de la bitacora / "Orden de Trabajo" (a pedido del usuario, reunion 18/09/2026 +
-// confirmacion 20/09/2026): OT + Fecha(yyyyMMdd) + SE + Numero de la maquina (del Nombre, ver
-// numeroMaquinaParaSerial) + Letra de turno. Ejemplo: OT20260917SE05D. Devuelve null si no hay
-// turno resuelto (maquina sin horario configurado) o si no se pudo sacar el numero del Nombre --
-// no se inventa ninguno de los dos.
+// Serial de la bitacora de turno (a pedido del usuario, reunion 18/09/2026 + confirmacion 20/09/2026):
+// Fecha(yyyyMMdd) + SE + Numero de la maquina (del Nombre, ver numeroMaquinaParaSerial) + Letra de turno.
+// Ejemplo: 20260917SE05D. Devuelve null si no hay turno resuelto (maquina sin horario configurado) o si
+// no se pudo sacar el numero del Nombre -- no se inventa ninguno de los dos.
+// FIX 24/09/2026 (a pedido del usuario): SIN el prefijo "OT" -- la bitacora es el TURNO, no una Orden de
+// Trabajo (el documento de OT: "la OT no equivale al turno"); la OT real es PRDOrdenesProduccion
+// ("OT-20260923E301M01", ver obtenerOCrearOrdenProduccion). Las bitacoras viejas se corrigen con
+// Mirane: nueva produccion/orden_trabajo/2_migracion_historicos/quitar_ot_serial_bitacora_24092026.sql.
 async function construirSerialBitacora(p, maquinaCodigo, fechaTurnoISO, turnoCodigo) {
   const letra = letraTurno(turnoCodigo);
   if (!letra) return null;
   const numeroMaquina = await numeroMaquinaParaSerial(p, maquinaCodigo);
   if (!numeroMaquina) return null;
   const fecha = String(fechaTurnoISO).replace(/-/g, '');
-  return `OT${fecha}SE${numeroMaquina}${letra}`;
+  return `${fecha}SE${numeroMaquina}${letra}`;
 }
 
 async function cerrarBitacora(p, idBitacora, motivo) {
@@ -1000,6 +1024,163 @@ async function cerrarBitacora(p, idBitacora, motivo) {
     `UPDATE SEL_BitacoraTurno SET HoraCierre = GETDATE(), MotivoCierre = @motivo
      WHERE IdBitacora = @id AND HoraCierre IS NULL`
   );
+}
+
+// ============================ Suspender / Reanudar la OT ============================
+// 24/09/2026 (a pedido del usuario): mismo criterio que Produccion.vb (btnSuspender/btnReanudar) --
+// la suspension de la tablet ya no solo cambia SEL_EjecucionOrden/SEL_OrdenProduccion, tambien:
+//   - la OT (PRDOrdenesProduccion.Estado) Activa <-> Suspendida,
+//   - sus controles (PRDExtrusionControl) EnProceso <-> Suspendida,
+//   - una fila en PRDOrdenesProduccionPausas (es la que descuenta el tiempo productivo de la OT),
+//   - un movimiento PAUSA / REANUDAR en SISMovimientos (trazabilidad; REANUDAR enlazado al PAUSA).
+// Las pausas cortas (limpieza, alistamiento, descanso...) NO pasan por aca: siguen en SEL_TiempoMuerto.
+// La OT se ubica por el bulto MAS RECIENTE de la orden: al suspender es la que esta corriendo, y al
+// reanudar es la del bulto que se acaba de crear. OJO: si la orden se retoma OTRO dia,
+// obtenerOCrearOrdenProduccion (busca por Fecha/Lote de hoy) crea una OT nueva -- entonces la vieja
+// queda 'Suspendida' y no se reactiva (asi nunca quedan dos 'Activa'). Si no hay OT, o la OT no esta
+// en el estado esperado, no hace nada. Nunca revienta hacia afuera: suspender/reanudar no puede
+// fallar por esto.
+
+// SQL comun: @OT = OT del bulto mas reciente de la orden (@idOrden).
+const SQL_OT_DE_ORDEN = `
+  DECLARE @OT VARCHAR(20), @IdOT INT;
+  SELECT TOP 1 @OT = p.OrdenProduccion
+  FROM PRDProduccion p
+  INNER JOIN SEL_Bultos b ON b.serialPadre = p.Detalle
+  INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+  WHERE ej.IdOrden = @idOrden AND p.OrdenProduccion IS NOT NULL
+  ORDER BY b.id DESC;
+  SELECT @IdOT = IdOrdenProduccion FROM PRDOrdenesProduccion WHERE OrdenProduccion = @OT;
+`;
+
+// Controles de la OT: los PRDExtrusionControl cuya etiqueta ancla pertenece a @OT (mismo criterio que
+// SincronizarEstadoOT en Mirane -- una OT de sellado en paralelo tiene un control por referencia).
+const SQL_CONTROLES_DE_OT = `
+  SELECT ec.IdExtrusionControl FROM PRDExtrusionControl ec
+  INNER JOIN PRDProduccion pa ON pa.Elemento = ec.ElementoOriginal AND pa.Fecha = ec.FechaOriginal
+                             AND pa.Lote = ec.LoteOriginal AND pa.Linea = ec.LineaOriginal
+  WHERE pa.OrdenProduccion = @OT
+`;
+
+async function suspenderOTDeOrden(db, { idOrden, usuario, motivo, origen }) {
+  try {
+    const r = await db.request()
+      .input('idOrden', idOrden).input('usuario', usuario || null)
+      .input('motivo', String(motivo || 'Suspensión desde la tableta').slice(0, 200))
+      .input('origen', String(origen || 'Tableta').slice(0, 40))
+      .query(`
+        ${SQL_OT_DE_ORDEN}
+        IF @OT IS NULL OR NOT EXISTS (SELECT 1 FROM PRDOrdenesProduccion WHERE OrdenProduccion = @OT AND Estado = 'Activa')
+        BEGIN SELECT CAST(NULL AS VARCHAR(20)) AS OT; RETURN; END
+
+        UPDATE PRDOrdenesProduccion SET Estado = 'Suspendida' WHERE OrdenProduccion = @OT AND Estado = 'Activa';
+        UPDATE PRDExtrusionControl SET Estado = 'Suspendida', FechaUltimaModificacion = GETDATE()
+        WHERE Estado = 'EnProceso' AND IdExtrusionControl IN (${SQL_CONTROLES_DE_OT});
+        IF NOT EXISTS (SELECT 1 FROM PRDOrdenesProduccionPausas WHERE OrdenProduccion = @OT AND HoraFinPausa IS NULL)
+          INSERT INTO PRDOrdenesProduccionPausas (OrdenProduccion, HoraInicioPausa, UsuarioPausa, Observaciones)
+          VALUES (@OT, GETDATE(), @usuario, @motivo);
+
+        IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
+        BEGIN
+          DECLARE @Mov TABLE (Id INT);
+          INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
+          OUTPUT INSERTED.IdMovimiento INTO @Mov
+          VALUES ('ORDEN_TRABAJO', 'PAUSA', @IdOT, @OT, GETDATE(), @usuario, @origen, @motivo, N'Orden de trabajo suspendida desde la tableta');
+          INSERT INTO SISMovimientosDetalle (IdMovimiento, Tabla, Campo, ValorAnterior, ValorNuevo)
+          SELECT Id, 'PRDOrdenesProduccion', 'Estado', 'Activa', 'Suspendida' FROM @Mov;
+        END
+        SELECT @OT AS OT;
+      `);
+    return r.recordset && r.recordset[0] ? r.recordset[0].OT : null;
+  } catch (err) {
+    console.error('No se pudo registrar la suspension de la OT:', { idOrden, message: err.message, number: err.number });
+    return null;
+  }
+}
+
+async function reanudarOTDeOrden(db, { idOrden, usuario, origen }) {
+  try {
+    const r = await db.request()
+      .input('idOrden', idOrden).input('usuario', usuario || null)
+      .input('origen', String(origen || 'Tableta').slice(0, 40))
+      .query(`
+        ${SQL_OT_DE_ORDEN}
+        IF @OT IS NULL OR NOT EXISTS (SELECT 1 FROM PRDOrdenesProduccion WHERE OrdenProduccion = @OT AND Estado = 'Suspendida')
+        BEGIN SELECT CAST(NULL AS VARCHAR(20)) AS OT; RETURN; END
+
+        UPDATE PRDOrdenesProduccion SET Estado = 'Activa' WHERE OrdenProduccion = @OT AND Estado = 'Suspendida';
+        UPDATE PRDExtrusionControl SET Estado = 'EnProceso', FechaUltimaModificacion = GETDATE()
+        WHERE Estado = 'Suspendida' AND IdExtrusionControl IN (${SQL_CONTROLES_DE_OT});
+        UPDATE PRDOrdenesProduccionPausas SET HoraFinPausa = GETDATE(), UsuarioReanuda = @usuario
+        WHERE OrdenProduccion = @OT AND HoraFinPausa IS NULL;
+
+        IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
+        BEGIN
+          DECLARE @Pausa INT = (SELECT TOP 1 IdMovimiento FROM SISMovimientos
+                                WHERE Tipo = 'ORDEN_TRABAJO' AND Subtipo = 'PAUSA' AND IdReferencia = @IdOT
+                                ORDER BY IdMovimiento DESC);
+          DECLARE @Mov TABLE (Id INT);
+          INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen, IdMovimientoRelacionado)
+          OUTPUT INSERTED.IdMovimiento INTO @Mov
+          VALUES ('ORDEN_TRABAJO', 'REANUDAR', @IdOT, @OT, GETDATE(), @usuario, @origen, NULL, N'Orden de trabajo reanudada desde la tableta', @Pausa);
+          INSERT INTO SISMovimientosDetalle (IdMovimiento, Tabla, Campo, ValorAnterior, ValorNuevo)
+          SELECT Id, 'PRDOrdenesProduccion', 'Estado', 'Suspendida', 'Activa' FROM @Mov;
+        END
+        SELECT @OT AS OT;
+      `);
+    return r.recordset && r.recordset[0] ? r.recordset[0].OT : null;
+  } catch (err) {
+    console.error('No se pudo registrar la reanudacion de la OT:', { idOrden, message: err.message, number: err.number });
+    return null;
+  }
+}
+
+// FIX 24/09/2026 (a pedido del usuario): la bitacora se cierra cuando TERMINA SU TURNO, no cuando
+// alguien abre la siguiente (antes una bitacora podia quedar abierta dias si nadie tomaba control).
+// El fin del turno sale del turno guardado en la bitacora (el que tiene asignado la maquina en
+// TURHorariosMaquinas; si la maquina no tiene horario, NOMTurnos -- mismo criterio que
+// resolverTurnoMaquina). Si HoraFin <= HoraInicio el turno cruza medianoche y termina el dia
+// siguiente a FechaTurno. HoraCierre queda en la hora OFICIAL de fin del turno, no en la hora en
+// que corrio esta revision. NO abre la bitacora del turno nuevo: esa la abre el operario al tomar
+// control (abrirOReanudarBitacora); los bultos que abran antes quedan sin bitacora y el trigger
+// trg_SEL_Bultos_CierreBulto se la completa al cerrarlos. Bitacoras sin Turno no se tocan.
+// Devuelve cuantas cerro; nunca revienta hacia afuera.
+async function cerrarBitacorasPorFinTurno(p) {
+  try {
+    const r = await p.request().query(`
+      UPDATE bi
+      SET bi.HoraCierre = CASE WHEN f.FinTurno < bi.HoraApertura THEN bi.HoraApertura ELSE f.FinTurno END,
+          bi.MotivoCierre = 'fin_turno'
+      FROM SEL_BitacoraTurno bi
+      CROSS APPLY (
+          SELECT TOP 1 x.HoraInicio, x.HoraFin
+          FROM (
+              SELECT th.HoraInicio, th.HoraFin, 1 AS Prioridad
+              FROM TURHorariosMaquinas th
+              WHERE th.CodigoMaquina = bi.Maquina AND th.CodigoTurno = bi.Turno
+              UNION ALL
+              SELECT t.HoraInicial, t.HoraFinal, 2
+              FROM NOMTurnos t
+              WHERE t.Codigo = bi.Turno
+          ) x
+          ORDER BY x.Prioridad
+      ) h
+      CROSS APPLY (
+          SELECT DATEADD(DAY,
+                   CASE WHEN CAST(h.HoraFin AS time) <= CAST(h.HoraInicio AS time) THEN 1 ELSE 0 END,
+                   CAST(CAST(bi.FechaTurno AS date) AS datetime) + CAST(CAST(h.HoraFin AS time) AS datetime)
+                 ) AS FinTurno
+      ) f
+      WHERE bi.HoraCierre IS NULL AND bi.Turno IS NOT NULL AND f.FinTurno <= GETDATE()
+    `);
+    const cerradas = r.rowsAffected ? r.rowsAffected[0] : 0;
+    if (cerradas > 0) console.log(`Bitacoras cerradas por fin de turno: ${cerradas}`);
+    return cerradas;
+  } catch (err) {
+    console.error('No se pudieron cerrar las bitacoras por fin de turno:',
+      { message: err.message, number: err.number, code: err.code });
+    return 0;
+  }
 }
 
 // Abre la bitacora del turno, o REUSA la que ya este abierta si es del mismo turno (SIN importar
@@ -1362,11 +1543,9 @@ async function ajustarLineaSalidaTipo24(db, { detalle, elemento, cantidadAnterio
 // MaterialDisponibleKg NO se toca: es columna calculada ([MaterialTotalKg]-[MaterialConsumidoKg]),
 // escribirla revienta.
 //
-// El filtro de TipoProceso acepta los DOS valores a proposito. Node escribe 'SELLADORA' desde el
-// 16/09/2026 pero el script que renombra las filas viejas sigue sin correrse
-// (sql/pendientes/20260916_renombrar_tipoproceso_sellado_a_selladora.sql), asi que en produccion
-// conviven controles con 'Sellado' y con 'SELLADORA'. Buscar solo por uno dejaria sin recalcular
-// justo los procesos mas viejos, que son los que mas falta les hace.
+// El filtro de TipoProceso acepta los DOS valores a proposito. El valor correcto es 'Sellado' (ver
+// FIX 24/09/2026 en registrarControlParcialSellado); entre el 16 y el 24/09 Node escribio
+// 'SELLADORA' y pueden quedar controles con ese valor hasta correr la correccion en la base.
 async function recalcularControlSellado(db, { elemento, fecha, lineaOriginal, lote, generadoPor }) {
   const dtTotal = await db.request()
     .input('elemento', elemento).input('fecha', sql.Date, fecha).input('lote', lote).input('linea', lineaOriginal)
@@ -1666,6 +1845,9 @@ module.exports = {
   valNumerico,
   resolverTurnoMaquina,
   cerrarBitacora,
+  cerrarBitacorasPorFinTurno,
+  suspenderOTDeOrden,
+  reanudarOTDeOrden,
   abrirOReanudarBitacora,
   obtenerSalidaRealSellado,
   obtenerMiembrosGrupoSellado,

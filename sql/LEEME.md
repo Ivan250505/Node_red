@@ -46,10 +46,10 @@ tenía `SEL_RolloEjecucion`, sin ninguna discrepancia. Ojo: la base ya está lis
 funcionalidad no aparece hasta que el servidor de producción corra el código del commit `ff13ab1` --
 mientras tanto el esquema nuevo simplemente no se usa.
 
-Sigue pendiente `20260916_renombrar_tipoproceso_sellado_a_selladora.sql`: comprobado el
-18/09/2026 contra Prueba, conviven 38 controles con `TipoProceso = 'Sellado'` y 5 con `'SELLADORA'`.
-Mientras no se corra, el VB de Mirane (que filtra por `'Sellado'`) no encuentra los controles que
-crea Node y `RecalcularMermaSellado` sale en silencio sin calcular la merma.
+**24/09/2026:** `20260916_renombrar_tipoproceso_sellado_a_selladora.sql` se movió a `herramientas/` como
+**NO CORRER**: iba en la dirección equivocada. El valor correcto es `'Sellado'` (el proceso, como en todo
+Mirane); Node volvió a escribir `'Sellado'` y la corrección de los datos que quedaron con `'SELLADORA'`
+es el script de Mirane `nueva produccion/corregir_tipoproceso_selladora_a_sellado_24092026.sql`.
 
 El 16/09/2026 se igualó `CarlixplastPrueba` con producción y se
 comprobó columna por columna que no queda ninguna diferencia en las tablas `SEL_`: mismos tipos,

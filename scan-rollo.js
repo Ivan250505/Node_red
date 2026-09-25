@@ -11,7 +11,7 @@ const {
   resolverTurnoPorHora, resolverClienteDestino, resolverDestinoOrden,
   obtenerLineaOriginalControlSellado, obtenerFechaLoteOriginalControlSellado,
   obtenerOCrearOrdenProduccion, valNumerico, resolverTipoPedido, obtenerAnclaGrupoSellado,
-  abrirOReanudarBitacora
+  abrirOReanudarBitacora, reanudarOTDeOrden
 } = require('./sel-inventario-mp');
 
 function formatMMDD(d) {
@@ -540,6 +540,15 @@ async function materializarInicioOrden(pool, { idOrden, idEjecucion, codOperario
     await tx.rollback();
     throw err;
   }
+
+  // 24/09/2026: si esta orden se esta RETOMANDO despues de una suspension, su OT vuelve a 'Activa',
+  // se cierra la pausa y queda el movimiento REANUDAR (igual que Produccion.vb). Si la OT no esta
+  // 'Suspendida' (inicio normal) no hace nada. Va despues del commit y con el pool, para que un
+  // error aca nunca deje la transaccion de Iniciar a medias.
+  const dtUsuario = await pool.request().input('tercero', generadoPor || 0)
+    .query(`SELECT TOP 1 Codigo FROM SISUsuarios WHERE Tercero = @tercero`).catch(() => null);
+  const nUsuario = dtUsuario && dtUsuario.recordset.length > 0 ? Number(dtUsuario.recordset[0].Codigo) || null : null;
+  await reanudarOTDeOrden(pool, { idOrden, usuario: nUsuario });
 }
 
 // Sellado en paralelo (08/09/2026 -- ver DISENO_SELLADO_PARALELO_08092026.md): alterna cuál

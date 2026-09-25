@@ -1,3 +1,8 @@
+-- *** NO CORRER (24/09/2026) ***
+-- Este script iba en la dirección equivocada: el valor correcto de TipoProceso es 'Sellado' (el proceso),
+-- que es lo que buscan el cierre y la merma de Mirane. Si se corre, esos procesos dejan de cerrarse y de
+-- calcular merma. La corrección real es Mirane: nueva produccion/corregir_tipoproceso_selladora_a_sellado_24092026.sql
+--
 -- Alinea TipoProceso='Sellado' (valor escrito a mano en sel-inventario-mp.js, inconsistente con
 -- el resto del sistema) a 'SELLADORA' -- mismo valor que PRDMaquinas.Tipo usa para esta máquina en
 -- TODO el sistema clásico (ConsReporteSelladoraPLC.vb, EjecucionSelladora.vb,

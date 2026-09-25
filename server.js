@@ -12,7 +12,8 @@ const { registrarEvento } = require('./accesos');
 const { consultarSerial, confirmarRollo, alternarReferenciaGrupo, materializarInicioOrden } = require('./scan-rollo');
 const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
 const {
-  obtenerLineaOriginalControlSellado, resolverTurnoMaquina, cerrarBitacora, abrirOReanudarBitacora,
+  obtenerLineaOriginalControlSellado, resolverTurnoMaquina, cerrarBitacora, cerrarBitacorasPorFinTurno,
+  abrirOReanudarBitacora, suspenderOTDeOrden,
   obtenerAnclaGrupoSellado, obtenerEstadoAjusteConsumo, ajustarConsumoRollo
 } = require('./sel-inventario-mp');
 
@@ -8222,14 +8223,40 @@ app.post('/api/selladora/orden/:idOrden/pausar', requireLogin, async (req, res) 
     `);
     const tOrdenProduccionTM = dtOP.recordset.length > 0 ? dtOP.recordset[0].OrdenProduccion : null;
 
+    // 24/09/2026 (a pedido del usuario): bitacora del tiempo muerto = la de la maquina para el TURNO y
+    // la FECHA DE TURNO en que empieza (la que abre el operario al tomar control) -- misma regla que
+    // trg_SEL_Bultos_CierreBulto para los bultos, con el mismo resolverTurnoMaquina con el que Node abre
+    // la bitacora. Si todavia no hay bitacora de ese turno, queda NULL. Nunca bloquea la pausa.
+    let nIdBitacoraTM = null;
+    try {
+      const dtMaq = await p.request().input('idOrden', idOrden)
+        .query(`SELECT Maquina FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+      const nMaquinaTM = dtMaq.recordset.length > 0 ? dtMaq.recordset[0].Maquina : null;
+      if (nMaquinaTM != null) {
+        const turnoTM = await resolverTurnoMaquina(p, nMaquinaTM, horaInicio);
+        if (turnoTM.turno != null) {
+          const dtBit = await p.request()
+            .input('maquina', nMaquinaTM).input('turno', turnoTM.turno).input('fechaTurno', turnoTM.fechaTurno)
+            .query(`
+              SELECT TOP 1 IdBitacora FROM SEL_BitacoraTurno
+              WHERE Maquina = @maquina AND Turno = @turno AND FechaTurno = @fechaTurno
+              ORDER BY IdBitacora DESC
+            `);
+          if (dtBit.recordset.length > 0) nIdBitacoraTM = dtBit.recordset[0].IdBitacora;
+        }
+      }
+    } catch (errBit) {
+      console.error('No se pudo resolver la bitacora del tiempo muerto:', errBit.message);
+    }
+
     await p.request()
       .input('idEjecucion', IdEjecucion).input('operario', operario).input('tipo', tipo)
       .input('subtipo', tipo === 'alistamiento' ? subtipo : null)
       .input('horaInicio', horaInicio).input('observaciones', observaciones ? observaciones.trim() : null)
-      .input('ordenProduccion', tOrdenProduccionTM)
+      .input('ordenProduccion', tOrdenProduccionTM).input('idBitacora', nIdBitacoraTM)
       .query(`
-        INSERT INTO SEL_TiempoMuerto (id_ejecucion, Operario, Tipo, Subtipo, HoraInicio, Observaciones, OrdenProduccion)
-        VALUES (@idEjecucion, @operario, @tipo, @subtipo, @horaInicio, @observaciones, @ordenProduccion)
+        INSERT INTO SEL_TiempoMuerto (id_ejecucion, Operario, Tipo, Subtipo, HoraInicio, Observaciones, OrdenProduccion, IdBitacora)
+        VALUES (@idEjecucion, @operario, @tipo, @subtipo, @horaInicio, @observaciones, @ordenProduccion, @idBitacora)
       `);
     await p.request().input('idEjecucion', IdEjecucion).query(
       `UPDATE SEL_EjecucionOrden SET Estado = 'En pausa' WHERE IdEjecucion = @idEjecucion`
@@ -8795,6 +8822,13 @@ app.post('/api/selladora/orden/:idOrden/responder-suspension', requireLogin, asy
     await p.request().input('idOrden', idOrden).query(
       `UPDATE SEL_OrdenProduccion SET Estado = 'Suspendida' WHERE IdOrden = @idOrden`
     );
+    // 24/09/2026: la OT tambien queda Suspendida + pausa + movimiento PAUSA (igual que Produccion.vb).
+    // El otro camino (terminar el bulto primero) lo hace trg_SEL_Bultos_SuspenderTemporal en la base.
+    await suspenderOTDeOrden(p, {
+      idOrden,
+      usuario: Number(req.session.usuario && req.session.usuario.codigo) || null,
+      motivo: 'Suspendida desde Programación (el operario suspendió sin terminar el bulto)'
+    });
 
     res.json({ ok: true });
   } catch (err) {
@@ -9191,4 +9225,13 @@ wssPeso.on('connection', (cliente) => {
 server.listen(webPort, '0.0.0.0', () => {
   console.log(`Servidor corriendo en http://localhost:${webPort} (y en la IP de este PC en la red local)`);
   conectarNodeRed();
+
+  // FIX 24/09/2026: cierre de bitacoras al terminar su turno (ver cerrarBitacorasPorFinTurno en
+  // sel-inventario-mp.js). Una vez al arrancar (cierra las que quedaron vencidas mientras el
+  // servidor estaba apagado) y luego cada 5 minutos.
+  const revisarFinTurno = async () => {
+    try { await cerrarBitacorasPorFinTurno(await getPool()); } catch (err) { /* ya se registro adentro */ }
+  };
+  revisarFinTurno();
+  setInterval(revisarFinTurno, 5 * 60 * 1000);
 });
