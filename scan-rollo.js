@@ -50,15 +50,34 @@ async function consultarSerial(db, { idOrden, serial, esNuevoRollo }) {
   const tBodegaRollo = await obtenerBodegaDeRollo(db, tSerial);
 
   if (esNuevoRollo) {
-    const tLoteHoy = formatMMDD(new Date());
-    const dtBodegaPpal = await db.request().input('lote', tLoteHoy).input('elemento', datosOrden.elemento)
-      .query(`SELECT TOP 1 Bodega FROM PRDProduccionMateriaPrima WHERE Lote = @lote AND Elemento = @elemento AND Bodega IS NOT NULL ORDER BY Linea ASC`);
+    // FIX 25/09/2026 (reportado por el usuario con foto de la tableta): la bodega "principal" se
+    // buscaba con el Lote de HOY + Elemento, sin mirar la orden -- si el proceso empezo otro dia, o
+    // hoy hubo otro proceso de la misma referencia, comparaba contra la MP de OTRO proceso. Ahora
+    // es la MP del ANCLA de esta orden (misma Fecha/Lote/Linea bajo la que se registra la MP del
+    // proceso, ver obtenerFechaLoteOriginalControlSellado). Si esta orden todavia no tiene MP propia
+    // (p. ej. referencia hermana de un Sellado en paralelo), no se bloquea -- igual que antes cuando
+    // no se encontraba nada.
+    const nLineaAncla = await obtenerLineaOriginalControlSellado(db, idOrden, 0);
+    const ancla = nLineaAncla ? await obtenerFechaLoteOriginalControlSellado(db, idOrden, nLineaAncla) : null;
+    const dtBodegaPpal = ancla
+      ? await db.request().input('anio', ancla.fecha.getFullYear()).input('lote', ancla.lote)
+          .input('elemento', datosOrden.elemento).input('linea', nLineaAncla)
+          .query(`SELECT TOP 1 Bodega FROM PRDProduccionMateriaPrima
+                  WHERE Year(Fecha) = @anio AND Lote = @lote AND Elemento = @elemento AND Linea = @linea AND Bodega IS NOT NULL`)
+      : { recordset: [] };
     if (dtBodegaPpal.recordset.length > 0) {
       const tBodegaPpal = (dtBodegaPpal.recordset[0].Bodega || '').trim();
       if (tBodegaRollo && tBodegaPpal && tBodegaRollo.toUpperCase() !== tBodegaPpal.toUpperCase()) {
+        // El operario no conoce los codigos de bodega (005004, 005006...): se muestra el NOMBRE.
+        const dtNombres = await db.request().input('b1', tBodegaRollo).input('b2', tBodegaPpal)
+          .query(`SELECT Codigo, Nombre FROM INVBodegas WHERE Codigo IN (@b1, @b2)`);
+        const nombreDe = (codigo) => {
+          const fila = dtNombres.recordset.find(r => String(r.Codigo).trim().toUpperCase() === codigo.toUpperCase());
+          return fila && fila.Nombre ? String(fila.Nombre).trim() : codigo;
+        };
         return {
           ok: false,
-          error: `Este rollo pertenece a la bodega '${tBodegaRollo}', pero la etiqueta principal de esta ejecución usa la bodega '${tBodegaPpal}'. Debe escanear un rollo de la misma bodega.`
+          error: `Este rollo pertenece a la bodega "${nombreDe(tBodegaRollo)}", pero la materia prima de esta orden es de la bodega "${nombreDe(tBodegaPpal)}". Debe escanear un rollo de la misma bodega.`
         };
       }
     }
