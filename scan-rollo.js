@@ -11,7 +11,7 @@ const {
   resolverTurnoPorHora, resolverClienteDestino, resolverDestinoOrden,
   obtenerLineaOriginalControlSellado, obtenerFechaLoteOriginalControlSellado,
   obtenerOCrearOrdenProduccion, valNumerico, resolverTipoPedido, obtenerAnclaGrupoSellado,
-  abrirOReanudarBitacora, reanudarOTDeOrden
+  abrirOReanudarBitacora, reanudarOTDeOrden, horaServidorBD
 } = require('./sel-inventario-mp');
 
 function formatMMDD(d) {
@@ -162,7 +162,8 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
     nIdBitacora = await abrirOReanudarBitacora({ request: () => new sql.Request() }, nMaquina, codOperario);
   }
 
-  const fHoy = new Date();
+  // 25/09/2026: hora de la base, no del PC de Node (ver horaServidorBD en sel-inventario-mp.js)
+  const fHoy = await horaServidorBD(tx);
   const nAgno = fHoy.getFullYear();
   const nMes = fHoy.getMonth() + 1;
   const nDia = fHoy.getDate();
@@ -363,7 +364,7 @@ async function confirmarRollo(pool, { idOrden, idEjecucionActivo, serial, esNuev
       // (PRDProduccionMateriaPrima), contra la ejecucion/bulto que YA existen. Confirmado con el
       // usuario 23/08/2026 -- el diseno anterior llamaba crearBultoInicial en cada rollo,
       // creando un bulto y una fila de PRDProduccion nuevos por cada uno, lo cual estaba mal.
-      const fHoy = new Date();
+      const fHoy = await horaServidorBD(tx);   // 25/09/2026: reloj de la base, no del PC de Node
       const tLote = formatMMDD(fHoy);
       const nLineaOriginal = await obtenerLineaOriginalControlSellado(tx, idOrden, 0);
       const tBodegaRollo = await obtenerBodegaDeRollo(tx, consulta.serial);

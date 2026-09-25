@@ -13,7 +13,7 @@ const { consultarSerial, confirmarRollo, alternarReferenciaGrupo, materializarIn
 const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
 const {
   obtenerLineaOriginalControlSellado, resolverTurnoMaquina, cerrarBitacora, cerrarBitacorasPorFinTurno,
-  abrirOReanudarBitacora, suspenderOTDeOrden,
+  abrirOReanudarBitacora, suspenderOTDeOrden, horaServidorBD,
   obtenerAnclaGrupoSellado, obtenerEstadoAjusteConsumo, ajustarConsumoRollo
 } = require('./sel-inventario-mp');
 
@@ -8220,7 +8220,9 @@ app.post('/api/selladora/orden/:idOrden/pausar', requireLogin, async (req, res) 
       return res.json({ ok: false, error: 'Esta orden ya está en pausa.' });
     }
 
-    const horaInicio = new Date();
+    // 25/09/2026: inicio del tiempo muerto con el reloj de la BASE (el fin ya usa GETDATE() en
+    // /reanudar) -- ver horaServidorBD en sel-inventario-mp.js.
+    const horaInicio = await horaServidorBD(p);
 
     // FIX 15/09/2026 (a pedido del usuario -- "todo debe quedar asociado a la orden de trabajo"):
     // si la OT ya existe para esta ejecución (pausa durante producción activa, no el alistamiento

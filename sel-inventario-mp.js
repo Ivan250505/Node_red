@@ -1019,6 +1019,16 @@ async function construirSerialBitacora(p, maquinaCodigo, fechaTurnoISO, turnoCod
   return `${fecha}SE${numeroMaquina}${letra}`;
 }
 
+// FIX 25/09/2026 (a pedido del usuario -- tiempos muertos con fin ANTES del inicio): la hora "ahora"
+// que se guarda como inicio de un tiempo muerto o de un bulto se toma del reloj de la BASE (GETDATE()),
+// no del PC donde corre Node -- el fin ya se guardaba con GETDATE(), y el PC de Node iba unos 7 s
+// adelantado, asi que un evento de pocos segundos quedaba con fin < inicio. Con useUTC:false (ver
+// dbConfig en server.js) el DATETIME vuelve como hora local y se puede reenviar tal cual.
+async function horaServidorBD(db) {
+  const r = await db.request().query('SELECT GETDATE() AS Ahora');
+  return new Date(r.recordset[0].Ahora);
+}
+
 async function cerrarBitacora(p, idBitacora, motivo) {
   await p.request().input('id', idBitacora).input('motivo', motivo).query(
     `UPDATE SEL_BitacoraTurno SET HoraCierre = GETDATE(), MotivoCierre = @motivo
@@ -1845,6 +1855,7 @@ module.exports = {
   valNumerico,
   resolverTurnoMaquina,
   cerrarBitacora,
+  horaServidorBD,
   cerrarBitacorasPorFinTurno,
   suspenderOTDeOrden,
   reanudarOTDeOrden,
