@@ -2807,11 +2807,11 @@ function scriptAutorizacion() {
     function pedirFirmaAutorizacion(idOrden, datos) {
       var cargos = (datos.cargosPermitidos || []).join(', ');
       return Swal.fire({
-        title: '🔑 Autorización del pedido',
+        title: '🔑 Autorización de la OT',
         html: '<div style="text-align:left;font-size:14px;">' +
                 '<div style="background:#fff4e5;border-left:5px solid #f39c12;padding:10px 12px;border-radius:8px;margin-bottom:14px;">' +
-                  'Pedido <b>' + datos.pedido + '</b>. Esta firma se pide <b>una sola vez por pedido</b> y ' +
-                  'es la que permite finalizarlo y cerrar sesión.' +
+                  'Orden de Trabajo <b>' + datos.ot + '</b> (pedido ' + datos.pedido + '). Esta firma se pide ' +
+                  '<b>una sola vez por OT</b> y es la que permite finalizar y cerrar sesión.' +
                 '</div>' +
                 '<label style="display:block;font-weight:600;margin-bottom:4px;">Usuario</label>' +
                 '<input id="aut-usuario" class="swal2-input" style="margin:0 0 10px;width:100%;" ' +
@@ -2853,7 +2853,7 @@ function scriptAutorizacion() {
       }).then(function(r) {
         if (!r.isConfirmed || !r.value) return false;
         return Swal.fire({
-          icon: 'success', title: 'Pedido autorizado',
+          icon: 'success', title: 'OT autorizada',
           html: 'Firmó <b>' + r.value.firma.nombre + '</b><br>' +
                 '<span style="font-size:13px;color:#64748b;">' + (r.value.firma.cargo || '') + '</span>',
           timer: 2200, showConfirmButton: false
@@ -2861,15 +2861,15 @@ function scriptAutorizacion() {
       });
     }
 
-    // Puerta unica: devuelve una promesa que resuelve true SOLO si el pedido quedo autorizado.
-    // La usan el Finalizar y el cierre de sesion.
+    // Puerta unica: devuelve una promesa que resuelve true SOLO si la OT actual quedo autorizada.
+    // La usan el Finalizar y el cierre de sesion. Sin OT todavia (25/09/2026) no se exige firma.
     function exigirAutorizacion(idOrden) {
       return estadoAutorizacion(idOrden).then(function(datos) {
         if (!datos.ok) {
           return Swal.fire({ icon: 'error', title: 'No se pudo comprobar', text: datos.error, confirmButtonColor: '#71bf44' })
             .then(function() { return false; });
         }
-        if (datos.autorizado) return true;
+        if (datos.sinOT || datos.autorizado) return true;
         return pedirFirmaAutorizacion(idOrden, datos);
       }).catch(function() {
         return Swal.fire({ icon: 'error', title: 'Error de conexión', text: 'No se pudo comprobar la autorización.', confirmButtonColor: '#71bf44' })
@@ -2884,16 +2884,25 @@ function scriptAutorizacion() {
           Swal.fire({ icon: 'error', title: 'No se pudo comprobar', text: datos.error, confirmButtonColor: '#71bf44' });
           return;
         }
+        if (datos.sinOT) {
+          Swal.fire({
+            icon: 'info', title: 'Todavía no hay Orden de Trabajo',
+            text: 'La OT nace con el primer bulto. Hasta entonces no hay nada que autorizar.',
+            confirmButtonColor: '#71bf44'
+          });
+          return;
+        }
         if (!datos.autorizado) { pedirFirmaAutorizacion(idOrden, datos); return; }
         // Ya firmado: se muestra quien y cuando, y se deja volver a firmar (la tabla guarda la
-        // historia, no sobreescribe) por si hubo que revisar el pedido otra vez.
+        // historia, no sobreescribe) por si hubo que revisar la OT otra vez.
         var f = datos.firma;
         var cuando = f.fecha ? new Date(f.fecha).toLocaleString() : '—';
         Swal.fire({
           icon: 'success',
-          title: 'Pedido ya autorizado',
+          title: 'OT ya autorizada',
           html: '<div style="text-align:left;font-size:14px;">' +
-                  '<div>Pedido <b>' + datos.pedido + '</b></div>' +
+                  '<div>Orden de Trabajo <b>' + datos.ot + '</b></div>' +
+                  '<div style="font-size:13px;color:#64748b;">Pedido ' + datos.pedido + '</div>' +
                   '<div style="margin-top:8px;">Firmó <b>' + (f.nombre || f.usuario) + '</b></div>' +
                   '<div style="font-size:13px;color:#64748b;">' + (f.cargo || '') + '</div>' +
                   '<div style="font-size:13px;color:#64748b;margin-top:6px;">' + cuando + '</div>' +
@@ -4641,7 +4650,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
         <div class="orden-acciones">${botonesResiduosHTML}</div>
       </div>` : ''}
       <div class="isla">
-        <div class="label">Autorización del pedido</div>
+        <div class="label">Autorización de la OT</div>
         <div class="isla-detalle">Necesaria para finalizar y para cerrar sesión</div>
         <div class="orden-acciones">${botonAutorizacion}</div>
       </div>
@@ -5392,11 +5401,14 @@ app.get('/logout', async (req, res) => {
       `);
       if (dtActiva.recordset.length > 0) {
         const activa = dtActiva.recordset[0];
-        const firma = await obtenerAutorizacionPedido(p, activa.NumeroPedido);
+        // Desde el 25/09/2026 la firma es de la OT actual; si la orden aun no tiene OT (limpieza,
+        // alistamiento) no hay nada que firmar y se deja salir.
+        const ot = await otActualDeOrden(p, activa.IdOrden);
+        const firma = ot ? await obtenerAutorizacionOT(p, ot) : true;
         if (!firma) {
           const maquinaCodigo = await obtenerCodigoMaquinaDeOrden(p, activa.IdOrden).catch(() => null);
           return res.status(403).send(renderErrorSimple(
-            `No puede cerrar sesión: el pedido ${activa.NumeroPedido} sigue activo y todavía no tiene la ` +
+            `No puede cerrar sesión: la Orden de Trabajo ${ot} (pedido ${activa.NumeroPedido}) sigue activa y todavía no tiene la ` +
             `autorización de un líder. Pídala con el botón "Autorización" de la pantalla del pedido. ` +
             `Pueden autorizarla: ` + CARGOS_AUTORIZAN_PEDIDO.map(c => c.nombre).join(', ') + '.',
             maquinaCodigo ? `/selladora/${maquinaCodigo}` : '/'
@@ -6531,7 +6543,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
       </div>
       <div class="isla isla-con-boton">
         <div class="isla-texto">
-          <div class="label">Autorización del pedido</div>
+          <div class="label">Autorización de la OT</div>
           <div class="isla-detalle">Necesaria para finalizar y para cerrar sesión</div>
         </div>
         ${botonAutorizacion}
@@ -8916,12 +8928,13 @@ app.post('/api/selladora/orden/:idOrden/finalizar', requireLogin, async (req, re
     // solo en el modal: Finalizar es un form POST normal, asi que un navegador que no corra el
     // script -- o alguien que mande el POST a mano -- se saltaria un bloqueo que viviera solo en
     // la pantalla. El de la tableta existe igual, pero para explicar, no para proteger.
-    const ordenParaFirma = await numeroPedidoDeOrden(p, idOrden);
-    if (ordenParaFirma) {
-      const firma = await obtenerAutorizacionPedido(p, ordenParaFirma.NumeroPedido);
+    // Desde el 25/09/2026 la firma es de la OT actual; sin OT (nunca saco un bulto) no se exige.
+    const otParaFirma = await otActualDeOrden(p, idOrden);
+    if (otParaFirma) {
+      const firma = await obtenerAutorizacionOT(p, otParaFirma);
       if (!firma) {
         throw new Error(
-          `El pedido ${ordenParaFirma.NumeroPedido} no tiene la autorización de un líder, así que no se puede finalizar. ` +
+          `La Orden de Trabajo ${otParaFirma} no tiene la autorización de un líder, así que no se puede finalizar. ` +
           `Pídala con el botón "Autorización" de esta pantalla. Pueden autorizarla: ` +
           CARGOS_AUTORIZAN_PEDIDO.map(c => c.nombre).join(', ') + '.'
         );
@@ -9126,8 +9139,16 @@ app.get('/api/mi-orden-activa', requireLogin, async (req, res) => {
 // dar en cualquier momento con el boton de la pantalla del pedido, pero sin ella no se puede
 //   - FINALIZAR la orden, ni
 //   - CERRAR SESION con un pedido activo.
-// El alcance es el PEDIDO: una firma vale para las hasta 3 ordenes que un mismo NumeroPedido tiene
-// en sellado paralelo.
+// CAMBIO 25/09/2026 (a pedido del usuario -- "esa autorizacion debe quedar por orden de trabajo"):
+// el alcance ya NO es el pedido sino la OT (PRDOrdenesProduccion.OrdenProduccion). Reglas:
+//   - Se exige la firma de la OT ACTUAL de la orden (la del bulto mas reciente). Si la orden se
+//     retomo otro dia y nacio una OT nueva, la firma de la OT vieja no sirve para la nueva, y la
+//     OT vieja sin firma tampoco bloquea.
+//   - Mientras la OT no existe (Pendiente, limpieza, alistamiento: nace con el primer bulto) NO se
+//     exige firma -- no hay OT que respaldar.
+//   - En sellado paralelo las 3 referencias comparten la MISMA OT, asi que una firma sigue
+//     cubriendo el grupo entero, igual que antes con el pedido.
+// Ver sql/pendientes/20260925_autorizacion_por_ot.sql (columna OrdenProduccion + backfill).
 
 // El NumeroPedido de una orden. Se usa en todas las comprobaciones de abajo.
 async function numeroPedidoDeOrden(p, idOrden) {
@@ -9136,24 +9157,48 @@ async function numeroPedidoDeOrden(p, idOrden) {
   return dt.recordset.length ? dt.recordset[0] : null;
 }
 
-// La firma mas reciente de un pedido, o null. Devuelve null (en vez de reventar) si todavia no se
-// corrio el script SQL: asi una base sin la tabla se comporta como antes del 22/09/2026 en las
-// consultas, y el bloqueo real se decide en pedidoAutorizado(), que SI distingue los dos casos.
-async function obtenerAutorizacionPedido(p, numeroPedido) {
+// La OT actual de una orden = la del bulto mas reciente (mismo criterio que SQL_OT_DE_ORDEN de
+// sel-inventario-mp.js, que es el que usa suspender/reanudar), o null si todavia no hay OT.
+// Una referencia de un grupo paralelo que aun no tiene bultos propios toma la OT de la ancla del
+// grupo: es la misma OT que va a recibir en cuanto saque su primer bulto.
+async function otActualDeOrden(p, idOrden) {
+  const buscar = async (id) => {
+    const dt = await p.request().input('idOrden', id).query(`
+      SELECT TOP 1 pp.OrdenProduccion
+      FROM SEL_Bultos b
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+      INNER JOIN PRDProduccion pp ON pp.Detalle = b.serialPadre
+      WHERE ej.IdOrden = @idOrden AND pp.OrdenProduccion IS NOT NULL
+      ORDER BY b.id DESC
+    `);
+    return dt.recordset.length ? dt.recordset[0].OrdenProduccion : null;
+  };
+  const propia = await buscar(idOrden);
+  if (propia) return propia;
+  const ancla = await obtenerAnclaGrupoSellado(p, idOrden);
+  if (ancla && ancla.IdOrden !== idOrden) return buscar(ancla.IdOrden);
+  return null;
+}
+
+// La firma mas reciente de una OT, o null. Si falta correr el script SQL REVIENTA con un mensaje
+// claro en vez de devolver null: un null aca se leeria como "sin firma" y bloquearia Finalizar sin
+// explicar por que. El /logout atrapa el error y deja salir (nunca encierra a nadie).
+async function obtenerAutorizacionOT(p, ordenProduccion) {
   try {
-    const dt = await p.request().input('pedido', numeroPedido).query(`
+    const dt = await p.request().input('ot', ordenProduccion).query(`
       SELECT TOP 1 UsuarioAutoriza, NombreAutoriza, CargoAutoriza, FechaHora
-      FROM SEL_AutorizacionPedido WHERE NumeroPedido = @pedido ORDER BY FechaHora DESC, Id DESC
+      FROM SEL_AutorizacionPedido WHERE OrdenProduccion = @ot ORDER BY FechaHora DESC, Id DESC
     `);
     return dt.recordset.length ? dt.recordset[0] : null;
   } catch (err) {
     console.error('No se pudo leer SEL_AutorizacionPedido:', err.message);
-    return null;
+    throw new Error('No se pudo comprobar la autorización de la OT. Falta correr ' +
+      'sql/pendientes/20260925_autorizacion_por_ot.sql contra esta base (' + err.message + ').');
   }
 }
 
 // Registra la firma. Todo lo que la acompana se deduce aca; la tableta solo manda usuario y clave.
-async function guardarAutorizacionPedido(p, { numeroPedido, idOrden, maquina, usuarioAutoriza, operarioEnTurno }) {
+async function guardarAutorizacionPedido(p, { numeroPedido, ordenProduccion, idOrden, maquina, usuarioAutoriza, operarioEnTurno }) {
   let idBitacora = null;
   try {
     const dtBi = await p.request().input('maquina', maquina).query(
@@ -9164,6 +9209,7 @@ async function guardarAutorizacionPedido(p, { numeroPedido, idOrden, maquina, us
 
   await p.request()
     .input('pedido', numeroPedido)
+    .input('ot', ordenProduccion)
     .input('idOrden', idOrden)
     .input('maquina', maquina)
     .input('idBitacora', idBitacora)
@@ -9174,24 +9220,28 @@ async function guardarAutorizacionPedido(p, { numeroPedido, idOrden, maquina, us
     .input('operario', operarioEnTurno || null)
     .query(`
       INSERT INTO SEL_AutorizacionPedido
-        (NumeroPedido, IdOrden, Maquina, IdBitacora, UsuarioAutoriza, NombreAutoriza,
+        (NumeroPedido, OrdenProduccion, IdOrden, Maquina, IdBitacora, UsuarioAutoriza, NombreAutoriza,
          IdCargoAutoriza, CargoAutoriza, OperarioEnTurno)
       VALUES
-        (@pedido, @idOrden, @maquina, @idBitacora, @usuario, @nombre, @idCargo, @cargo, @operario)
+        (@pedido, @ot, @idOrden, @maquina, @idBitacora, @usuario, @nombre, @idCargo, @cargo, @operario)
     `);
 }
 
-// Estado de la firma de un pedido: si ya esta y quien la dio.
+// Estado de la firma de la OT actual de una orden: si ya esta y quien la dio. sinOT = la orden
+// todavia no tiene OT, asi que no hay nada que firmar ni nada que bloquear.
 app.get('/api/selladora/orden/:idOrden/autorizacion', requireLogin, async (req, res) => {
   const idOrden = Number(req.params.idOrden);
   try {
     const p = await getPool();
     const orden = await numeroPedidoDeOrden(p, idOrden);
     if (!orden) return res.json({ ok: false, error: 'Orden no encontrada.' });
-    const firma = await obtenerAutorizacionPedido(p, orden.NumeroPedido);
+    const ot = await otActualDeOrden(p, idOrden);
+    const firma = ot ? await obtenerAutorizacionOT(p, ot) : null;
     res.json({
       ok: true,
       pedido: orden.NumeroPedido,
+      ot,
+      sinOT: !ot,
       autorizado: !!firma,
       firma: firma ? {
         usuario: firma.UsuarioAutoriza,
@@ -9215,12 +9265,20 @@ app.post('/api/selladora/orden/:idOrden/autorizacion', requireLogin, async (req,
     const p = await getPool();
     const orden = await numeroPedidoDeOrden(p, idOrden);
     if (!orden) return res.json({ ok: false, error: 'Orden no encontrada.' });
+    const ot = await otActualDeOrden(p, idOrden);
+    if (!ot) {
+      return res.json({
+        ok: false,
+        error: 'Esta orden todavía no tiene Orden de Trabajo (nace con el primer bulto), así que aún no hay nada que autorizar.'
+      });
+    }
 
     const intento = await validarAutorizadorPedido(p, req.body.codigo, req.body.password);
     if (!intento.ok) return res.json({ ok: false, error: intento.error });
 
     await guardarAutorizacionPedido(p, {
       numeroPedido: orden.NumeroPedido,
+      ordenProduccion: ot,
       idOrden,
       maquina: orden.Maquina,
       usuarioAutoriza: intento.usuario,
@@ -9230,14 +9288,16 @@ app.post('/api/selladora/orden/:idOrden/autorizacion', requireLogin, async (req,
     res.json({
       ok: true,
       pedido: orden.NumeroPedido,
+      ot,
       firma: { nombre: intento.usuario.nombre, cargo: intento.usuario.cargo }
     });
   } catch (err) {
-    const falta = /Invalid object name|SEL_AutorizacionPedido/i.test(err.message || '');
+    const falta = /Invalid object name|Invalid column name|SEL_AutorizacionPedido/i.test(err.message || '');
     res.json({
       ok: false,
       error: falta
-        ? 'Falta correr el script sql/pendientes/20260922_agregar_autorizacion_pedido.sql contra esta base.'
+        ? 'Falta correr los scripts sql/pendientes/20260922_agregar_autorizacion_pedido.sql y ' +
+          '20260925_autorizacion_por_ot.sql contra esta base.'
         : err.message
     });
   }
