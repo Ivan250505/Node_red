@@ -7,7 +7,7 @@ const session = require('express-session');
 const sql = require('mssql');
 const { desencriptar } = require('./crypto-mirane');
 const { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO,
-        validarAutorizadorPedido, CARGOS_AUTORIZAN_PEDIDO } = require('./auth');
+        validarAutorizadorPedido, CARGOS_AUTORIZAN_PEDIDO, AUTORIZACION_LIDER_ACTIVA } = require('./auth');
 const { registrarEvento } = require('./accesos');
 const { consultarSerial, confirmarRollo, alternarReferenciaGrupo, materializarInicioOrden } = require('./scan-rollo');
 const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
@@ -2773,7 +2773,7 @@ function abrirCalidad() {
     ${calidadHabilitada && VERIFICACION_BASCULA_ACTIVA ? `vigilarPesoPatron();` : ''}
     // Aviso de firma de fin de turno (25/09/2026, ver vigilarFirmaDeTurno en scriptAutorizacion). Con
     // typeof: scriptAutorizacion se carga en su propio <script>, y una pagina sin el no debe reventar.
-    ${calidadHabilitada ? `if (typeof vigilarFirmaDeTurno === 'function') vigilarFirmaDeTurno(${idOrden});` : ''}
+    ${calidadHabilitada && AUTORIZACION_LIDER_ACTIVA ? `if (typeof vigilarFirmaDeTurno === 'function') vigilarFirmaDeTurno(${idOrden});` : ''}
   `;
 }
 
@@ -2878,6 +2878,8 @@ function scriptAutorizacion() {
     // Puerta unica: devuelve una promesa que resuelve true SOLO si la bitacora que se exige quedo
     // autorizada. La usan el Finalizar y el cierre de sesion. Una maquina sin bitacora no la exige.
     function exigirAutorizacion(idOrden) {
+      // Autorizacion apagada (AUTORIZACION_LIDER_ACTIVA en auth.js): se deja pasar sin consultar.
+      if (!${AUTORIZACION_LIDER_ACTIVA}) return Promise.resolve(true);
       return estadoAutorizacion(idOrden).then(function(datos) {
         if (!datos.ok) {
           return Swal.fire({ icon: 'error', title: 'No se pudo comprobar', text: datos.error, confirmButtonColor: '#71bf44' })
@@ -4854,11 +4856,11 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
         <div class="label">Residuos</div>
         <div class="orden-acciones">${botonesResiduosHTML}</div>
       </div>` : ''}
-      <div class="isla">
+      ${AUTORIZACION_LIDER_ACTIVA ? `<div class="isla">
         <div class="label">Autorización del turno</div>
         <div class="isla-detalle">Necesaria para finalizar y para cerrar sesión</div>
         <div class="orden-acciones">${botonAutorizacion}</div>
-      </div>
+      </div>` : ''}
     </div>
     ${pesoBox}
     ${imprimirYAccionesBox}
@@ -5594,7 +5596,7 @@ app.get('/logout', async (req, res) => {
   // NUNCA deja a nadie encerrado por un fallo tecnico: si la consulta revienta (base caida, script
   // SQL sin correr) se deja salir, que es como se comportaba antes de que esto existiera. Lo que
   // se bloquea es la salida SIN firma, no la salida cuando no se pudo comprobar.
-  if (usuario && usuario.codigoOperarioPRD) {
+  if (AUTORIZACION_LIDER_ACTIVA && usuario && usuario.codigoOperarioPRD) {
     try {
       const p = await getPool();
       const dtActiva = await p.request().input('operario', usuario.codigoOperarioPRD).query(`
@@ -6750,13 +6752,13 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
         </div>
         ${botonObservacion}
       </div>
-      <div class="isla isla-con-boton">
+      ${AUTORIZACION_LIDER_ACTIVA ? `<div class="isla isla-con-boton">
         <div class="isla-texto">
           <div class="label">Autorización del turno</div>
           <div class="isla-detalle">Necesaria para finalizar y para cerrar sesión</div>
         </div>
         ${botonAutorizacion}
-      </div>` : ''}
+      </div>` : ''}` : ''}
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Referencias de salida</h2>
     ${tarjetasReferencia}
@@ -9235,7 +9237,7 @@ app.post('/api/selladora/orden/:idOrden/finalizar', requireLogin, async (req, re
     // la pantalla. El de la tableta existe igual, pero para explicar, no para proteger.
     // Desde el 25/09/2026 la firma es de la bitacora de turno mas reciente de la maquina (abierta o
     // ya cerrada por fin de turno); una maquina sin bitacora no la exige.
-    const ordenParaFirma = await numeroPedidoDeOrden(p, idOrden);
+    const ordenParaFirma = AUTORIZACION_LIDER_ACTIVA ? await numeroPedidoDeOrden(p, idOrden) : null;
     const biParaFirma = ordenParaFirma ? await bitacoraParaFirma(p, ordenParaFirma.Maquina) : null;
     if (biParaFirma) {
       const firma = await obtenerAutorizacionBitacora(p, biParaFirma.IdBitacora);
