@@ -4178,7 +4178,25 @@ function scriptProtocoloArranque(maquinaCodigo) {
     // El boton "▶ Iniciar" entra siempre por aca: antes de empezar de cero le pregunta al servidor
     // si esta orden ya tiene un protocolo a medias, para retomarlo en el paso que iba en vez de
     // volver a cronometrar una limpieza que ya se hizo.
+    // FIX 26/09/2026 (bug real, pedido 11940: se arranco su limpieza a las 22:19 con el 11731 todavia
+    // Activo en la misma maquina, y el cronometro quedo corriendo toda la noche): ANTES de abrir el
+    // protocolo se pregunta si la maquina ya tiene otra orden activa. Antes eso solo se revisaba al
+    // llegar al rollo, con la limpieza ya registrada. Si la consulta falla por red se sigue: el
+    // servidor tiene la misma guardia en /pausar y /protocolo/respuesta.
     function iniciarProtocoloArranque(idOrden) {
+      fetch('/api/selladora/orden/' + idOrden + '/puede-iniciar')
+        .then(function(r) { return r.json(); })
+        .then(function(v) {
+          if (v && v.ok === false) {
+            Swal.fire({ icon: 'warning', title: 'No se puede iniciar', text: v.error, confirmButtonColor: '#71bf44' });
+            return;
+          }
+          seguirIniciarProtocoloArranque(idOrden);
+        })
+        .catch(function() { seguirIniciarProtocoloArranque(idOrden); });
+    }
+
+    function seguirIniciarProtocoloArranque(idOrden) {
       fetch('/api/selladora/orden/' + idOrden + '/protocolo/estado')
         .then(function(r) { return r.json(); })
         .then(function(datos) {
@@ -8259,6 +8277,10 @@ app.post('/api/selladora/orden/:idOrden/pausar', requireLogin, async (req, res) 
   }
   try {
     const p = await getPool();
+    // 26/09/2026: la limpieza del protocolo de arranque entra por aca -- una orden Pendiente no la
+    // puede abrir con otra orden Activa en la misma maquina (ver bloqueoArranquePorOrdenActiva).
+    const bloqueo = await bloqueoArranquePorOrdenActiva(p, idOrden);
+    if (bloqueo) return res.json({ ok: false, error: bloqueo });
     const dtEj = await p.request().input('idOrden', idOrden).query(
       `SELECT TOP 1 IdEjecucion, Estado FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden`
     );
@@ -8489,6 +8511,9 @@ app.post('/api/selladora/orden/:idOrden/protocolo/respuesta', requireLogin, asyn
   const recorte = (valor, largo) => (valor == null || String(valor).trim() === '') ? null : String(valor).trim().slice(0, largo);
   try {
     const p = await getPool();
+    // 26/09/2026: ningun paso del arranque de una orden Pendiente con otra Activa en la maquina.
+    const bloqueo = await bloqueoArranquePorOrdenActiva(p, idOrden);
+    if (bloqueo) return res.json({ ok: false, error: bloqueo });
     const dtEj = await p.request().input('idOrden', idOrden).query(
       `SELECT TOP 1 IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden ORDER BY IdEjecucion ASC`
     );
@@ -8809,6 +8834,30 @@ function proximaVerificacionBascula(idUltima, fechaUltima) {
   const revuelto = ((Number(idUltima) * 2654435761) >>> 0) % rango;
   return new Date(new Date(fechaUltima).getTime() + PESO_PATRON_MIN_MS + revuelto);
 }
+
+// Una orden Pendiente no puede arrancar su protocolo -- ni siquiera la limpieza -- mientras otra
+// orden de la misma maquina este Activa (26/09/2026, a pedido del usuario, tras el pedido 11940).
+// Es la MISMA regla de validarPuedeIniciar que ya frenaba el paso del rollo, solo que ahora se
+// aplica desde el primer paso. Devuelve el mensaje de error, o null si puede seguir. Las ordenes
+// que no estan Pendiente no se tocan: el relevo corre su protocolo con la orden ya Activa.
+async function bloqueoArranquePorOrdenActiva(p, idOrden) {
+  const dt = await p.request().input('idOrden', idOrden)
+    .query(`SELECT Estado FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+  if (dt.recordset.length === 0 || dt.recordset[0].Estado !== 'Pendiente') return null;
+  const v = await validarPuedeIniciar(p, idOrden);
+  return v.ok ? null : v.error;
+}
+
+// Lo consulta el boton "▶ Iniciar" antes de abrir el protocolo (ver iniciarProtocoloArranque).
+app.get('/api/selladora/orden/:idOrden/puede-iniciar', requireLogin, async (req, res) => {
+  try {
+    const p = await getPool();
+    const error = await bloqueoArranquePorOrdenActiva(p, Number(req.params.idOrden));
+    res.json(error ? { ok: false, error } : { ok: true });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
 
 // Lo consulta el boton "▶ Iniciar" antes de arrancar el protocolo desde cero (ver
 // iniciarProtocoloArranque): si esta orden ya lo tiene a medias, la tableta lo retoma en el paso
