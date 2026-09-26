@@ -1119,6 +1119,173 @@ async function activarTurnoMaquina(p, maquinaCodigo, codigoTurno) {
   return aDesactivar.map(f => String(f.Descripcion || '').trim());
 }
 
+// ============================ Corregir turno (26/09/2026) ============================
+// A pedido del usuario: si el operario escogió mal el turno, lo corrige él mismo DENTRO del turno
+// (botón "Turno" junto a Pausa). Corrige SOLO:
+//   - el turno activo de la máquina (TURHorariosMaquinas.Activo, misma regla de activarTurnoMaquina),
+//   - la bitácora abierta de la máquina (Turno, FechaTurno, Serial). Si ya existe una bitácora del
+//     turno correcto para esa fecha, se unen en esa: se le pasan los bultos, tiempos muertos, firmas y
+//     observaciones, se reabre, y la equivocada queda cerrada con MotivoCierre 'correccion_turno',
+//   - el Turno (y la bitácora) de los bultos de ESA máquina desde que se abrió la bitácora
+//     (PRDProduccion), incluidos los que todavía no cierran -- el trigger CierreBulto busca la
+//     bitácora por ese Turno al cerrarlos,
+//   - un movimiento BITACORA_TURNO / CORRECCION_TURNO en SISMovimientos (anterior, nuevo, quién).
+// NO toca la OT (PRDOrdenesProduccion: ni Turno ni código) -- decisión del usuario, ese caso se
+// resuelve aparte.
+
+// Turnos que el operario puede escoger al corregir: los que cubren la hora actual.
+async function turnosParaCorregir(p, maquinaCodigo) {
+  const ahora = await horaServidorBD(p);
+  const m = ahora.getHours() * 60 + ahora.getMinutes();
+  const dt = await p.request().input('maquina', maquinaCodigo).query(`
+    SELECT th.CodigoTurno, t.Descripcion, th.HoraInicio, th.HoraFin, ISNULL(th.Activo, 0) AS Activo
+    FROM TURHorariosMaquinas th
+    INNER JOIN NOMTurnos t ON t.Codigo = th.CodigoTurno
+    WHERE th.CodigoMaquina = @maquina
+  `);
+  const dtBit = await p.request().input('maquina', maquinaCodigo).query(`
+    SELECT TOP 1 b.IdBitacora, b.Turno, ISNULL(t.Descripcion, '') AS Descripcion, b.Serial
+    FROM SEL_BitacoraTurno b LEFT JOIN NOMTurnos t ON t.Codigo = b.Turno
+    WHERE b.Maquina = @maquina AND b.HoraCierre IS NULL ORDER BY b.IdBitacora DESC
+  `);
+  const bit = dtBit.recordset[0] || null;
+  const duracion = f => { const r = minutosRango(f); return r.fin > r.ini ? r.fin - r.ini : 1440 - r.ini + r.fin; };
+  const candidatos = dt.recordset.filter(f => contieneMinuto(f, m)).sort((a, b) => duracion(a) - duracion(b))
+    .map(f => ({
+      codigo: Number(f.CodigoTurno), descripcion: String(f.Descripcion || '').trim(),
+      horaInicio: String(f.HoraInicio || '').trim(), horaFin: String(f.HoraFin || '').trim(),
+      activo: Number(f.Activo) === 1
+    }));
+  return {
+    candidatos,
+    bitacora: bit ? { id: bit.IdBitacora, turno: bit.Turno == null ? null : Number(bit.Turno),
+                      descripcion: String(bit.Descripcion || '').trim(), serial: bit.Serial || '' } : null
+  };
+}
+
+async function corregirTurnoMaquina(p, { maquina, codigoTurno, usuario, motivo }) {
+  const dtFr = await p.request().input('maquina', maquina).query(`
+    SELECT th.CodigoTurno, t.Descripcion, th.HoraInicio, th.HoraFin, ISNULL(th.Activo, 0) AS Activo
+    FROM TURHorariosMaquinas th
+    INNER JOIN NOMTurnos t ON t.Codigo = th.CodigoTurno
+    WHERE th.CodigoMaquina = @maquina
+  `);
+  const elegido = dtFr.recordset.find(f => Number(f.CodigoTurno) === Number(codigoTurno));
+  if (!elegido) throw new Error('Ese turno no está configurado para esta máquina.');
+  const aDesactivar = dtFr.recordset.filter(f =>
+    Number(f.CodigoTurno) !== Number(codigoTurno) && Number(f.Activo) === 1 && rangosSeSolapan(elegido, f));
+
+  const dtBit = await p.request().input('maquina', maquina).query(`
+    SELECT TOP 1 IdBitacora, Turno, CONVERT(varchar(10), FechaTurno, 23) AS FechaTurno, HoraApertura, Serial
+    FROM SEL_BitacoraTurno WHERE Maquina = @maquina AND HoraCierre IS NULL ORDER BY IdBitacora DESC
+  `);
+  const bit = dtBit.recordset[0] || null;
+  const ahora = await horaServidorBD(p);
+  const apertura = bit ? new Date(bit.HoraApertura) : ahora;
+  const fechaNueva = fechaTurnoDe(elegido, apertura);
+  const serialNuevo = await construirSerialBitacora(p, maquina, fechaNueva, Number(codigoTurno));
+  const descNueva = String(elegido.Descripcion || '').trim();
+  const turnoAnterior = bit && bit.Turno != null ? Number(bit.Turno) : null;
+  const cambiaBitacora = !!bit && (turnoAnterior !== Number(codigoTurno) || bit.FechaTurno !== fechaNueva);
+
+  const tx = new sql.Transaction(p);
+  await tx.begin();
+  let idFinal = bit ? bit.IdBitacora : null;
+  let fusionada = false;
+  let bultos = 0;
+  try {
+    await tx.request().input('maquina', maquina).input('turno', codigoTurno)
+      .query(`UPDATE TURHorariosMaquinas SET Activo = 1 WHERE CodigoMaquina = @maquina AND CodigoTurno = @turno`);
+    for (const f of aDesactivar) {
+      await tx.request().input('maquina', maquina).input('turno', f.CodigoTurno)
+        .query(`UPDATE TURHorariosMaquinas SET Activo = 0 WHERE CodigoMaquina = @maquina AND CodigoTurno = @turno`);
+    }
+
+    if (cambiaBitacora) {
+      const dtDest = await tx.request()
+        .input('maquina', maquina).input('turno', codigoTurno).input('fecha', fechaNueva).input('id', bit.IdBitacora)
+        .query(`SELECT TOP 1 IdBitacora FROM SEL_BitacoraTurno WITH (UPDLOCK)
+                WHERE Maquina = @maquina AND Turno = @turno AND FechaTurno = @fecha AND IdBitacora <> @id
+                ORDER BY IdBitacora DESC`);
+      if (dtDest.recordset.length > 0) {
+        // Ya existe la bitácora del turno correcto: todo lo de la equivocada pasa a esa.
+        fusionada = true;
+        idFinal = dtDest.recordset[0].IdBitacora;
+        await tx.request().input('id', bit.IdBitacora).input('dest', idFinal).input('apertura', sql.DateTime, apertura)
+          .query(`
+            UPDATE PRDProduccion SET IdBitacora = @dest WHERE IdBitacora = @id;
+            UPDATE SEL_Bultos SET IdBitacora = @dest WHERE IdBitacora = @id;
+            IF COL_LENGTH('dbo.SEL_TiempoMuerto', 'IdBitacora') IS NOT NULL
+              EXEC sp_executesql N'UPDATE SEL_TiempoMuerto SET IdBitacora = @dest WHERE IdBitacora = @id', N'@id INT, @dest INT', @id, @dest;
+            IF COL_LENGTH('dbo.SEL_AutorizacionPedido', 'IdBitacora') IS NOT NULL
+              EXEC sp_executesql N'UPDATE SEL_AutorizacionPedido SET IdBitacora = @dest WHERE IdBitacora = @id', N'@id INT, @dest INT', @id, @dest;
+            IF COL_LENGTH('dbo.SEL_ObservacionOperario', 'IdBitacora') IS NOT NULL
+              EXEC sp_executesql N'UPDATE SEL_ObservacionOperario SET IdBitacora = @dest WHERE IdBitacora = @id', N'@id INT, @dest INT', @id, @dest;
+            -- primero se cierra la equivocada (solo puede haber una abierta por máquina) y luego se reabre la correcta
+            UPDATE SEL_BitacoraTurno SET HoraCierre = GETDATE(), MotivoCierre = 'correccion_turno' WHERE IdBitacora = @id;
+            UPDATE SEL_BitacoraTurno
+            SET HoraCierre = NULL, MotivoCierre = NULL,
+                HoraApertura = CASE WHEN @apertura < HoraApertura THEN @apertura ELSE HoraApertura END
+            WHERE IdBitacora = @dest;
+          `);
+      } else {
+        await tx.request().input('id', bit.IdBitacora).input('turno', codigoTurno).input('fecha', fechaNueva)
+          .input('serial', serialNuevo)
+          .query(`UPDATE SEL_BitacoraTurno SET Turno = @turno, FechaTurno = @fecha, Serial = ISNULL(@serial, Serial)
+                  WHERE IdBitacora = @id`);
+      }
+
+      // Bultos de ESTA máquina desde que se abrió la bitácora (los ya cerrados de esa bitácora y los
+      // que siguen abiertos, que todavía no tienen IdBitacora). La OT no se toca.
+      const rB = await tx.request().input('maquina', maquina).input('turnoTxt', String(codigoTurno))
+        .input('idFinal', idFinal).input('apertura', sql.DateTime, apertura)
+        .query(`
+          UPDATE PRDProduccion SET Turno = @turnoTxt, IdBitacora = @idFinal
+          WHERE Maquina = @maquina
+            AND (IdBitacora = @idFinal OR (IdBitacora IS NULL AND HoraInicio >= @apertura));
+        `);
+      bultos = rB.rowsAffected ? rB.rowsAffected[0] : 0;
+    }
+
+    const resumen = !bit
+      ? `Turno activo corregido a ${descNueva} (sin bitácora abierta)`
+      : !cambiaBitacora
+        ? `Turno activo confirmado: ${descNueva} (la bitácora ya estaba en ese turno)`
+        : `Turno corregido a ${descNueva}` + (fusionada ? ` (unida a la bitácora ${idFinal})` : '') + ` -- ${bultos} bulto(s)`;
+    await tx.request()
+      .input('idBit', idFinal).input('serial', (serialNuevo || (bit && bit.Serial) || null))
+      .input('usuario', usuario || null).input('motivo', String(motivo || 'Corrección de turno desde la tableta').slice(0, 500))
+      .input('resumen', resumen.slice(0, 500))
+      .input('tAnt', turnoAnterior == null ? null : String(turnoAnterior)).input('tNue', String(codigoTurno))
+      .input('fAnt', bit ? bit.FechaTurno : null).input('fNue', fechaNueva)
+      .input('idAnt', bit ? String(bit.IdBitacora) : null).input('idNue', idFinal == null ? null : String(idFinal))
+      .input('desact', aDesactivar.map(f => String(f.CodigoTurno)).join(',') || null)
+      .input('bultos', String(bultos))
+      .query(`
+        IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
+        BEGIN
+          DECLARE @Mov TABLE (Id INT);
+          INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
+          OUTPUT INSERTED.IdMovimiento INTO @Mov
+          VALUES ('BITACORA_TURNO', 'CORRECCION_TURNO', @idBit, @serial, GETDATE(), @usuario, 'Tableta', @motivo, @resumen);
+          INSERT INTO SISMovimientosDetalle (IdMovimiento, Tabla, Campo, ValorAnterior, ValorNuevo)
+          SELECT Id, 'SEL_BitacoraTurno', 'Turno', @tAnt, @tNue FROM @Mov
+          UNION ALL SELECT Id, 'SEL_BitacoraTurno', 'FechaTurno', @fAnt, @fNue FROM @Mov
+          UNION ALL SELECT Id, 'SEL_BitacoraTurno', 'IdBitacora', @idAnt, @idNue FROM @Mov
+          UNION ALL SELECT Id, 'TURHorariosMaquinas', 'Activo=0', @desact, NULL FROM @Mov WHERE @desact IS NOT NULL
+          UNION ALL SELECT Id, 'PRDProduccion', 'Turno (bultos)', NULL, @bultos FROM @Mov;
+        END
+      `);
+
+    await tx.commit();
+  } catch (err) {
+    try { await tx.rollback(); } catch (e) { /* ya abortada */ }
+    throw err;
+  }
+  return { idBitacora: idFinal, turno: Number(codigoTurno), descripcion: descNueva, fechaTurno: fechaNueva,
+           fusionada, bultos, cambioBitacora: cambiaBitacora };
+}
+
 // Letra de turno para el serial de la bitacora (D/V/M/T/N) -- mismo mapeo NOMTurnos ya usado en
 // Mirane (ver ConsProduccionSeguimiento.vb:LetraTurnoCodigo): 6=Mañana, 7=Tarde, 8=Noche,
 // 9=Pleno Noche, 10=Pleno Dia. Null si el codigo no se reconoce (esquema viejo 1-5, no aplica aca).
@@ -2005,6 +2172,8 @@ module.exports = {
   horaServidorBD,
   candidatosTurnoMaquina,
   activarTurnoMaquina,
+  turnosParaCorregir,
+  corregirTurnoMaquina,
   cerrarBitacorasPorFinTurno,
   suspenderOTDeOrden,
   reanudarOTDeOrden,

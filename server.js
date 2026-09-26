@@ -14,7 +14,7 @@ const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require
 const {
   obtenerLineaOriginalControlSellado, resolverTurnoMaquina, cerrarBitacora, cerrarBitacorasPorFinTurno,
   abrirOReanudarBitacora, suspenderOTDeOrden, horaServidorBD,
-  candidatosTurnoMaquina, activarTurnoMaquina,
+  candidatosTurnoMaquina, activarTurnoMaquina, turnosParaCorregir, corregirTurnoMaquina,
   obtenerAnclaGrupoSellado, obtenerEstadoAjusteConsumo, ajustarConsumoRollo
 } = require('./sel-inventario-mp');
 
@@ -3302,7 +3302,61 @@ function scriptElegirTurno() {
               .catch(function() { seguir(); });
           });
         })
-        .catch(function() { seguir(); });
+    };
+
+    // 26/09/2026: "Corregir turno" (botón Turno junto a Pausa) -- ver corregirTurnoMaquina en
+    // sel-inventario-mp.js. Cambia el turno activo, la bitácora y los bultos del turno; la OT no.
+    window.corregirTurnoMaquina = window.corregirTurnoMaquina || function(maquina) {
+      function esc(t) { return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'); }
+      fetch('/api/selladora/maquina/' + maquina + '/turno-correccion')
+        .then(function(r) { return r.json(); })
+        .then(function(v) {
+          if (!v || !v.ok) { Swal.fire({ icon: 'error', title: 'No se pudo consultar', text: (v && v.error) || '', confirmButtonColor: '#71bf44' }); return; }
+          if (!v.candidatos || v.candidatos.length === 0) {
+            Swal.fire({ icon: 'info', title: 'Sin turnos', text: 'Esta máquina no tiene turnos configurados para esta hora.', confirmButtonColor: '#71bf44' });
+            return;
+          }
+          var actual = v.bitacora ? v.bitacora.turno : null;
+          var html = '<div style="text-align:left;margin-bottom:10px;">Turno de la bitácora actual: <b>'
+            + esc(v.bitacora ? (v.bitacora.descripcion || 'sin turno') : 'no hay bitácora abierta') + '</b></div>'
+            + '<div style="text-align:left;display:flex;flex-direction:column;gap:10px;">';
+          v.candidatos.forEach(function(c) {
+            html += '<label style="display:flex;align-items:center;gap:10px;font-size:1.1em;padding:10px;border:1px solid #ccc;border-radius:8px;cursor:pointer;">'
+              + '<input type="radio" name="turnoCorregido" value="' + c.codigo + '"' + (c.codigo === actual ? ' checked' : '') + ' style="width:22px;height:22px;">'
+              + '<span><b>' + esc(c.descripcion) + '</b> (' + esc(c.horaInicio) + ' - ' + esc(c.horaFin) + ')'
+              + (c.codigo === actual ? ' <span style="color:#71bf44;">— actual</span>' : '') + '</span></label>';
+          });
+          html += '</div><div style="text-align:left;margin-top:10px;font-size:0.9em;color:#666;">Se corrige la bitácora y los bultos de este turno. La orden de trabajo no cambia.</div>';
+          Swal.fire({
+            icon: 'question', title: 'Corregir turno', html: html,
+            showCancelButton: true, confirmButtonText: 'Corregir', cancelButtonText: 'Cancelar',
+            confirmButtonColor: '#b46200', cancelButtonColor: '#71bf44', allowOutsideClick: false,
+            preConfirm: function() {
+              var sel = document.querySelector('input[name="turnoCorregido"]:checked');
+              if (!sel) { Swal.showValidationMessage('Escoja un turno'); return false; }
+              if (Number(sel.value) === actual) { Swal.showValidationMessage('Ese ya es el turno actual'); return false; }
+              return Number(sel.value);
+            }
+          }).then(function(res) {
+            if (!res.isConfirmed) return;
+            fetch('/api/selladora/maquina/' + maquina + '/turno-correccion', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ codigoTurno: res.value })
+            })
+              .then(function(r) { return r.json(); })
+              .then(function(g) {
+                if (!g || g.ok === false) {
+                  Swal.fire({ icon: 'error', title: 'No se pudo corregir el turno', text: (g && g.error) || '', confirmButtonColor: '#71bf44' });
+                  return;
+                }
+                Swal.fire({ icon: 'success', title: 'Turno corregido',
+                  text: 'Turno: ' + g.descripcion + (g.cambioBitacora ? ' — ' + g.bultos + ' bulto(s) actualizados' + (g.fusionada ? ' (unida a la bitácora existente de ese turno)' : '') : ''),
+                  confirmButtonColor: '#71bf44' }).then(function() { location.reload(); });
+              })
+              .catch(function() { Swal.fire({ icon: 'error', title: 'Sin conexión', text: 'Intente de nuevo.', confirmButtonColor: '#71bf44' }); });
+          });
+        })
+        .catch(function() { Swal.fire({ icon: 'error', title: 'Sin conexión', text: 'Intente de nuevo.', confirmButtonColor: '#71bf44' }); });
     };
   `;
 }
@@ -4658,7 +4712,8 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
       <form method="post" action="/api/selladora/orden/${orden.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
         <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
       </form>
-      ${!pausaActiva ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>` : ''}`;
+      ${!pausaActiva ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>` : ''}
+      <button type="button" class="btn-accion" style="background:#b46200;" onclick="corregirTurnoMaquina(${Number(maquinaCodigo)})">🕘 Turno</button>`;
   }
 
   // Troquelado (SEL_OrdenProduccion.Troquelado != 'SinTroquelado') -- decide DOS cosas: si sale el
@@ -6604,6 +6659,9 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
       : '',
     (miembroAncla && !pausaActiva)
       ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>`
+      : '',
+    miembroAncla
+      ? `<button type="button" class="btn-accion" style="background:#b46200;" onclick="corregirTurnoMaquina(${Number(maquinaCodigo)})">🕘 Turno</button>`
       : ''
   ].join('');
 
@@ -8962,6 +9020,33 @@ app.post('/api/selladora/orden/:idOrden/turno', requireLogin, async (req, res) =
     console.log(`Turno activo máquina ${maquina}: ${codigoTurno}` +
       (desactivados.length ? ` (desactivados: ${desactivados.join(', ')})` : ''));
     res.json({ ok: true, desactivados });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// 26/09/2026: corregir el turno (botón "Turno" de la tableta) -- ver corregirTurnoMaquina.
+app.get('/api/selladora/maquina/:codigo/turno-correccion', requireLogin, async (req, res) => {
+  try {
+    const p = await getPool();
+    res.json(Object.assign({ ok: true }, await turnosParaCorregir(p, Number(req.params.codigo))));
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/selladora/maquina/:codigo/turno-correccion', requireLogin, async (req, res) => {
+  try {
+    const p = await getPool();
+    const maquina = Number(req.params.codigo);
+    const codigoTurno = Number(req.body && req.body.codigoTurno);
+    if (!maquina || !codigoTurno) return res.json({ ok: false, error: 'Falta la máquina o el turno.' });
+    const r = await corregirTurnoMaquina(p, {
+      maquina, codigoTurno,
+      usuario: Number(req.session.usuario && req.session.usuario.codigo) || null
+    });
+    console.log(`Corrección de turno máquina ${maquina}: ${r.descripcion} (bitácora ${r.idBitacora}, ${r.bultos} bulto(s)${r.fusionada ? ', unida' : ''})`);
+    res.json(Object.assign({ ok: true }, r));
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
