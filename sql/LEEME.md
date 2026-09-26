@@ -3,13 +3,14 @@
 Todos los `.sql` del proyecto viven acá. Antes estaban sueltos en la raíz, 32 archivos sin orden
 ni fecha, y no había forma de saber cuál se había corrido ni dónde (reorganizado el 15/09/2026).
 
-## Las tres carpetas
+## Las carpetas
 
 | Carpeta | Qué contiene |
 |---|---|
 | `aplicados/` | Migraciones **ya ejecutadas en producción**. Son el histórico: describen cómo llegó la base a donde está, y son lo que se correría en orden para levantar una base desde cero. |
 | `pendientes/` | Migraciones escritas pero **todavía no ejecutadas**. Hoy está vacía. Cuando una se aplique en todas las bases, se mueve a `aplicados/`. |
 | `herramientas/` | Cosas que **no son migraciones**: diagnósticos de solo lectura y scripts de reversión. No se corren como parte de ningún despliegue. |
+| `triggers/` | **Copia de lectura** de los triggers de `SEL_Bultos` (la canónica está en el repo de Mirane, `nueva produccion/triggers/`). Ver su `LEEME.md` para el estado de cada uno. |
 
 El prefijo de fecha (`AAAAMMDD_`) es la fecha en que el archivo entró al repositorio, sacada de
 git. Sirve para dos cosas: que el orden alfabético sea el orden cronológico de ejecución, y que se
