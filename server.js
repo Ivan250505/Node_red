@@ -3302,6 +3302,9 @@ function scriptElegirTurno() {
               .catch(function() { seguir(); });
           });
         })
+        // FIX 26/09/2026 (DIAGNOSTICO_TURNOS.md punto 1): sin este catch, si la consulta falla (red o
+        // sesión vencida) Iniciar/Retomar no hacían nada.
+        .catch(function() { seguir(); });
     };
 
     // 26/09/2026: "Corregir turno" (botón Turno junto a Pausa) -- ver corregirTurnoMaquina en

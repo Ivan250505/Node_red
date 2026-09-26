@@ -1088,6 +1088,47 @@ async function candidatosTurnoMaquina(p, maquinaCodigo, momento) {
   return { necesita, candidatos: candidatas.map(aJson), activoActual: activa ? aJson(activa) : null };
 }
 
+// FIX 26/09/2026 (DIAGNOSTICO_TURNOS.md punto 2): al escoger un turno no basta con apagar los que se
+// cruzan -- podían quedar horas SIN ningún turno activo (ayer D apagó M y T; hoy M apaga D; desde las
+// 14:00 no hay nada activo y el trigger de cierre no inserta el bulto en PRDProduccion). Ahora, además
+// de apagar los que se cruzan, se ENCIENDEN los que completan el día sin cruzarse, prefiriendo los de
+// la misma duración que el escogido: M -> T y N; T -> M y N; N -> M y T; D -> V; V -> D.
+// Devuelve { desactivar, activar } (filas de TURHorariosMaquinas, sin incluir el escogido).
+function planTurnosActivos(franjas, elegido) {
+  const esElegido = f => Number(f.CodigoTurno) === Number(elegido.CodigoTurno);
+  const desactivar = franjas.filter(f => !esElegido(f) && Number(f.Activo) === 1 && rangosSeSolapan(elegido, f));
+  const activos = [elegido].concat(franjas.filter(f => !esElegido(f) && Number(f.Activo) === 1 && !desactivar.includes(f)));
+  const duracion = f => { const r = minutosRango(f); return r.fin > r.ini ? r.fin - r.ini : 1440 - r.ini + r.fin; };
+  const dElegido = duracion(elegido);
+  const cubierto = min => activos.some(a => contieneMinuto(a, min));
+  const activar = [];
+  const libres = franjas.filter(f => !esElegido(f) && Number(f.Activo) !== 1)
+    .sort((a, b) => Math.abs(duracion(a) - dElegido) - Math.abs(duracion(b) - dElegido));
+  for (const f of libres) {
+    if (activos.some(a => rangosSeSolapan(a, f))) continue;
+    // solo si tapa algún minuto que hoy quede sin turno
+    let tapa = false;
+    for (let min = 0; min < 1440 && !tapa; min += 5) if (contieneMinuto(f, min) && !cubierto(min)) tapa = true;
+    if (!tapa) continue;
+    activos.push(f);
+    activar.push(f);
+  }
+  return { desactivar, activar };
+}
+
+async function aplicarPlanTurnos(tx, maquinaCodigo, codigoTurno, plan) {
+  await tx.request().input('maquina', maquinaCodigo).input('turno', codigoTurno)
+    .query(`UPDATE TURHorariosMaquinas SET Activo = 1 WHERE CodigoMaquina = @maquina AND CodigoTurno = @turno`);
+  for (const f of plan.desactivar) {
+    await tx.request().input('maquina', maquinaCodigo).input('turno', f.CodigoTurno)
+      .query(`UPDATE TURHorariosMaquinas SET Activo = 0 WHERE CodigoMaquina = @maquina AND CodigoTurno = @turno`);
+  }
+  for (const f of plan.activar) {
+    await tx.request().input('maquina', maquinaCodigo).input('turno', f.CodigoTurno)
+      .query(`UPDATE TURHorariosMaquinas SET Activo = 1 WHERE CodigoMaquina = @maquina AND CodigoTurno = @turno`);
+  }
+}
+
 // Deja activo el turno escogido y desactiva los demás turnos de la máquina que se crucen con él
 // (solo uno activo por rango de horas). Devuelve la lista de turnos desactivados.
 async function activarTurnoMaquina(p, maquinaCodigo, codigoTurno) {
@@ -1099,18 +1140,13 @@ async function activarTurnoMaquina(p, maquinaCodigo, codigoTurno) {
   `);
   const elegido = dt.recordset.find(f => Number(f.CodigoTurno) === Number(codigoTurno));
   if (!elegido) throw new Error('Ese turno no está configurado para esta máquina.');
-  const aDesactivar = dt.recordset.filter(f =>
-    Number(f.CodigoTurno) !== Number(codigoTurno) && Number(f.Activo) === 1 && rangosSeSolapan(elegido, f));
+  const plan = planTurnosActivos(dt.recordset, elegido);
+  const aDesactivar = plan.desactivar;
 
   const tx = new sql.Transaction(p);
   await tx.begin();
   try {
-    await tx.request().input('maquina', maquinaCodigo).input('turno', codigoTurno)
-      .query(`UPDATE TURHorariosMaquinas SET Activo = 1 WHERE CodigoMaquina = @maquina AND CodigoTurno = @turno`);
-    for (const f of aDesactivar) {
-      await tx.request().input('maquina', maquinaCodigo).input('turno', f.CodigoTurno)
-        .query(`UPDATE TURHorariosMaquinas SET Activo = 0 WHERE CodigoMaquina = @maquina AND CodigoTurno = @turno`);
-    }
+    await aplicarPlanTurnos(tx, maquinaCodigo, codigoTurno, plan);
     await tx.commit();
   } catch (err) {
     try { await tx.rollback(); } catch (e) { /* ya abortada */ }
@@ -1172,8 +1208,8 @@ async function corregirTurnoMaquina(p, { maquina, codigoTurno, usuario, motivo }
   `);
   const elegido = dtFr.recordset.find(f => Number(f.CodigoTurno) === Number(codigoTurno));
   if (!elegido) throw new Error('Ese turno no está configurado para esta máquina.');
-  const aDesactivar = dtFr.recordset.filter(f =>
-    Number(f.CodigoTurno) !== Number(codigoTurno) && Number(f.Activo) === 1 && rangosSeSolapan(elegido, f));
+  const plan = planTurnosActivos(dtFr.recordset, elegido);
+  const aDesactivar = plan.desactivar;
 
   const dtBit = await p.request().input('maquina', maquina).query(`
     SELECT TOP 1 IdBitacora, Turno, CONVERT(varchar(10), FechaTurno, 23) AS FechaTurno, HoraApertura, Serial
@@ -1194,12 +1230,7 @@ async function corregirTurnoMaquina(p, { maquina, codigoTurno, usuario, motivo }
   let fusionada = false;
   let bultos = 0;
   try {
-    await tx.request().input('maquina', maquina).input('turno', codigoTurno)
-      .query(`UPDATE TURHorariosMaquinas SET Activo = 1 WHERE CodigoMaquina = @maquina AND CodigoTurno = @turno`);
-    for (const f of aDesactivar) {
-      await tx.request().input('maquina', maquina).input('turno', f.CodigoTurno)
-        .query(`UPDATE TURHorariosMaquinas SET Activo = 0 WHERE CodigoMaquina = @maquina AND CodigoTurno = @turno`);
-    }
+    await aplicarPlanTurnos(tx, maquina, codigoTurno, plan);
 
     if (cambiaBitacora) {
       const dtDest = await tx.request()
@@ -1260,6 +1291,7 @@ async function corregirTurnoMaquina(p, { maquina, codigoTurno, usuario, motivo }
       .input('fAnt', bit ? bit.FechaTurno : null).input('fNue', fechaNueva)
       .input('idAnt', bit ? String(bit.IdBitacora) : null).input('idNue', idFinal == null ? null : String(idFinal))
       .input('desact', aDesactivar.map(f => String(f.CodigoTurno)).join(',') || null)
+      .input('activ', plan.activar.map(f => String(f.CodigoTurno)).join(',') || null)
       .input('bultos', String(bultos))
       .query(`
         IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
@@ -1273,6 +1305,7 @@ async function corregirTurnoMaquina(p, { maquina, codigoTurno, usuario, motivo }
           UNION ALL SELECT Id, 'SEL_BitacoraTurno', 'FechaTurno', @fAnt, @fNue FROM @Mov
           UNION ALL SELECT Id, 'SEL_BitacoraTurno', 'IdBitacora', @idAnt, @idNue FROM @Mov
           UNION ALL SELECT Id, 'TURHorariosMaquinas', 'Activo=0', @desact, NULL FROM @Mov WHERE @desact IS NOT NULL
+          UNION ALL SELECT Id, 'TURHorariosMaquinas', 'Activo=1 (completa el día)', NULL, @activ FROM @Mov WHERE @activ IS NOT NULL
           UNION ALL SELECT Id, 'PRDProduccion', 'Turno (bultos)', NULL, @bultos FROM @Mov;
         END
       `);
