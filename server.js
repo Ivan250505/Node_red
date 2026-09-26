@@ -2770,6 +2770,9 @@ function abrirCalidad() {
     // que es un setInterval de 0 ms sondeando sin parar.
     ${calidadHabilitada ? `vigilarCalidadDelBulto();` : ''}
     ${calidadHabilitada && VERIFICACION_BASCULA_ACTIVA ? `vigilarPesoPatron();` : ''}
+    // Aviso de firma de fin de turno (25/09/2026, ver vigilarFirmaDeTurno en scriptAutorizacion). Con
+    // typeof: scriptAutorizacion se carga en su propio <script>, y una pagina sin el no debe reventar.
+    ${calidadHabilitada ? `if (typeof vigilarFirmaDeTurno === 'function') vigilarFirmaDeTurno(${idOrden});` : ''}
   `;
 }
 
@@ -2788,10 +2791,12 @@ function abrirCalidad() {
 // Observaciones libres del operario (22/09/2026). Se inyecta en las SEIS paginas con encabezado,
 // porque la mitad de su trabajo (interceptar "Cerrar sesion") tiene que pasar en todas -- no solo
 // donde esta el boton. Ver SEL_ObservacionOperario y los endpoints /observacion y /mi-orden-activa.
-// Autorizacion de un pedido por un lider (22/09/2026). Se inyecta en las mismas paginas que
+// Autorizacion de un lider (22/09/2026). Se inyecta en las mismas paginas que
 // scriptObservaciones() porque sus dos consumidores viven en sitios distintos: el boton y el
 // Finalizar estan en la pagina del pedido, pero el bloqueo de "Cerrar sesion" tiene que existir en
 // todas. Ver SEL_AutorizacionPedido y los endpoints /autorizacion.
+// Desde el 25/09/2026 la firma es por BITACORA DE TURNO de la maquina, no por pedido (ver el
+// comentario largo junto a bitacoraParaFirma).
 //
 // OJO: lo de aca es para EXPLICAR, no para proteger. El bloqueo de verdad esta en el servidor
 // (POST /finalizar y GET /logout); esta pantalla solo evita que el operario llegue hasta alla para
@@ -2804,14 +2809,22 @@ function scriptAutorizacion() {
     }
 
     // Ventana de firma: usuario + clave de un lider. Resuelve true si quedo firmado.
-    function pedirFirmaAutorizacion(idOrden, datos) {
+    // opciones.aviso: texto extra arriba (lo usa el aviso de fin de turno); opciones.textoCancelar:
+    // el boton de salir ("Más tarde" en el aviso, "Cancelar" en el resto).
+    function pedirFirmaAutorizacion(idOrden, datos, opciones) {
+      opciones = opciones || {};
       var cargos = (datos.cargosPermitidos || []).join(', ');
+      var b = datos.bitacora || {};
       return Swal.fire({
-        title: '🔑 Autorización de la OT',
+        title: '🔑 Autorización del turno',
         html: '<div style="text-align:left;font-size:14px;">' +
+                (opciones.aviso
+                  ? '<div style="background:#fdecea;border-left:5px solid #c0392b;padding:10px 12px;border-radius:8px;margin-bottom:10px;">' +
+                      opciones.aviso + '</div>'
+                  : '') +
                 '<div style="background:#fff4e5;border-left:5px solid #f39c12;padding:10px 12px;border-radius:8px;margin-bottom:14px;">' +
-                  'Orden de Trabajo <b>' + datos.ot + '</b> (pedido ' + datos.pedido + '). Esta firma se pide ' +
-                  '<b>una sola vez por OT</b> y es la que permite finalizar y cerrar sesión.' +
+                  'Bitácora del <b>' + (b.nombre || '') + '</b>. Esta firma se pide <b>una vez por turno</b> y ' +
+                  'sin ella no se puede finalizar el pedido ni cerrar sesión.' +
                 '</div>' +
                 '<label style="display:block;font-weight:600;margin-bottom:4px;">Usuario</label>' +
                 '<input id="aut-usuario" class="swal2-input" style="margin:0 0 10px;width:100%;" ' +
@@ -2824,7 +2837,7 @@ function scriptAutorizacion() {
         showCancelButton: true,
         confirmButtonText: 'Autorizar',
         confirmButtonColor: '#71bf44',
-        cancelButtonText: 'Cancelar',
+        cancelButtonText: opciones.textoCancelar || 'Cancelar',
         cancelButtonColor: '#c0392b',
         allowOutsideClick: false,
         didOpen: function() {
@@ -2853,7 +2866,7 @@ function scriptAutorizacion() {
       }).then(function(r) {
         if (!r.isConfirmed || !r.value) return false;
         return Swal.fire({
-          icon: 'success', title: 'OT autorizada',
+          icon: 'success', title: 'Turno autorizado',
           html: 'Firmó <b>' + r.value.firma.nombre + '</b><br>' +
                 '<span style="font-size:13px;color:#64748b;">' + (r.value.firma.cargo || '') + '</span>',
           timer: 2200, showConfirmButton: false
@@ -2861,15 +2874,15 @@ function scriptAutorizacion() {
       });
     }
 
-    // Puerta unica: devuelve una promesa que resuelve true SOLO si la OT actual quedo autorizada.
-    // La usan el Finalizar y el cierre de sesion. Sin OT todavia (25/09/2026) no se exige firma.
+    // Puerta unica: devuelve una promesa que resuelve true SOLO si la bitacora que se exige quedo
+    // autorizada. La usan el Finalizar y el cierre de sesion. Una maquina sin bitacora no la exige.
     function exigirAutorizacion(idOrden) {
       return estadoAutorizacion(idOrden).then(function(datos) {
         if (!datos.ok) {
           return Swal.fire({ icon: 'error', title: 'No se pudo comprobar', text: datos.error, confirmButtonColor: '#71bf44' })
             .then(function() { return false; });
         }
-        if (datos.sinOT || datos.autorizado) return true;
+        if (datos.sinBitacora || datos.autorizado) return true;
         return pedirFirmaAutorizacion(idOrden, datos);
       }).catch(function() {
         return Swal.fire({ icon: 'error', title: 'Error de conexión', text: 'No se pudo comprobar la autorización.', confirmButtonColor: '#71bf44' })
@@ -2884,25 +2897,24 @@ function scriptAutorizacion() {
           Swal.fire({ icon: 'error', title: 'No se pudo comprobar', text: datos.error, confirmButtonColor: '#71bf44' });
           return;
         }
-        if (datos.sinOT) {
+        if (datos.sinBitacora) {
           Swal.fire({
-            icon: 'info', title: 'Todavía no hay Orden de Trabajo',
-            text: 'La OT nace con el primer bulto. Hasta entonces no hay nada que autorizar.',
+            icon: 'info', title: 'Todavía no hay bitácora de turno',
+            text: 'La bitácora nace cuando el operario toma control de la máquina. Hasta entonces no hay nada que autorizar.',
             confirmButtonColor: '#71bf44'
           });
           return;
         }
         if (!datos.autorizado) { pedirFirmaAutorizacion(idOrden, datos); return; }
         // Ya firmado: se muestra quien y cuando, y se deja volver a firmar (la tabla guarda la
-        // historia, no sobreescribe) por si hubo que revisar la OT otra vez.
+        // historia, no sobreescribe) por si hubo que revisar el turno otra vez.
         var f = datos.firma;
         var cuando = f.fecha ? new Date(f.fecha).toLocaleString() : '—';
         Swal.fire({
           icon: 'success',
-          title: 'OT ya autorizada',
+          title: 'Turno ya autorizado',
           html: '<div style="text-align:left;font-size:14px;">' +
-                  '<div>Orden de Trabajo <b>' + datos.ot + '</b></div>' +
-                  '<div style="font-size:13px;color:#64748b;">Pedido ' + datos.pedido + '</div>' +
+                  '<div>Bitácora del <b>' + datos.bitacora.nombre + '</b></div>' +
                   '<div style="margin-top:8px;">Firmó <b>' + (f.nombre || f.usuario) + '</b></div>' +
                   '<div style="font-size:13px;color:#64748b;">' + (f.cargo || '') + '</div>' +
                   '<div style="font-size:13px;color:#64748b;margin-top:6px;">' + cuando + '</div>' +
@@ -2914,6 +2926,43 @@ function scriptAutorizacion() {
           if (r.dismiss === Swal.DismissReason.cancel) pedirFirmaAutorizacion(idOrden, datos);
         });
       });
+    }
+
+    // Aviso de fin de turno (25/09/2026, a pedido del usuario: "debe solicitar la firma antes de que
+    // se acabe el turno"). Quien decide si toca pedirla es el servidor (campo avisar: faltan
+    // MINUTOS_AVISO_FIRMA_TURNO o menos para el fin del turno, o el turno ya termino, y la bitacora
+    // sigue sin firma). Mismo molde que el sondeo de Calidad: no se encima a otra ventana abierta, y
+    // si el operario la pospone ("Más tarde") vuelve a salir a los FIRMA_TURNO_POSPONER_MS.
+    var FIRMA_TURNO_SONDEO_MS = 60000;
+    var FIRMA_TURNO_POSPONER_MS = 5 * 60000;
+    var firmaTurnoEnPantalla = false;
+    var firmaTurnoReintentarDesde = 0;
+
+    function vigilarFirmaDeTurno(idOrden) {
+      revisarFirmaDeTurno(idOrden);
+      setInterval(function() { revisarFirmaDeTurno(idOrden); }, FIRMA_TURNO_SONDEO_MS);
+    }
+
+    function revisarFirmaDeTurno(idOrden) {
+      if (firmaTurnoEnPantalla || Date.now() < firmaTurnoReintentarDesde) return;
+      estadoAutorizacion(idOrden).then(function(datos) {
+        if (!datos || !datos.ok || !datos.avisar) return;
+        if (firmaTurnoEnPantalla || Swal.isVisible()) return;
+        var b = datos.bitacora || {};
+        var min = datos.minutosParaFin;
+        var aviso = (b.cerrada || (min != null && min <= 0))
+          ? '⏰ <b>El turno ya terminó</b> y la bitácora no tiene firma. No se podrá finalizar ni cerrar sesión sin ella.'
+          : '⏰ El turno termina a las <b>' + (b.horaFin || '—') + '</b> (en ' + min + ' min). Pida la firma del líder antes de salir.';
+        firmaTurnoEnPantalla = true;
+        pedirFirmaAutorizacion(idOrden, datos, { aviso: aviso, textoCancelar: 'Más tarde' })
+          .then(function(firmado) {
+            firmaTurnoEnPantalla = false;
+            if (!firmado) firmaTurnoReintentarDesde = Date.now() + FIRMA_TURNO_POSPONER_MS;
+          }, function() {
+            firmaTurnoEnPantalla = false;
+            firmaTurnoReintentarDesde = Date.now() + FIRMA_TURNO_POSPONER_MS;
+          });
+      }).catch(function() { /* red intermitente -- se reintenta en el proximo sondeo */ });
     }
   `;
 }
@@ -4650,7 +4699,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
         <div class="orden-acciones">${botonesResiduosHTML}</div>
       </div>` : ''}
       <div class="isla">
-        <div class="label">Autorización de la OT</div>
+        <div class="label">Autorización del turno</div>
         <div class="isla-detalle">Necesaria para finalizar y para cerrar sesión</div>
         <div class="orden-acciones">${botonAutorizacion}</div>
       </div>
@@ -5401,14 +5450,15 @@ app.get('/logout', async (req, res) => {
       `);
       if (dtActiva.recordset.length > 0) {
         const activa = dtActiva.recordset[0];
-        // Desde el 25/09/2026 la firma es de la OT actual; si la orden aun no tiene OT (limpieza,
-        // alistamiento) no hay nada que firmar y se deja salir.
-        const ot = await otActualDeOrden(p, activa.IdOrden);
-        const firma = ot ? await obtenerAutorizacionOT(p, ot) : true;
+        // Desde el 25/09/2026 la firma es de la bitacora de turno mas reciente de la maquina, aunque
+        // ya se haya cerrado sola por fin de turno: justo al salir es cuando no puede quedar sin
+        // firmar. Una maquina sin bitacora no tiene nada que firmar y se deja salir.
+        const bi = await bitacoraParaFirma(p, activa.Maquina);
+        const firma = bi ? await obtenerAutorizacionBitacora(p, bi.IdBitacora) : true;
         if (!firma) {
           const maquinaCodigo = await obtenerCodigoMaquinaDeOrden(p, activa.IdOrden).catch(() => null);
           return res.status(403).send(renderErrorSimple(
-            `No puede cerrar sesión: la Orden de Trabajo ${ot} (pedido ${activa.NumeroPedido}) sigue activa y todavía no tiene la ` +
+            `No puede cerrar sesión: la bitácora del ${nombreBitacora(bi)} todavía no tiene la ` +
             `autorización de un líder. Pídala con el botón "Autorización" de la pantalla del pedido. ` +
             `Pueden autorizarla: ` + CARGOS_AUTORIZAN_PEDIDO.map(c => c.nombre).join(', ') + '.',
             maquinaCodigo ? `/selladora/${maquinaCodigo}` : '/'
@@ -6543,7 +6593,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
       </div>
       <div class="isla isla-con-boton">
         <div class="isla-texto">
-          <div class="label">Autorización de la OT</div>
+          <div class="label">Autorización del turno</div>
           <div class="isla-detalle">Necesaria para finalizar y para cerrar sesión</div>
         </div>
         ${botonAutorizacion}
@@ -8930,13 +8980,15 @@ app.post('/api/selladora/orden/:idOrden/finalizar', requireLogin, async (req, re
     // solo en el modal: Finalizar es un form POST normal, asi que un navegador que no corra el
     // script -- o alguien que mande el POST a mano -- se saltaria un bloqueo que viviera solo en
     // la pantalla. El de la tableta existe igual, pero para explicar, no para proteger.
-    // Desde el 25/09/2026 la firma es de la OT actual; sin OT (nunca saco un bulto) no se exige.
-    const otParaFirma = await otActualDeOrden(p, idOrden);
-    if (otParaFirma) {
-      const firma = await obtenerAutorizacionOT(p, otParaFirma);
+    // Desde el 25/09/2026 la firma es de la bitacora de turno mas reciente de la maquina (abierta o
+    // ya cerrada por fin de turno); una maquina sin bitacora no la exige.
+    const ordenParaFirma = await numeroPedidoDeOrden(p, idOrden);
+    const biParaFirma = ordenParaFirma ? await bitacoraParaFirma(p, ordenParaFirma.Maquina) : null;
+    if (biParaFirma) {
+      const firma = await obtenerAutorizacionBitacora(p, biParaFirma.IdBitacora);
       if (!firma) {
         throw new Error(
-          `La Orden de Trabajo ${otParaFirma} no tiene la autorización de un líder, así que no se puede finalizar. ` +
+          `La bitácora del ${nombreBitacora(biParaFirma)} no tiene la autorización de un líder, así que no se puede finalizar. ` +
           `Pídala con el botón "Autorización" de esta pantalla. Pueden autorizarla: ` +
           CARGOS_AUTORIZAN_PEDIDO.map(c => c.nombre).join(', ') + '.'
         );
@@ -9134,25 +9186,32 @@ app.get('/api/mi-orden-activa', requireLogin, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// Autorizacion de un pedido por un lider (22/09/2026). Tabla SEL_AutorizacionPedido -- ver
-// sql/pendientes/20260922_agregar_autorizacion_pedido.sql.
+// Autorizacion de un lider (22/09/2026). Tabla SEL_AutorizacionPedido -- ver
+// sql/pendientes/20260922_agregar_autorizacion_pedido.sql y 20260925_autorizacion_por_bitacora.sql.
 //
 // Regla, tal como la definio el usuario: el operario trabaja normal y SIN login. La firma se puede
 // dar en cualquier momento con el boton de la pantalla del pedido, pero sin ella no se puede
 //   - FINALIZAR la orden, ni
 //   - CERRAR SESION con un pedido activo.
-// CAMBIO 25/09/2026 (a pedido del usuario -- "esa autorizacion debe quedar por orden de trabajo"):
-// el alcance ya NO es el pedido sino la OT (PRDOrdenesProduccion.OrdenProduccion). Reglas:
-//   - Se exige la firma de la OT ACTUAL de la orden (la del bulto mas reciente). Si la orden se
-//     retomo otro dia y nacio una OT nueva, la firma de la OT vieja no sirve para la nueva, y la
-//     OT vieja sin firma tampoco bloquea.
-//   - Mientras la OT no existe (Pendiente, limpieza, alistamiento: nace con el primer bulto) NO se
-//     exige firma -- no hay OT que respaldar.
-//   - En sellado paralelo las 3 referencias comparten la MISMA OT, asi que una firma sigue
-//     cubriendo el grupo entero, igual que antes con el pedido.
-// Ver sql/pendientes/20260925_autorizacion_por_ot.sql (columna OrdenProduccion + backfill).
+// CAMBIO 25/09/2026 (a pedido del usuario): el alcance ya NO es el pedido sino la BITACORA DE TURNO
+// de la maquina (SEL_BitacoraTurno) -- "para que en la base de datos no se quede esa bitacora sin
+// firmar". Reglas:
+//   - Se exige firmada la bitacora MAS RECIENTE de la maquina, este abierta o ya cerrada. Asi el
+//     operario que sale a las 14:10 de un turno que termino a las 14:00 (cerrarBitacorasPorFinTurno
+//     ya la cerro sola) igual tiene que conseguir la firma de SU turno antes de salir. Cuando el
+//     siguiente operario toma control nace otra bitacora, que necesita su propia firma.
+//   - La tableta la pide sola desde MINUTOS_AVISO_FIRMA_TURNO antes del fin del turno (ver
+//     vigilarFirmaDeTurno en scriptAutorizacion), no solo al apretar el boton.
+//   - Una maquina que nunca tuvo bitacora no exige firma: no hay nada que firmar.
+//   - La bitacora es por maquina, asi que una firma cubre todas las ordenes de esa maquina en el
+//     turno (el grupo de sellado paralelo incluido).
+// La OT (OrdenProduccion) y el pedido se siguen guardando en cada firma, pero solo como rastro.
+// Por unas horas del mismo 25/09/2026 la firma fue por OT (commit 4dfa6e4); se descarto.
 
-// El NumeroPedido de una orden. Se usa en todas las comprobaciones de abajo.
+// Desde cuantos minutos antes del fin del turno la tableta empieza a pedir la firma sola.
+const MINUTOS_AVISO_FIRMA_TURNO = 30;
+
+// El NumeroPedido y la maquina de una orden. Se usa en todas las comprobaciones de abajo.
 async function numeroPedidoDeOrden(p, idOrden) {
   const dt = await p.request().input('idOrden', idOrden)
     .query(`SELECT NumeroPedido, Maquina FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
@@ -9160,9 +9219,8 @@ async function numeroPedidoDeOrden(p, idOrden) {
 }
 
 // La OT actual de una orden = la del bulto mas reciente (mismo criterio que SQL_OT_DE_ORDEN de
-// sel-inventario-mp.js, que es el que usa suspender/reanudar), o null si todavia no hay OT.
-// Una referencia de un grupo paralelo que aun no tiene bultos propios toma la OT de la ancla del
-// grupo: es la misma OT que va a recibir en cuanto saque su primer bulto.
+// sel-inventario-mp.js), o null si todavia no hay OT. Solo se guarda como rastro de la firma.
+// Una referencia de un grupo paralelo que aun no tiene bultos propios toma la OT de la ancla.
 async function otActualDeOrden(p, idOrden) {
   const buscar = async (id) => {
     const dt = await p.request().input('idOrden', id).query(`
@@ -9182,33 +9240,68 @@ async function otActualDeOrden(p, idOrden) {
   return null;
 }
 
-// La firma mas reciente de una OT, o null. Si falta correr el script SQL REVIENTA con un mensaje
-// claro en vez de devolver null: un null aca se leeria como "sin firma" y bloquearia Finalizar sin
-// explicar por que. El /logout atrapa el error y deja salir (nunca encierra a nadie).
-async function obtenerAutorizacionOT(p, ordenProduccion) {
+// La bitacora que se exige firmada: la mas reciente de la maquina, abierta o cerrada. El fin del
+// turno se calcula IGUAL que en cerrarBitacorasPorFinTurno (sel-inventario-mp.js) -- horario de
+// TURHorariosMaquinas y si no NOMTurnos, cruzando medianoche si HoraFin <= HoraInicio -- para que
+// el aviso de la tableta y el cierre automatico hablen de la misma hora. La hora y los minutos
+// salen armados desde SQL para no pasar por la conversion de zona horaria del driver.
+async function bitacoraParaFirma(p, maquina) {
+  const dt = await p.request().input('maquina', maquina).query(`
+    SELECT TOP 1 bi.IdBitacora, CONVERT(varchar(10), bi.FechaTurno, 23) AS FechaTurno,
+           bi.HoraCierre, tu.Descripcion AS TurnoDescripcion,
+           CONVERT(varchar(5), f.FinTurno, 108) AS HoraFinTurno,
+           DATEDIFF(MINUTE, GETDATE(), f.FinTurno) AS MinutosParaFin
+    FROM SEL_BitacoraTurno bi
+    LEFT JOIN NOMTurnos tu ON tu.Codigo = bi.Turno
+    OUTER APPLY (
+        SELECT TOP 1 x.HoraInicio, x.HoraFin
+        FROM (
+            SELECT th.HoraInicio, th.HoraFin, 1 AS Prioridad
+            FROM TURHorariosMaquinas th
+            WHERE th.CodigoMaquina = bi.Maquina AND th.CodigoTurno = bi.Turno
+            UNION ALL
+            SELECT t.HoraInicial, t.HoraFinal, 2
+            FROM NOMTurnos t
+            WHERE t.Codigo = bi.Turno
+        ) x
+        ORDER BY x.Prioridad
+    ) h
+    OUTER APPLY (
+        SELECT DATEADD(DAY,
+                 CASE WHEN CAST(h.HoraFin AS time) <= CAST(h.HoraInicio AS time) THEN 1 ELSE 0 END,
+                 CAST(CAST(bi.FechaTurno AS date) AS datetime) + CAST(CAST(h.HoraFin AS time) AS datetime)
+               ) AS FinTurno
+    ) f
+    WHERE bi.Maquina = @maquina
+    ORDER BY bi.IdBitacora DESC
+  `);
+  return dt.recordset.length ? dt.recordset[0] : null;
+}
+
+// "turno Mañana del 2026-09-25", para los mensajes.
+function nombreBitacora(bi) {
+  return `turno ${(bi.TurnoDescripcion || '').trim() || 'sin turno'} del ${bi.FechaTurno}`;
+}
+
+// La firma mas reciente de una bitacora, o null. Si la consulta falla REVIENTA en vez de devolver
+// null: un null aca se leeria como "sin firma" y bloquearia Finalizar sin explicar por que. El
+// /logout atrapa el error y deja salir (nunca encierra a nadie).
+async function obtenerAutorizacionBitacora(p, idBitacora) {
   try {
-    const dt = await p.request().input('ot', ordenProduccion).query(`
+    const dt = await p.request().input('idBitacora', idBitacora).query(`
       SELECT TOP 1 UsuarioAutoriza, NombreAutoriza, CargoAutoriza, FechaHora
-      FROM SEL_AutorizacionPedido WHERE OrdenProduccion = @ot ORDER BY FechaHora DESC, Id DESC
+      FROM SEL_AutorizacionPedido WHERE IdBitacora = @idBitacora ORDER BY FechaHora DESC, Id DESC
     `);
     return dt.recordset.length ? dt.recordset[0] : null;
   } catch (err) {
     console.error('No se pudo leer SEL_AutorizacionPedido:', err.message);
-    throw new Error('No se pudo comprobar la autorización de la OT. Falta correr ' +
-      'sql/pendientes/20260925_autorizacion_por_ot.sql contra esta base (' + err.message + ').');
+    throw new Error('No se pudo comprobar la autorización del turno. ¿Falta correr ' +
+      'sql/pendientes/20260922_agregar_autorizacion_pedido.sql contra esta base? (' + err.message + ')');
   }
 }
 
 // Registra la firma. Todo lo que la acompana se deduce aca; la tableta solo manda usuario y clave.
-async function guardarAutorizacionPedido(p, { numeroPedido, ordenProduccion, idOrden, maquina, usuarioAutoriza, operarioEnTurno }) {
-  let idBitacora = null;
-  try {
-    const dtBi = await p.request().input('maquina', maquina).query(
-      `SELECT TOP 1 IdBitacora FROM SEL_BitacoraTurno WHERE Maquina = @maquina AND HoraCierre IS NULL`
-    );
-    if (dtBi.recordset.length > 0) idBitacora = dtBi.recordset[0].IdBitacora;
-  } catch (e) { /* maquina sin bitacora abierta: la firma vale igual */ }
-
+async function guardarAutorizacionPedido(p, { numeroPedido, ordenProduccion, idOrden, maquina, idBitacora, usuarioAutoriza, operarioEnTurno }) {
   await p.request()
     .input('pedido', numeroPedido)
     .input('ot', ordenProduccion)
@@ -9229,22 +9322,31 @@ async function guardarAutorizacionPedido(p, { numeroPedido, ordenProduccion, idO
     `);
 }
 
-// Estado de la firma de la OT actual de una orden: si ya esta y quien la dio. sinOT = la orden
-// todavia no tiene OT, asi que no hay nada que firmar ni nada que bloquear.
+// Estado de la firma de la bitacora que se exige para esta orden: si ya esta y quien la dio.
+// sinBitacora = la maquina nunca tuvo bitacora, asi que no hay nada que firmar ni que bloquear.
+// avisar = la tableta debe pedir la firma sola (falta poco para el fin del turno, o ya paso).
 app.get('/api/selladora/orden/:idOrden/autorizacion', requireLogin, async (req, res) => {
   const idOrden = Number(req.params.idOrden);
   try {
     const p = await getPool();
     const orden = await numeroPedidoDeOrden(p, idOrden);
     if (!orden) return res.json({ ok: false, error: 'Orden no encontrada.' });
-    const ot = await otActualDeOrden(p, idOrden);
-    const firma = ot ? await obtenerAutorizacionOT(p, ot) : null;
+    const bi = await bitacoraParaFirma(p, orden.Maquina);
+    const firma = bi ? await obtenerAutorizacionBitacora(p, bi.IdBitacora) : null;
+    const minutos = bi && bi.MinutosParaFin != null ? bi.MinutosParaFin : null;
     res.json({
       ok: true,
       pedido: orden.NumeroPedido,
-      ot,
-      sinOT: !ot,
+      sinBitacora: !bi,
+      bitacora: bi ? {
+        id: bi.IdBitacora,
+        nombre: nombreBitacora(bi),
+        horaFin: bi.HoraFinTurno,
+        cerrada: !!bi.HoraCierre
+      } : null,
+      minutosParaFin: minutos,
       autorizado: !!firma,
+      avisar: !!bi && !firma && (!!bi.HoraCierre || (minutos != null && minutos <= MINUTOS_AVISO_FIRMA_TURNO)),
       firma: firma ? {
         usuario: firma.UsuarioAutoriza,
         nombre: firma.NombreAutoriza,
@@ -9260,18 +9362,18 @@ app.get('/api/selladora/orden/:idOrden/autorizacion', requireLogin, async (req, 
   }
 });
 
-// La firma en si: valida usuario+clave+cargo y la guarda.
+// La firma en si: valida usuario+clave+cargo y la guarda contra la bitacora que se exige.
 app.post('/api/selladora/orden/:idOrden/autorizacion', requireLogin, async (req, res) => {
   const idOrden = Number(req.params.idOrden);
   try {
     const p = await getPool();
     const orden = await numeroPedidoDeOrden(p, idOrden);
     if (!orden) return res.json({ ok: false, error: 'Orden no encontrada.' });
-    const ot = await otActualDeOrden(p, idOrden);
-    if (!ot) {
+    const bi = await bitacoraParaFirma(p, orden.Maquina);
+    if (!bi) {
       return res.json({
         ok: false,
-        error: 'Esta orden todavía no tiene Orden de Trabajo (nace con el primer bulto), así que aún no hay nada que autorizar.'
+        error: 'Esta máquina todavía no tiene bitácora de turno (nace al tomar control), así que aún no hay nada que autorizar.'
       });
     }
 
@@ -9280,9 +9382,10 @@ app.post('/api/selladora/orden/:idOrden/autorizacion', requireLogin, async (req,
 
     await guardarAutorizacionPedido(p, {
       numeroPedido: orden.NumeroPedido,
-      ordenProduccion: ot,
+      ordenProduccion: await otActualDeOrden(p, idOrden).catch(() => null),
       idOrden,
       maquina: orden.Maquina,
+      idBitacora: bi.IdBitacora,
       usuarioAutoriza: intento.usuario,
       operarioEnTurno: req.session.usuario.codigoOperarioPRD || null
     });
@@ -9290,7 +9393,7 @@ app.post('/api/selladora/orden/:idOrden/autorizacion', requireLogin, async (req,
     res.json({
       ok: true,
       pedido: orden.NumeroPedido,
-      ot,
+      bitacora: { id: bi.IdBitacora, nombre: nombreBitacora(bi) },
       firma: { nombre: intento.usuario.nombre, cargo: intento.usuario.cargo }
     });
   } catch (err) {
@@ -9299,7 +9402,7 @@ app.post('/api/selladora/orden/:idOrden/autorizacion', requireLogin, async (req,
       ok: false,
       error: falta
         ? 'Falta correr los scripts sql/pendientes/20260922_agregar_autorizacion_pedido.sql y ' +
-          '20260925_autorizacion_por_ot.sql contra esta base.'
+          '20260925_autorizacion_por_bitacora.sql contra esta base.'
         : err.message
     });
   }
