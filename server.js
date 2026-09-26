@@ -14,6 +14,7 @@ const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require
 const {
   obtenerLineaOriginalControlSellado, resolverTurnoMaquina, cerrarBitacora, cerrarBitacorasPorFinTurno,
   abrirOReanudarBitacora, suspenderOTDeOrden, horaServidorBD,
+  candidatosTurnoMaquina, activarTurnoMaquina,
   obtenerAnclaGrupoSellado, obtenerEstadoAjusteConsumo, ajustarConsumoRollo
 } = require('./sel-inventario-mp');
 
@@ -3246,6 +3247,66 @@ function scriptAjusteConsumo() {
   `;
 }
 
+// 26/09/2026 (a pedido del usuario): ANTES de Iniciar (protocolo + primer rollo) y antes de
+// retomar / tomar control, el operario deja escogido el turno ACTIVO de su máquina en
+// TURHorariosMaquinas (ver candidatosTurnoMaquina / activarTurnoMaquina en sel-inventario-mp.js). El
+// primer bulto, trg_SEL_Bultos_CierreBulto y la bitácora ya leen Activo = 1, así que con eso basta.
+// Solo pregunta cuando hace falta (un turno está empezando y todavía no se escogió); si la consulta
+// falla por red se sigue como antes.
+function scriptElegirTurno() {
+  return `
+    window.elegirTurnoSiHaceFalta = window.elegirTurnoSiHaceFalta || function(idOrden, seguir) {
+      function esc(t) { return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'); }
+      fetch('/api/selladora/orden/' + idOrden + '/turno-pendiente')
+        .then(function(r) { return r.json(); })
+        .then(function(v) {
+          if (!v || !v.ok || !v.necesita || !v.candidatos || v.candidatos.length === 0) { seguir(); return; }
+          var marcado = v.activoActual ? v.activoActual.codigo : v.candidatos[0].codigo;
+          if (!v.candidatos.some(function(c) { return c.codigo === marcado; })) marcado = v.candidatos[0].codigo;
+          var html = '<div style="text-align:left;display:flex;flex-direction:column;gap:10px;">';
+          v.candidatos.forEach(function(c) {
+            html += '<label style="display:flex;align-items:center;gap:10px;font-size:1.1em;padding:10px;border:1px solid #ccc;border-radius:8px;cursor:pointer;">'
+              + '<input type="radio" name="turnoElegido" value="' + c.codigo + '"' + (c.codigo === marcado ? ' checked' : '') + ' style="width:22px;height:22px;">'
+              + '<span><b>' + esc(c.descripcion) + '</b> (' + esc(c.horaInicio) + ' - ' + esc(c.horaFin) + ')'
+              + (c.activo ? ' <span style="color:#71bf44;">— activo</span>' : '') + '</span></label>';
+          });
+          html += '</div>';
+          Swal.fire({
+            icon: 'question',
+            title: v.candidatos.length > 1 ? '¿Qué turno va a trabajar?' : 'Confirme el turno',
+            html: html,
+            showCancelButton: true,
+            confirmButtonText: 'Continuar',
+            cancelButtonText: 'Cancelar',
+            confirmButtonColor: '#71bf44',
+            allowOutsideClick: false,
+            preConfirm: function() {
+              var sel = document.querySelector('input[name="turnoElegido"]:checked');
+              if (!sel) { Swal.showValidationMessage('Escoja un turno'); return false; }
+              return Number(sel.value);
+            }
+          }).then(function(res) {
+            if (!res.isConfirmed) return;
+            fetch('/api/selladora/orden/' + idOrden + '/turno', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ codigoTurno: res.value })
+            })
+              .then(function(r) { return r.json(); })
+              .then(function(g) {
+                if (g && g.ok === false) {
+                  Swal.fire({ icon: 'warning', title: 'No se pudo activar el turno', text: g.error, confirmButtonColor: '#71bf44' });
+                  return;
+                }
+                seguir();
+              })
+              .catch(function() { seguir(); });
+          });
+        })
+        .catch(function() { seguir(); });
+    };
+  `;
+}
+
 function scriptConfirmarFinalizar() {
   return `
     function confirmarFinalizar(evento, formulario) {
@@ -3309,9 +3370,18 @@ function scriptConfirmarFinalizar() {
         cancelButtonText: 'Cancelar',
         confirmButtonColor: '#b46200',
         cancelButtonColor: '#71bf44'
-      }).then(resultado => { if (resultado.isConfirmed) formulario.submit(); });
+      }).then(resultado => {
+        if (!resultado.isConfirmed) return;
+        // 26/09/2026: antes de retomar, dejar escogido el turno activo (ver scriptElegirTurno)
+        var partes = String(formulario.action || '').split('/');
+        var i = partes.indexOf('orden');
+        var idOrden = i >= 0 ? Number(partes[i + 1]) : 0;
+        if (!idOrden) { formulario.submit(); return; }
+        elegirTurnoSiHaceFalta(idOrden, function() { formulario.submit(); });
+      });
       return false;
     }
+    ${scriptElegirTurno()}
   `;
 }
 
@@ -3614,6 +3684,7 @@ function scriptPreguntaActividadInicial() {
 // reanudarProtocoloArranque() aca abajo.
 function scriptProtocoloArranque(maquinaCodigo) {
   return `
+    ${scriptElegirTurno()}
     var MAQUINA_PROTOCOLO = ${JSON.stringify(maquinaCodigo)};
 
     function protocoloDestino(idOrden) {
@@ -4191,9 +4262,10 @@ function scriptProtocoloArranque(maquinaCodigo) {
             Swal.fire({ icon: 'warning', title: 'No se puede iniciar', text: v.error, confirmButtonColor: '#71bf44' });
             return;
           }
-          seguirIniciarProtocoloArranque(idOrden);
+          // 26/09/2026: el turno activo se escoge ANTES del protocolo y del primer rollo
+          elegirTurnoSiHaceFalta(idOrden, function() { seguirIniciarProtocoloArranque(idOrden); });
         })
-        .catch(function() { seguirIniciarProtocoloArranque(idOrden); });
+        .catch(function() { elegirTurnoSiHaceFalta(idOrden, function() { seguirIniciarProtocoloArranque(idOrden); }); });
     }
 
     function seguirIniciarProtocoloArranque(idOrden) {
@@ -8854,6 +8926,42 @@ app.get('/api/selladora/orden/:idOrden/puede-iniciar', requireLogin, async (req,
     const p = await getPool();
     const error = await bloqueoArranquePorOrdenActiva(p, Number(req.params.idOrden));
     res.json(error ? { ok: false, error } : { ok: true });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// 26/09/2026: turno activo de la máquina de la orden (ver scriptElegirTurno). La hora es la de la
+// base, igual que la bitácora y los bultos.
+async function maquinaDeOrden(p, idOrden) {
+  const dt = await p.request().input('idOrden', idOrden)
+    .query(`SELECT Maquina FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+  return dt.recordset.length > 0 ? dt.recordset[0].Maquina : null;
+}
+
+app.get('/api/selladora/orden/:idOrden/turno-pendiente', requireLogin, async (req, res) => {
+  try {
+    const p = await getPool();
+    const maquina = await maquinaDeOrden(p, Number(req.params.idOrden));
+    if (maquina == null) return res.json({ ok: true, necesita: false, candidatos: [] });
+    const r = await candidatosTurnoMaquina(p, maquina, await horaServidorBD(p));
+    res.json(Object.assign({ ok: true }, r));
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/selladora/orden/:idOrden/turno', requireLogin, async (req, res) => {
+  try {
+    const p = await getPool();
+    const maquina = await maquinaDeOrden(p, Number(req.params.idOrden));
+    const codigoTurno = Number(req.body && req.body.codigoTurno);
+    if (maquina == null) return res.json({ ok: false, error: 'No se encontró la orden.' });
+    if (!codigoTurno) return res.json({ ok: false, error: 'No se escogió ningún turno.' });
+    const desactivados = await activarTurnoMaquina(p, maquina, codigoTurno);
+    console.log(`Turno activo máquina ${maquina}: ${codigoTurno}` +
+      (desactivados.length ? ` (desactivados: ${desactivados.join(', ')})` : ''));
+    res.json({ ok: true, desactivados });
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }

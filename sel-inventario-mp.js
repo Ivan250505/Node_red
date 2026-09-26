@@ -925,14 +925,22 @@ function fechaISOLocal(fecha) {
 // este codigo -- ver agregar_bitacora_turno.sql.
 async function resolverTurnoMaquina(p, maquinaCodigo, momento) {
   const cuando = momento ? new Date(momento) : new Date();
+  // FIX 26/09/2026 (a pedido del usuario): solo los turnos ACTIVOS (Activo = 1) de la máquina, igual
+  // que el primer bulto (resolverTurnoPorHora) y trg_SEL_Bultos_CierreBulto -- antes miraba TODOS los
+  // horarios y, con turnos plenos activos, la bitácora quedaba en Mañana mientras los bultos iban a
+  // Pleno Día. El turno activo lo escoge el operario al Iniciar / tomar control (ver
+  // candidatosTurnoMaquina / activarTurnoMaquina). Si la máquina no tiene ningún horario
+  // configurado se siguen usando los turnos base, como antes.
   const dtHorarios = await p.request().input('maquina', maquinaCodigo).query(`
-    SELECT th.CodigoTurno AS Codigo, t.Descripcion, th.HoraInicio, th.HoraFin
+    SELECT th.CodigoTurno AS Codigo, t.Descripcion, th.HoraInicio, th.HoraFin, ISNULL(th.Activo, 0) AS Activo
     FROM TURHorariosMaquinas th
     INNER JOIN NOMTurnos t ON t.Codigo = th.CodigoTurno
     WHERE th.CodigoMaquina = @maquina
   `);
-  let franjas = dtHorarios.recordset;
-  if (franjas.length === 0) {
+  let franjas = dtHorarios.recordset.length > 0
+    ? dtHorarios.recordset.filter(f => Number(f.Activo) === 1)
+    : [];
+  if (dtHorarios.recordset.length === 0) {
     const dtBase = await p.request().query(`
       SELECT Codigo, Descripcion, HoraInicial AS HoraInicio, HoraFinal AS HoraFin
       FROM NOMTurnos WHERE Codigo IN (${TURNOS_BASE_SELLADORA.join(',')})
@@ -970,6 +978,145 @@ async function resolverTurnoMaquina(p, maquinaCodigo, momento) {
   if (elegida.despuesDeMedianoche) fechaBase.setDate(fechaBase.getDate() - 1);
 
   return { turno: elegida.codigo, descripcion: elegida.descripcion, fechaTurno: fechaISOLocal(fechaBase) };
+}
+
+// ======================= Turno activo de la máquina (26/09/2026) =======================
+// A pedido del usuario: antes de Iniciar (o de tomar control) el operario deja UN turno activo en
+// TURHorariosMaquinas para su máquina. Todo lo demás (primer bulto, trg_SEL_Bultos_CierreBulto, la
+// bitácora, los reportes de Mirane) ya lee Activo = 1, así que no hay que cambiar nada más.
+// Misma regla de choque que Mirane: Turnos/GestionTurnos.vb (RangosSeSolapan / HayConflictoActivo)
+// -- solo puede haber un turno activo por rango de horas.
+
+function minutosRango(f) {
+  const ini = minutosDelDia(f.HoraInicio);
+  const fin = minutosDelDia(f.HoraFin);
+  return { ini, fin };
+}
+
+function contieneMinuto(f, m) {
+  const { ini, fin } = minutosRango(f);
+  if (ini == null || fin == null) return false;
+  return fin > ini ? (m >= ini && m < fin) : (m >= ini || m < fin);
+}
+
+// Puerto de GestionTurnos.vb:RangosSeSolapan (rangos que pueden cruzar medianoche).
+function rangosSeSolapan(f1, f2) {
+  const a = minutosRango(f1), b = minutosRango(f2);
+  if (a.ini == null || a.fin == null || b.ini == null || b.fin == null) return false;
+  const seg = r => r.fin > r.ini ? [[r.ini, r.fin]] : [[r.ini, 1440], [0, r.fin]];
+  for (const [x1, x2] of seg(a)) {
+    for (const [y1, y2] of seg(b)) {
+      if (x1 < y2 && y1 < x2) return true;
+    }
+  }
+  return false;
+}
+
+// Minutos desde el inicio de la franja hasta "ahora", en (-720, 720] (negativo = todavía no empieza).
+function minutosDesdeInicio(f, m) {
+  const { ini } = minutosRango(f);
+  let d = (m - ini) % 1440;
+  if (d < 0) d += 1440;
+  if (d > 720) d -= 1440;
+  return d;
+}
+
+// Fecha del turno para una franja y un momento (la noche que cruza medianoche es del día anterior).
+function fechaTurnoDe(f, cuando) {
+  const m = cuando.getHours() * 60 + cuando.getMinutes();
+  const { ini, fin } = minutosRango(f);
+  const base = new Date(cuando);
+  if (fin <= ini && m < fin) base.setDate(base.getDate() - 1);
+  return fechaISOLocal(base);
+}
+
+const TURNO_VENTANA_ANTES_MIN = 30;   // un turno "está empezando" desde 30 min antes de su hora...
+const TURNO_VENTANA_DESPUES_MIN = 90; // ...hasta 90 min después
+
+// Qué turnos ofrecerle al operario y si hay que preguntar. Devuelve
+// { necesita, candidatos: [{ codigo, descripcion, horaInicio, horaFin, activo }], activoActual }.
+//   - Candidatos: los turnos que están EMPEZANDO ahora (ventana de arriba); de ellos, solo el/los de
+//     hora de inicio más cercana (a las 06:00 Mañana y Pleno Día empatan: se pregunta). Si ninguno
+//     está empezando (alguien retoma a mitad de turno), los que cubren la hora actual. Siempre se
+//     agrega el turno que ya está activo y cubre la hora, para poder seguir con él.
+//   - No se pregunta si el turno activo ya es el que corresponde a este momento y ya hay bitácora de
+//     ese turno hoy (alguien ya lo escogió en este turno), o si la máquina no tiene horarios.
+async function candidatosTurnoMaquina(p, maquinaCodigo, momento) {
+  const cuando = momento ? new Date(momento) : new Date();
+  const m = cuando.getHours() * 60 + cuando.getMinutes();
+  const dt = await p.request().input('maquina', maquinaCodigo).query(`
+    SELECT th.CodigoTurno, t.Descripcion, th.HoraInicio, th.HoraFin, ISNULL(th.Activo, 0) AS Activo
+    FROM TURHorariosMaquinas th
+    INNER JOIN NOMTurnos t ON t.Codigo = th.CodigoTurno
+    WHERE th.CodigoMaquina = @maquina
+  `);
+  const franjas = dt.recordset;
+  if (franjas.length === 0) return { necesita: false, candidatos: [], activoActual: null };
+
+  const empezando = franjas.filter(f => {
+    const d = minutosDesdeInicio(f, m);
+    return d >= -TURNO_VENTANA_ANTES_MIN && d <= TURNO_VENTANA_DESPUES_MIN;
+  });
+  let candidatas;
+  if (empezando.length > 0) {
+    const minAbs = Math.min(...empezando.map(f => Math.abs(minutosDesdeInicio(f, m))));
+    candidatas = empezando.filter(f => Math.abs(minutosDesdeInicio(f, m)) === minAbs);
+  } else {
+    candidatas = franjas.filter(f => contieneMinuto(f, m));
+  }
+  const activa = franjas.find(f => Number(f.Activo) === 1 && contieneMinuto(f, m)) || null;
+  if (activa && !candidatas.includes(activa)) candidatas.push(activa);
+
+  const duracion = f => { const r = minutosRango(f); return r.fin > r.ini ? r.fin - r.ini : 1440 - r.ini + r.fin; };
+  candidatas.sort((a, b) => duracion(a) - duracion(b));
+
+  let necesita = candidatas.length > 0;
+  // Ya se escogió en este turno: el activo es uno de los que corresponden ahora (o nadie está
+  // empezando) y ya hay bitácora de ese turno hoy en la máquina.
+  if (activa && (empezando.length === 0 || empezando.includes(activa))) {
+    const dtBit = await p.request()
+      .input('maquina', maquinaCodigo).input('turno', activa.CodigoTurno).input('fecha', fechaTurnoDe(activa, cuando))
+      .query(`SELECT TOP 1 1 AS X FROM SEL_BitacoraTurno WHERE Maquina = @maquina AND Turno = @turno AND FechaTurno = @fecha`);
+    if (dtBit.recordset.length > 0) necesita = false;
+  }
+
+  const aJson = f => ({
+    codigo: Number(f.CodigoTurno), descripcion: String(f.Descripcion || '').trim(),
+    horaInicio: String(f.HoraInicio || '').trim(), horaFin: String(f.HoraFin || '').trim(),
+    activo: Number(f.Activo) === 1
+  });
+  return { necesita, candidatos: candidatas.map(aJson), activoActual: activa ? aJson(activa) : null };
+}
+
+// Deja activo el turno escogido y desactiva los demás turnos de la máquina que se crucen con él
+// (solo uno activo por rango de horas). Devuelve la lista de turnos desactivados.
+async function activarTurnoMaquina(p, maquinaCodigo, codigoTurno) {
+  const dt = await p.request().input('maquina', maquinaCodigo).query(`
+    SELECT th.CodigoTurno, t.Descripcion, th.HoraInicio, th.HoraFin, ISNULL(th.Activo, 0) AS Activo
+    FROM TURHorariosMaquinas th
+    INNER JOIN NOMTurnos t ON t.Codigo = th.CodigoTurno
+    WHERE th.CodigoMaquina = @maquina
+  `);
+  const elegido = dt.recordset.find(f => Number(f.CodigoTurno) === Number(codigoTurno));
+  if (!elegido) throw new Error('Ese turno no está configurado para esta máquina.');
+  const aDesactivar = dt.recordset.filter(f =>
+    Number(f.CodigoTurno) !== Number(codigoTurno) && Number(f.Activo) === 1 && rangosSeSolapan(elegido, f));
+
+  const tx = new sql.Transaction(p);
+  await tx.begin();
+  try {
+    await tx.request().input('maquina', maquinaCodigo).input('turno', codigoTurno)
+      .query(`UPDATE TURHorariosMaquinas SET Activo = 1 WHERE CodigoMaquina = @maquina AND CodigoTurno = @turno`);
+    for (const f of aDesactivar) {
+      await tx.request().input('maquina', maquinaCodigo).input('turno', f.CodigoTurno)
+        .query(`UPDATE TURHorariosMaquinas SET Activo = 0 WHERE CodigoMaquina = @maquina AND CodigoTurno = @turno`);
+    }
+    await tx.commit();
+  } catch (err) {
+    try { await tx.rollback(); } catch (e) { /* ya abortada */ }
+    throw err;
+  }
+  return aDesactivar.map(f => String(f.Descripcion || '').trim());
 }
 
 // Letra de turno para el serial de la bitacora (D/V/M/T/N) -- mismo mapeo NOMTurnos ya usado en
@@ -1856,6 +2003,8 @@ module.exports = {
   resolverTurnoMaquina,
   cerrarBitacora,
   horaServidorBD,
+  candidatosTurnoMaquina,
+  activarTurnoMaquina,
   cerrarBitacorasPorFinTurno,
   suspenderOTDeOrden,
   reanudarOTDeOrden,
