@@ -4568,9 +4568,17 @@ const BOTONES_RESIDUOS = [
 // renderTarjetaReferenciaGrupo). "Lleva impresion" se resuelve por INVElementosReferencia
 // Categoria=12 (TieneImpresion, mismo criterio que Referencia.vb:175) -- ojo: la consulta que
 // alimente esta funcion tiene que traer esas mismas columnas.
+// Las medidas de la bolsa van DE PRIMERAS (26/09/2026, a pedido del usuario), con el mismo texto
+// que se guarda como ValorEsperado en Calidad ("10 pulgadas (9–11)"), para que el operario vea
+// aca el mismo rango contra el que despues le preguntan. Solo salen las que la referencia tiene.
 function filasEspecificaciones(orden) {
   const tieneImpresion = orden.TieneImpresion === 1;
+  const filasMedidas = calcularMedidasBolsa(orden).map(m => {
+    const etiqueta = MEDIDAS_BOLSA.find(x => x.clave === m.clave).etiqueta;
+    return [etiqueta.charAt(0).toUpperCase() + etiqueta.slice(1), m.valorEsperado];
+  });
   return [
+    ...filasMedidas,
     ['Tipo de sellado', orden.TipoSellado],
     ['Troquelado', orden.Troquelado],
     ['Uso previsto', orden.UsoPrevisto],
