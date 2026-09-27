@@ -1088,32 +1088,99 @@ async function candidatosTurnoMaquina(p, maquinaCodigo, momento) {
   return { necesita, candidatos: candidatas.map(aJson), activoActual: activa ? aJson(activa) : null };
 }
 
-// FIX 26/09/2026 (DIAGNOSTICO_TURNOS.md punto 2): al escoger un turno no basta con apagar los que se
-// cruzan -- podían quedar horas SIN ningún turno activo (ayer D apagó M y T; hoy M apaga D; desde las
-// 14:00 no hay nada activo y el trigger de cierre no inserta el bulto en PRDProduccion). Ahora, además
-// de apagar los que se cruzan, se ENCIENDEN los que completan el día sin cruzarse, prefiriendo los de
-// la misma duración que el escogido: M -> T y N; T -> M y N; N -> M y T; D -> V; V -> D.
-// Devuelve { desactivar, activar } (filas de TURHorariosMaquinas, sin incluir el escogido).
+// Regla de turnos activos de una máquina (26/09/2026, corregida 27/09/2026 -- a pedido del usuario:
+// "siempre se debe garantizar que nada quede inactivo durante un turno"). Al escoger un turno se arma
+// el JUEGO COMPLETO que cubre el día a partir de él, sin cruces, prefiriendo los de su misma duración:
+// M -> M,T,N · T -> T,M,N · N -> N,M,T · D -> D,V · V -> V,D. Luego se enciende lo del juego y se
+// APAGA TODO lo demás que estuviera activo.
+// FIX 27/09/2026 (bug real, máquina 7): la versión del 26/09 solo apagaba los que se cruzaban con el
+// escogido y encendía los libres que no chocaran con NINGÚN activo -- al escoger D con M,T,N activos
+// apagaba M y T pero la Noche seguía activa (no se cruza con D) y tapaba a Pleno Noche: quedó D + N y
+// un hueco de 17:55 a 22:00 sin turno (el trigger de cierre no inserta esos bultos en PRDProduccion).
+// Devuelve { desactivar, activar, minutosSinCubrir } (sin incluir el escogido). minutosSinCubrir > 0
+// solo si los HORARIOS no alcanzan a cubrir el día (ej. Pleno Día hasta 17:55 y Pleno Noche desde
+// 18:00) -- eso se arregla en los datos (sql/pendientes/20260926_corregir_horas_turnos_12h.sql).
+function duracionFranja(f) {
+  const r = minutosRango(f);
+  return r.fin > r.ini ? r.fin - r.ini : 1440 - r.ini + r.fin;
+}
+
 function planTurnosActivos(franjas, elegido) {
   const esElegido = f => Number(f.CodigoTurno) === Number(elegido.CodigoTurno);
-  const desactivar = franjas.filter(f => !esElegido(f) && Number(f.Activo) === 1 && rangosSeSolapan(elegido, f));
-  const activos = [elegido].concat(franjas.filter(f => !esElegido(f) && Number(f.Activo) === 1 && !desactivar.includes(f)));
-  const duracion = f => { const r = minutosRango(f); return r.fin > r.ini ? r.fin - r.ini : 1440 - r.ini + r.fin; };
-  const dElegido = duracion(elegido);
-  const cubierto = min => activos.some(a => contieneMinuto(a, min));
-  const activar = [];
-  const libres = franjas.filter(f => !esElegido(f) && Number(f.Activo) !== 1)
-    .sort((a, b) => Math.abs(duracion(a) - dElegido) - Math.abs(duracion(b) - dElegido));
-  for (const f of libres) {
-    if (activos.some(a => rangosSeSolapan(a, f))) continue;
-    // solo si tapa algún minuto que hoy quede sin turno
+  const dElegido = duracionFranja(elegido);
+  const juego = [elegido];
+  const cubierto = min => juego.some(a => contieneMinuto(a, min));
+  const resto = franjas.filter(f => !esElegido(f)).sort((a, b) =>
+    (Math.abs(duracionFranja(a) - dElegido) - Math.abs(duracionFranja(b) - dElegido)) ||
+    ((Number(b.Activo) === 1 ? 1 : 0) - (Number(a.Activo) === 1 ? 1 : 0)) ||
+    (duracionFranja(a) - duracionFranja(b)));
+  for (const f of resto) {
+    if (juego.some(a => rangosSeSolapan(a, f))) continue;
     let tapa = false;
     for (let min = 0; min < 1440 && !tapa; min += 5) if (contieneMinuto(f, min) && !cubierto(min)) tapa = true;
-    if (!tapa) continue;
-    activos.push(f);
-    activar.push(f);
+    if (tapa) juego.push(f);
   }
-  return { desactivar, activar };
+  let minutosSinCubrir = 0;
+  for (let min = 0; min < 1440; min++) if (!cubierto(min)) minutosSinCubrir++;
+  const activar = juego.filter(f => !esElegido(f) && Number(f.Activo) !== 1);
+  const desactivar = franjas.filter(f => !juego.includes(f) && Number(f.Activo) === 1);
+  return { desactivar, activar, minutosSinCubrir };
+}
+
+// Guardia cada 5 minutos (27/09/2026, a pedido del usuario): aunque alguien deje los turnos activos
+// mal (Mirane GestionTurnos, un UPDATE a mano, la versión vieja de la regla), en cada máquina se
+// vuelve a armar el juego completo a partir del turno que está corriendo AHORA -- ese nunca se cambia,
+// solo se completa el resto del día y se apagan los que sobran. Si ahora cae en un hueco, se parte del
+// activo que acaba de terminar; si no hay ningún activo, de la franja que cubre la hora que menos
+// choque (y la más corta). No toca las
+// máquinas que ya están bien. Nunca revienta hacia afuera.
+async function repararCoberturaTurnos(p) {
+  try {
+    const ahora = await horaServidorBD(p);
+    const mAhora = ahora.getHours() * 60 + ahora.getMinutes();
+    const dt = await p.request().query(`
+      SELECT th.CodigoMaquina, th.CodigoTurno, t.Descripcion, th.HoraInicio, th.HoraFin, ISNULL(th.Activo, 0) AS Activo
+      FROM TURHorariosMaquinas th
+      INNER JOIN NOMTurnos t ON t.Codigo = th.CodigoTurno
+    `);
+    const porMaquina = new Map();
+    for (const f of dt.recordset) {
+      if (minutosDelDia(f.HoraInicio) == null || minutosDelDia(f.HoraFin) == null) continue;
+      if (!porMaquina.has(f.CodigoMaquina)) porMaquina.set(f.CodigoMaquina, []);
+      porMaquina.get(f.CodigoMaquina).push(f);
+    }
+    for (const [maquina, franjas] of porMaquina) {
+      const activos = franjas.filter(f => Number(f.Activo) === 1);
+      // Ancla: el activo que corre ahora; si ninguno (hueco), el activo que ACABA de terminar -- así un
+      // hueco de 5 min en los datos (17:55-18:00) no voltea una jornada de 12 h a turnos de 8 h. Solo
+      // si no hay ningún activo se toma una franja que cubra la hora.
+      const desdeFin = f => { const r = minutosRango(f); return (mAhora - r.fin + 1440) % 1440; };
+      const ancla = activos.filter(f => contieneMinuto(f, mAhora)).sort((a, b) => duracionFranja(a) - duracionFranja(b))[0]
+        || activos.slice().sort((a, b) => desdeFin(a) - desdeFin(b))[0]
+        || franjas.filter(f => contieneMinuto(f, mAhora)).sort((a, b) =>
+             (activos.filter(x => rangosSeSolapan(x, a)).length - activos.filter(x => rangosSeSolapan(x, b)).length) ||
+             (duracionFranja(a) - duracionFranja(b)))[0];
+      if (!ancla) continue;
+      const plan = planTurnosActivos(franjas, ancla);
+      if (Number(ancla.Activo) === 1 && plan.activar.length === 0 && plan.desactivar.length === 0) continue;
+      const tx = new sql.Transaction(p);
+      await tx.begin();
+      try {
+        await aplicarPlanTurnos(tx, maquina, ancla.CodigoTurno, plan);
+        await tx.commit();
+      } catch (err) {
+        try { await tx.rollback(); } catch (e) { /* ya abortada */ }
+        throw err;
+      }
+      const nom = f => String(f.Descripcion || f.CodigoTurno).trim();
+      console.log(`Turnos activos reparados en máquina ${maquina}: se mantiene ${nom(ancla)}` +
+        (plan.activar.length ? `, se encienden ${plan.activar.map(nom).join(', ')}` : '') +
+        (plan.desactivar.length ? `, se apagan ${plan.desactivar.map(nom).join(', ')}` : '') +
+        (plan.minutosSinCubrir ? ` (quedan ${plan.minutosSinCubrir} min sin turno por los horarios)` : ''));
+    }
+  } catch (err) {
+    console.error('No se pudo revisar la cobertura de turnos activos:', { message: err.message, number: err.number });
+  }
 }
 
 async function aplicarPlanTurnos(tx, maquinaCodigo, codigoTurno, plan) {
@@ -2207,6 +2274,7 @@ module.exports = {
   activarTurnoMaquina,
   turnosParaCorregir,
   corregirTurnoMaquina,
+  repararCoberturaTurnos,
   cerrarBitacorasPorFinTurno,
   suspenderOTDeOrden,
   reanudarOTDeOrden,

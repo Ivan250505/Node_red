@@ -13,6 +13,7 @@ const { consultarSerial, confirmarRollo, alternarReferenciaGrupo, materializarIn
 const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
 const {
   obtenerLineaOriginalControlSellado, resolverTurnoMaquina, cerrarBitacora, cerrarBitacorasPorFinTurno,
+  repararCoberturaTurnos,
   abrirOReanudarBitacora, suspenderOTDeOrden, horaServidorBD,
   candidatosTurnoMaquina, activarTurnoMaquina, turnosParaCorregir, corregirTurnoMaquina,
   obtenerAnclaGrupoSellado, obtenerEstadoAjusteConsumo, ajustarConsumoRollo
@@ -1315,6 +1316,9 @@ function scriptActualizarCola(maquinaCodigo) {
       if (!contenedor) return;
 
       async function actualizar() {
+        // FIX 27/09/2026: no redibujar la cola mientras haya una ventana abierta (Retomar, turno,
+        // Iniciar...) -- el redibujo borraba el botón sobre el que el operario estaba decidiendo.
+        if (typeof Swal !== 'undefined' && Swal.isVisible()) return;
         try {
           const resp = await fetch('/selladora/' + ${jsString(maquinaCodigo)} + '/cola-fragmento');
           if (!resp.ok) return;
@@ -3413,11 +3417,38 @@ function scriptConfirmarFinalizar() {
         cancelButtonText: 'Cancelar',
         confirmButtonColor: '#c00000',
         cancelButtonColor: '#71bf44'
-      }).then(resultado => { if (resultado.isConfirmed) formulario.submit(); });
+      }).then(resultado => { if (resultado.isConfirmed) enviarFormularioNuevo(formulario); });
+    }
+
+    // FIX 27/09/2026: los formularios de la cola (Finalizar, Retomar) se borran cada 4 s al redibujarla
+    // (scriptActualizarCola); si el operario tarda en las ventanas, formulario.submit() sobre el viejo
+    // no hace nada. Se envía uno NUEVO con la misma dirección, pegado al body.
+    function enviarFormularioNuevo(formulario) {
+      var f = document.createElement('form');
+      f.method = 'post';
+      f.action = String(formulario.getAttribute('action') || formulario.action || '');
+      f.style.display = 'none';
+      document.body.appendChild(f);
+      f.submit();
     }
 
     function confirmarTomarControlEjecucion(evento, formulario, esElMismo, nombreOperarioAnterior) {
       evento.preventDefault();
+      // FIX 27/09/2026 (bug real, máquina 7, Andrés a las 06:00): la cola se redibuja cada 4 s
+      // (scriptActualizarCola) y este <form> vive dentro de ella. Con la ventana del turno de por
+      // medio pasaban más de 4 s, el <form> ya no estaba en la página y formulario.submit() no hacía
+      // NADA (el navegador descarta en silencio el envío de un formulario desconectado): el turno sí
+      // se activaba, pero el Retomar nunca llegaba al servidor (sin operario actual, sin bitácora,
+      // sin relevo). Ahora se guarda la dirección de una vez y se envía un formulario NUEVO.
+      var accion = String(formulario.getAttribute('action') || formulario.action || '');
+      function enviarRetomar() {
+        var f = document.createElement('form');
+        f.method = 'post';
+        f.action = accion;
+        f.style.display = 'none';
+        document.body.appendChild(f);
+        f.submit();
+      }
       Swal.fire({
         icon: 'question',
         title: esElMismo ? '¿Reanudar esta ejecución?' : '¿Retomar esta ejecución?',
@@ -3430,11 +3461,11 @@ function scriptConfirmarFinalizar() {
       }).then(resultado => {
         if (!resultado.isConfirmed) return;
         // 26/09/2026: antes de retomar, dejar escogido el turno activo (ver scriptElegirTurno)
-        var partes = String(formulario.action || '').split('/');
+        var partes = accion.split('/');
         var i = partes.indexOf('orden');
         var idOrden = i >= 0 ? Number(partes[i + 1]) : 0;
-        if (!idOrden) { formulario.submit(); return; }
-        elegirTurnoSiHaceFalta(idOrden, function() { formulario.submit(); });
+        if (!idOrden) { enviarRetomar(); return; }
+        elegirTurnoSiHaceFalta(idOrden, enviarRetomar);
       });
       return false;
     }
@@ -9667,7 +9698,10 @@ server.listen(webPort, '0.0.0.0', () => {
   // FIX 24/09/2026: cierre de bitacoras al terminar su turno (ver cerrarBitacorasPorFinTurno en
   // sel-inventario-mp.js). Una vez al arrancar (cierra las que quedaron vencidas mientras el
   // servidor estaba apagado) y luego cada 5 minutos.
+  // FIX 27/09/2026: en la misma pasada se garantiza que cada máquina tenga turno activo las 24 horas
+  // (ver repararCoberturaTurnos) -- ANTES del cierre, para que el turno de ahora quede bien resuelto.
   const revisarFinTurno = async () => {
+    try { await repararCoberturaTurnos(await getPool()); } catch (err) { /* ya se registro adentro */ }
     try { await cerrarBitacorasPorFinTurno(await getPool()); } catch (err) { /* ya se registro adentro */ }
   };
   revisarFinTurno();
