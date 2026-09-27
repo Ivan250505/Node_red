@@ -72,6 +72,13 @@ function requireAdmin(req, res, next) {
 // lleva los dos: asi la misma lista sirve en las dos bases sin tocar codigo al cambiar de .env.
 // Si algun dia esto crece, lo que toca es leer los cargos de SISCargos por nombre normalizado en
 // vez de dejar los ids escritos aca.
+// Interruptor general de la autorizacion del lider (26/09/2026, a pedido del usuario: "desactiva
+// la autorizacion en todos los aspectos"). En false: Finalizar y Cerrar sesion no piden firma (ni
+// en la tableta ni en el servidor), no sale el aviso de fin de turno y no se pinta la isla con el
+// boton "Autorizacion". La tabla SEL_AutorizacionPedido y los endpoints /autorizacion siguen ahi;
+// para volver a exigir la firma basta con ponerlo en true.
+const AUTORIZACION_LIDER_ACTIVA = false;
+
 const CARGOS_AUTORIZAN_PEDIDO = [
   { idCargo: 16, nombre: 'Director de Calidad e Inocuidad' },
   { idCargo: 27, nombre: 'Jefe de Planta' },
@@ -110,4 +117,4 @@ async function validarAutorizadorPedido(pool, codigo, passwordEscrito) {
 }
 
 module.exports = { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO,
-                   validarAutorizadorPedido, CARGOS_AUTORIZAN_PEDIDO };
+                   validarAutorizadorPedido, CARGOS_AUTORIZAN_PEDIDO, AUTORIZACION_LIDER_ACTIVA };
