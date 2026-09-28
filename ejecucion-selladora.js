@@ -134,7 +134,10 @@ async function finalizarOrden(pool, idOrden, generadoPor, operarioFinal) {
     // trg_SEL_Bultos_CierreBulto normal -- que de paso puede reservar un Temporal vacío nuevo,
     // por eso esto va ANTES de la limpieza de vacíos de abajo, no después.
     await tx.request().query(`
-      UPDATE SEL_Bultos SET estado = 'Cerrado'
+      UPDATE SEL_Bultos SET estado = 'Cerrado',
+        -- FIX 28/09/2026: antes se cerraban sin HoraFin (quedaba NULL -> PRDProduccion.HoraFinal/Duracion
+        -- NULL). La hora real de fin de un bulto EnEspera es la de su ultimo paquete pesado.
+        HoraFin = ISNULL((SELECT MAX(pe.FechaHora) FROM SEL_PesajeElemento pe WHERE pe.id_bulto = SEL_Bultos.id), GETDATE())
       WHERE id_ejecucion IN (SELECT IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden IN (${idsActivos.join(',')}))
         AND estado = 'EnEspera' AND number_paqu > 0
     `);
