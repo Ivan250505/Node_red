@@ -199,6 +199,22 @@ function jsString(texto) {
   return JSON.stringify(texto == null ? '' : String(texto)).replace(/</g, '\\u003c');
 }
 
+// Texto de la OT para la pastilla del encabezado de Informacion (a pedido del usuario, 28/09/2026):
+// siempre arranca con "OT-" y termina con la abreviatura del operario logueado
+// (PRDOperarios.Abreviatura via SISUsuarios.CodigoOperarioPRD), pegada sin guion, ej. "OT-20260928S005D01MICAC".
+// Las OT creadas antes del cambio de formato (o desde el escritorio) vienen sin guion
+// ("OT20260927S021V01") -- solo se normaliza lo que se muestra, el codigo guardado no se toca.
+// Si el usuario no tiene operario de planta configurado, sale la OT sin sufijo.
+async function textoOTConOperario(p, ordenProduccion, codigoOperarioPRD) {
+  if (!ordenProduccion) return null;
+  const ot = 'OT-' + String(ordenProduccion).replace(/^O[TP]-?/i, '');
+  if (!codigoOperarioPRD) return ot;
+  const dt = await p.request().input('operario', codigoOperarioPRD)
+    .query(`SELECT Abreviatura FROM PRDOperarios WHERE Codigo = @operario`);
+  const abreviatura = dt.recordset.length > 0 ? (dt.recordset[0].Abreviatura || '').trim() : '';
+  return abreviatura ? `${ot}${abreviatura}` : ot;
+}
+
 // Formatea una fecha/hora de la BD (mssql devuelve DATETIME como objeto Date de JS) para mostrar en
 // el HTML -- ej. "01/09/2026 14:32". Usado en la cola de ordenes para mostrar cuando se finalizo una
 // orden (SEL_EjecucionOrden.HoraFinReal, ver renderColaOrdenes), a pedido del usuario (01/09/2026).
@@ -4751,13 +4767,14 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   } else if (activa) {
     // Sellado en paralelo (08/09/2026): "+Rollo" no aplica a una orden agrupada -- el rollo de
     // entrada ya quedó registrado UNA sola vez para las 3 referencias al dar "Iniciar" en la ancla.
+    // Orden de izquierda a derecha: Rollo, Pausa, Turno, Finalizar (a pedido del usuario, 28/09/2026).
     acciones = `
       ${grupoSelladoOtras.length === 0 ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${orden.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>` : ''}
+      ${!pausaActiva ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>` : ''}
+      <button type="button" class="btn-accion" style="background:#b46200;" onclick="corregirTurnoMaquina(${Number(maquinaCodigo)})">🕘 Turno</button>
       <form method="post" action="/api/selladora/orden/${orden.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
         <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
-      </form>
-      ${!pausaActiva ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>` : ''}
-      <button type="button" class="btn-accion" style="background:#b46200;" onclick="corregirTurnoMaquina(${Number(maquinaCodigo)})">🕘 Turno</button>`;
+      </form>`;
   }
 
   // Troquelado (SEL_OrdenProduccion.Troquelado != 'SinTroquelado') -- decide DOS cosas: si sale el
@@ -6692,20 +6709,21 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
          onclick="abrirAjusteConsumo(${miembroParaAjuste.IdOrden})">⚖ Ajustar consumo de rollo</button>`
     : '';
 
+  // Orden de izquierda a derecha: Rollo, Pausa, Turno, Finalizar (a pedido del usuario, 28/09/2026).
   const accionesProduccion = [
     miembroActivoAhora
       ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${miembroActivoAhora.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>`
-      : '',
-    miembroAncla
-      ? `<form method="post" action="/api/selladora/orden/${miembroAncla.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
-          <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
-        </form>`
       : '',
     (miembroAncla && !pausaActiva)
       ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>`
       : '',
     miembroAncla
       ? `<button type="button" class="btn-accion" style="background:#b46200;" onclick="corregirTurnoMaquina(${Number(maquinaCodigo)})">🕘 Turno</button>`
+      : '',
+    miembroAncla
+      ? `<form method="post" action="/api/selladora/orden/${miembroAncla.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
+          <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
+        </form>`
       : ''
   ].join('');
 
@@ -7017,7 +7035,8 @@ app.get('/selladora/:codigo/grupo/:idGrupo', requireLogin, async (req, res) => {
     // que bastarse solo, ya no hay boton "Más información" que lleve a la otra pagina).
     const protocoloPendiente = miembroAncla ? await obtenerProtocoloPendiente(p, miembroAncla.IdOrden) : null;
 
-    res.send(renderGrupoSelladoDetalle(idGrupo, miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, ordenProduccion));
+    const textoOT = await textoOTConOperario(p, ordenProduccion, req.session.usuario.codigoOperarioPRD);
+    res.send(renderGrupoSelladoDetalle(idGrupo, miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, textoOT));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
@@ -7174,7 +7193,8 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
     const protocoloPendiente = await obtenerProtocoloPendiente(p, Number(idOrden));
 
     const esAdmin = req.session.usuario.codigo === ADMIN_CODIGO;
-    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, ordenProduccion));
+    const textoOT = await textoOTConOperario(p, ordenProduccion, req.session.usuario.codigoOperarioPRD);
+    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, textoOT));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
