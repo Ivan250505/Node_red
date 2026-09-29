@@ -46,6 +46,16 @@
 --      abre (maquina + Turno + FechaTurno), la que abre Node cuando el operario toma control. Si
 --      todavia no existe, queda NULL y se completa al cerrar el bulto. Tambien se guarda en
 --      SEL_Bultos.IdBitacora (antes solo el primer bulto la tenia ahi).
+--
+-- ACTUALIZADO 28/09/2026 (a pedido del usuario) -- PENDIENTE de aplicar:
+--   6) Hora final protegida. Casos reales: 35967 L6 (25/09), 36788 L6 (26/09), 22421 L2 (27/09) con
+--      HoraFin = HoraInicio y Duracion 0 (Node-RED mandaba un @HoraPLC viejo, el del cierre anterior),
+--      y bultos 'EnEspera' que Node cierra al Finalizar sin poner HoraFin (quedaba NULL). Antes de todo
+--      lo demas, si el bulto se cierra con HoraFin NULL o <= HoraInicio, se corrige EN SEL_Bultos con la
+--      hora del ultimo paquete pesado (si es posterior a HoraInicio) o, si no, GETDATE(). Todo lo de
+--      abajo (PRDProduccion.HoraFinal/Duracion y la hora de apertura del bulto siguiente) lee ya la hora
+--      corregida. Este UPDATE interno no toca 'estado', asi que no vuelve a cerrar nada en los otros
+--      triggers de SEL_Bultos.
 
 CREATE OR ALTER TRIGGER trg_SEL_Bultos_CierreBulto
 ON SEL_Bultos
@@ -54,6 +64,21 @@ AS
 BEGIN
     SET NOCOUNT ON;
     IF NOT UPDATE(estado) RETURN;
+
+    -- FIX 28/09/2026 (punto 6 del encabezado): hora final protegida.
+    UPDATE b
+    SET b.HoraFin = CASE WHEN up.UltimoPaquete IS NOT NULL AND up.UltimoPaquete > b.HoraInicio
+                         THEN up.UltimoPaquete ELSE GETDATE() END
+    FROM SEL_Bultos b
+    JOIN inserted i ON i.id = b.id
+    JOIN deleted d ON d.id = b.id
+    OUTER APPLY (
+        SELECT MAX(pe.FechaHora) AS UltimoPaquete
+        FROM SEL_PesajeElemento pe
+        WHERE pe.id_bulto = b.id
+    ) up
+    WHERE i.estado = 'Cerrado' AND d.estado <> 'Cerrado'
+      AND (b.HoraFin IS NULL OR (b.HoraInicio IS NOT NULL AND b.HoraFin <= b.HoraInicio));
 
     UPDATE b
     SET b.CantidadTotal = p.Total
@@ -194,7 +219,8 @@ BEGIN
     -- FIX 23/09/2026: fecha REAL de apertura del bulto nuevo (= cierre del anterior), no la heredada
     -- del bulto que se cierra -- ver punto 3 del encabezado.
     CROSS APPLY (
-        SELECT ISNULL(i.HoraFin, GETDATE()) AS HoraApertura
+        -- FIX 28/09/2026: la hora YA corregida (SEL_Bultos), no la de inserted, que trae la original.
+        SELECT ISNULL((SELECT bx.HoraFin FROM SEL_Bultos bx WHERE bx.id = i.id), GETDATE()) AS HoraApertura
     ) h
     CROSS APPLY (
         SELECT h.HoraApertura,

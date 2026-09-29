@@ -1386,6 +1386,418 @@ async function corregirTurnoMaquina(p, { maquina, codigoTurno, usuario, motivo }
            fusionada, bultos, cambioBitacora: cambiaBitacora };
 }
 
+// ======================= Turno escogido en el LOGIN (28/09/2026) =======================
+// Reunión 28/09/2026: el operario escoge su turno al iniciar sesión en la tableta (desplegable con
+// las opciones que tienen sentido a esa hora), el turno se ve al lado del logo, y para cambiarlo
+// cierra sesión y vuelve a entrar. Al entrar se crea o corrige la bitácora de la máquina de la
+// tableta. La OT nunca la cambia el operario. Si entra antes de su hora (hasta 30 min), su bitácora
+// se abre sola cuando termine la del turno anterior (ver abrirBitacorasPendientes).
+
+const MINUTOS_ENTRADA_ANTICIPADA = 30;
+
+// Cache de "¿existe esta columna?" -- los scripts de la base pueden no estar corridos todavía.
+const _columnasCache = new Map();
+async function columnaExiste(p, tabla, columna) {
+  const clave = tabla + '.' + columna;
+  if (_columnasCache.has(clave)) return _columnasCache.get(clave);
+  try {
+    const r = await p.request().input('t', 'dbo.' + tabla).input('c', columna)
+      .query(`SELECT CASE WHEN COL_LENGTH(@t, @c) IS NULL THEN 0 ELSE 1 END AS Existe`);
+    const existe = Number(r.recordset[0].Existe) === 1;
+    if (existe) _columnasCache.set(clave, true); // solo se cachea el sí: el no puede cambiar al correr el script
+    return existe;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Franjas de la máquina (TURHorariosMaquinas) o, si no tiene / no se sabe la máquina, los turnos
+// base de NOMTurnos -- mismo respaldo que resolverTurnoMaquina.
+async function franjasMaquinaOBase(p, maquinaCodigo) {
+  if (maquinaCodigo) {
+    const dt = await p.request().input('maquina', maquinaCodigo).query(`
+      SELECT th.CodigoTurno, t.Descripcion, th.HoraInicio, th.HoraFin, ISNULL(th.Activo, 0) AS Activo
+      FROM TURHorariosMaquinas th
+      INNER JOIN NOMTurnos t ON t.Codigo = th.CodigoTurno
+      WHERE th.CodigoMaquina = @maquina
+    `);
+    if (dt.recordset.length > 0) return dt.recordset.filter(f => minutosDelDia(f.HoraInicio) != null && minutosDelDia(f.HoraFin) != null);
+  }
+  const dtBase = await p.request().query(`
+    SELECT Codigo AS CodigoTurno, Descripcion, HoraInicial AS HoraInicio, HoraFinal AS HoraFin, 1 AS Activo
+    FROM NOMTurnos WHERE Codigo IN (${TURNOS_BASE_SELLADORA.join(',')})
+  `);
+  return dtBase.recordset;
+}
+
+// "6:00 a.m - 2:00 p.m (Mañana)" -> "Mañana"
+function nombreCortoTurno(descripcion) {
+  const t = String(descripcion || '').trim();
+  const m = /\(([^)]+)\)\s*$/.exec(t);
+  return m ? m[1].trim() : t;
+}
+
+// Inicio y fin (Date) de la franja para la jornada que cubre "cuando", o la próxima si todavía no
+// empieza (entrada anticipada).
+function rangoTurno(f, cuando) {
+  const { ini, fin } = minutosRango(f);
+  const m = cuando.getHours() * 60 + cuando.getMinutes();
+  const base = new Date(cuando.getFullYear(), cuando.getMonth(), cuando.getDate());
+  let inicio = new Date(base.getTime() + ini * 60000);
+  if (fin <= ini && m < fin) inicio = new Date(inicio.getTime() - 86400000); // pedazo de después de medianoche
+  else if (!contieneMinuto(f, m) && inicio < cuando) inicio = new Date(inicio.getTime() + 86400000);
+  const dur = fin > ini ? fin - ini : 1440 - ini + fin;
+  return { inicio, fin: new Date(inicio.getTime() + dur * 60000), fechaTurno: fechaISOLocal(inicio) };
+}
+
+function turnoAJson(f, cuando) {
+  const m = cuando.getHours() * 60 + cuando.getMinutes();
+  const r = rangoTurno(f, cuando);
+  return {
+    codigo: Number(f.CodigoTurno), descripcion: String(f.Descripcion || '').trim(), corto: nombreCortoTurno(f.Descripcion),
+    horaInicio: String(f.HoraInicio || '').trim(), horaFin: String(f.HoraFin || '').trim(),
+    cubreAhora: contieneMinuto(f, m), inicio: r.inicio, fin: r.fin, fechaTurno: r.fechaTurno
+  };
+}
+
+// Opciones del desplegable del login: los turnos que cubren la hora y los que empiezan dentro de
+// MINUTOS_ENTRADA_ANTICIPADA. Preselecciona el turno de la bitácora abierta de la máquina (si está
+// entre las opciones) o el más corto que cubre la hora.
+async function turnosParaLogin(p, maquinaCodigo, ahora) {
+  const franjas = await franjasMaquinaOBase(p, maquinaCodigo);
+  const m = ahora.getHours() * 60 + ahora.getMinutes();
+  const opciones = franjas.filter(f => {
+    if (contieneMinuto(f, m)) return true;
+    const d = minutosDesdeInicio(f, m); // negativo = todavía no empieza
+    return d < 0 && -d <= MINUTOS_ENTRADA_ANTICIPADA;
+  }).map(f => turnoAJson(f, ahora))
+    .sort((a, b) => (a.inicio - b.inicio) || ((a.fin - a.inicio) - (b.fin - b.inicio)));
+
+  let preseleccion = null;
+  if (maquinaCodigo) {
+    try {
+      const dt = await p.request().input('maquina', maquinaCodigo).query(
+        `SELECT TOP 1 Turno FROM SEL_BitacoraTurno WHERE Maquina = @maquina AND HoraCierre IS NULL ORDER BY IdBitacora DESC`);
+      if (dt.recordset.length > 0 && opciones.some(o => o.codigo === Number(dt.recordset[0].Turno))) preseleccion = Number(dt.recordset[0].Turno);
+    } catch (e) { /* sin preselección */ }
+  }
+  if (preseleccion == null) {
+    const cubren = opciones.filter(o => o.cubreAhora).sort((a, b) => (a.fin - a.inicio) - (b.fin - b.inicio));
+    if (cubren.length > 0) preseleccion = cubren[0].codigo;
+  }
+  return { opciones, preseleccion };
+}
+
+// Registros de una bitácora: los del operario y los de otros (tiempos muertos, bultos, protocolo).
+async function registrosDeBitacora(p, bit, maquinaCodigo, operario) {
+  const r = { tmMios: 0, tmOtros: 0, bultosMios: 0, bultosOtros: 0, protMios: 0, protOtros: 0 };
+  try {
+    if (await columnaExiste(p, 'SEL_TiempoMuerto', 'IdBitacora')) {
+      const dt = await p.request().input('id', bit.IdBitacora).input('op', operario).query(`
+        SELECT SUM(CASE WHEN Operario = @op THEN 1 ELSE 0 END) AS Mios, SUM(CASE WHEN ISNULL(Operario, -1) <> @op THEN 1 ELSE 0 END) AS Otros
+        FROM SEL_TiempoMuerto WHERE IdBitacora = @id`);
+      r.tmMios = Number(dt.recordset[0].Mios) || 0; r.tmOtros = Number(dt.recordset[0].Otros) || 0;
+    }
+    const dtB = await p.request().input('id', bit.IdBitacora).input('op', operario).query(`
+      SELECT SUM(CASE WHEN o.Otros > 0 THEN 1 ELSE 0 END) AS Otros, COUNT(*) AS Total
+      FROM PRDProduccion p
+      OUTER APPLY (SELECT COUNT(*) AS Otros FROM PRDProduccionOperarios po
+                   WHERE po.Fecha = p.Fecha AND po.Lote = p.Lote AND po.Elemento = p.Elemento AND po.Linea = p.Linea
+                     AND po.Operario <> @op) o
+      WHERE p.IdBitacora = @id AND p.Linea < 1000`);
+    r.bultosOtros = Number(dtB.recordset[0].Otros) || 0;
+    r.bultosMios = (Number(dtB.recordset[0].Total) || 0) - r.bultosOtros;
+    const dtP = await p.request().input('maquina', maquinaCodigo).input('op', operario).input('desde', sql.DateTime, bit.HoraApertura).query(`
+      SELECT SUM(CASE WHEN pa.Operario = @op THEN 1 ELSE 0 END) AS Mios, SUM(CASE WHEN ISNULL(pa.Operario, -1) <> @op THEN 1 ELSE 0 END) AS Otros
+      FROM SEL_ProtocoloArranque pa
+      INNER JOIN SEL_EjecucionOrden e ON e.IdEjecucion = pa.id_ejecucion
+      WHERE e.Maquina = @maquina AND pa.FechaHora >= @desde`);
+    r.protMios = Number(dtP.recordset[0].Mios) || 0; r.protOtros = Number(dtP.recordset[0].Otros) || 0;
+  } catch (err) {
+    console.error('No se pudieron contar los registros de la bitácora:', err.message);
+  }
+  r.mios = r.tmMios + r.bultosMios + r.protMios;
+  r.otros = r.tmOtros + r.bultosOtros + r.protOtros;
+  return r;
+}
+
+// Al iniciar sesión un operario en la tableta fija de una máquina, con el turno escogido.
+// Devuelve { accion, ... }:
+//   'pendiente'  -> entró antes de su turno: no se toca nada; su bitácora se abre al terminar la actual
+//   'creada' / 'reusada' / 'nueva' -> bitácora lista con su turno
+//   'confirmar'  -> la bitácora abierta es de otro turno y tiene registros SUYOS: hay que avisarle
+//                   que pasan al turno nuevo (se aplica con corregirTurnoMaquina)
+//   'bloqueado'  -> la bitácora abierta tiene registros de OTROS operarios: él no la puede cambiar
+async function sincronizarBitacoraAlEntrar(p, { maquina, operario, codigoTurno, ahora }) {
+  const franjas = await franjasMaquinaOBase(p, maquina);
+  const f = franjas.find(x => Number(x.CodigoTurno) === Number(codigoTurno));
+  if (!f) return { accion: 'sin_turno' };
+  const turno = turnoAJson(f, ahora);
+  if (!turno.cubreAhora) return { accion: 'pendiente', turno };
+
+  const dt = await p.request().input('maquina', maquina).query(`
+    SELECT TOP 1 b.IdBitacora, b.Operario, b.Turno, CONVERT(varchar(10), b.FechaTurno, 23) AS FechaTurno, b.HoraApertura,
+           b.Serial, ISNULL(t.Descripcion, '') AS Descripcion
+    FROM SEL_BitacoraTurno b LEFT JOIN NOMTurnos t ON t.Codigo = b.Turno
+    WHERE b.Maquina = @maquina AND b.HoraCierre IS NULL ORDER BY b.IdBitacora DESC`);
+  const abierta = dt.recordset[0] || null;
+
+  if (!abierta) {
+    await activarTurnoMaquina(p, maquina, codigoTurno);
+    const id = await abrirOReanudarBitacora(p, maquina, operario);
+    return { accion: 'creada', idBitacora: id, turno };
+  }
+
+  const mismoTurno = Number(abierta.Turno) === Number(codigoTurno) && abierta.FechaTurno === turno.fechaTurno;
+  if (mismoTurno) {
+    await activarTurnoMaquina(p, maquina, codigoTurno);
+    await pasarBitacoraSiAnteriorSalio(p, abierta, operario);
+    return { accion: 'reusada', idBitacora: abierta.IdBitacora, turno };
+  }
+
+  const reg = await registrosDeBitacora(p, abierta, maquina, operario);
+  const esSuya = Number(abierta.Operario) === Number(operario) || reg.mios > 0;
+  const anterior = { idBitacora: abierta.IdBitacora, turno: Number(abierta.Turno), corto: nombreCortoTurno(abierta.Descripcion) };
+  if (esSuya && reg.otros > 0) return { accion: 'bloqueado', turno, anterior, registros: reg };
+  if (esSuya) return { accion: 'confirmar', turno, anterior, registros: reg };
+
+  // Bitácora de otro operario, sin nada suyo: relevo entre turnos -- se cierra la anterior y se abre la suya.
+  await cerrarBitacora(p, abierta.IdBitacora, 'cambio_turno');
+  await activarTurnoMaquina(p, maquina, codigoTurno);
+  const id = await abrirOReanudarBitacora(p, maquina, operario);
+  return { accion: 'nueva', idBitacora: id, turno, anterior };
+}
+
+// Entradas anticipadas (28/09/2026): operarios que iniciaron sesión en la tableta fija de una máquina
+// con un turno que todavía no empezaba. Cuando ese turno ya empezó y la máquina no tiene bitácora
+// abierta (la anterior se cerró por fin de turno), se abre la suya con su turno -- siempre un turno
+// POSTERIOR al que se cerró -- y los tiempos muertos que él ya había registrado desde que entró pasan
+// a ella. Requiere SISAccesos.Turno / Maquina (sql/pendientes/20260928_turno_en_login.sql). La
+// llama la guardia de cada 5 minutos, después de cerrarBitacorasPorFinTurno. Nunca revienta.
+async function abrirBitacorasPendientes(p) {
+  try {
+    if (!(await columnaExiste(p, 'SISAccesos', 'Turno')) || !(await columnaExiste(p, 'SISAccesos', 'Maquina'))) return 0;
+    const ahora = await horaServidorBD(p);
+    const dt = await p.request().query(`
+      SELECT a.Codigo, a.FechaHora, a.Turno, a.Maquina, u.CodigoOperarioPRD
+      FROM SISAccesos a
+      INNER JOIN SISUsuarios u ON u.Codigo = a.Codigo
+      WHERE a.TipoEvento = 'Entrada' AND a.Turno IS NOT NULL AND a.Maquina IS NOT NULL
+        AND u.CodigoOperarioPRD IS NOT NULL
+        AND a.FechaHora >= DATEADD(HOUR, -13, GETDATE())
+        AND NOT EXISTS (SELECT 1 FROM SISAccesos s WHERE s.Codigo = a.Codigo AND s.FechaHora > a.FechaHora)
+        AND NOT EXISTS (SELECT 1 FROM SEL_BitacoraTurno b WHERE b.Maquina = a.Maquina AND b.HoraCierre IS NULL)
+      ORDER BY a.FechaHora DESC
+    `);
+    let abiertas = 0;
+    const hechas = new Set();
+    for (const e of dt.recordset) {
+      if (hechas.has(e.Maquina)) continue;
+      const franjas = await franjasMaquinaOBase(p, e.Maquina);
+      const f = franjas.find(x => Number(x.CodigoTurno) === Number(e.Turno));
+      if (!f) continue;
+      const turno = turnoAJson(f, ahora);
+      // Solo si ese turno ya empezó y entró ANTES de que empezara (anticipada) o durante él.
+      if (!turno.cubreAhora || new Date(e.FechaHora) >= turno.fin) continue;
+      hechas.add(e.Maquina);
+
+      const dtCerrada = await p.request().input('maquina', e.Maquina).query(
+        `SELECT TOP 1 IdBitacora FROM SEL_BitacoraTurno WHERE Maquina = @maquina AND HoraCierre IS NOT NULL ORDER BY IdBitacora DESC`);
+      const idAnterior = dtCerrada.recordset.length > 0 ? dtCerrada.recordset[0].IdBitacora : null;
+
+      await activarTurnoMaquina(p, e.Maquina, e.Turno);
+      const idNueva = await abrirOReanudarBitacora(p, e.Maquina, e.CodigoOperarioPRD);
+      if (!idNueva) continue;
+      // La bitácora arranca a la hora del turno (la guardia corre cada 5 min, no justo en punto).
+      await p.request().input('id', idNueva).input('inicio', sql.DateTime, turno.inicio)
+        .query(`UPDATE SEL_BitacoraTurno SET HoraApertura = @inicio WHERE IdBitacora = @id AND HoraApertura > @inicio`);
+      // Lo que él ya hizo desde que entró (limpieza, alistamiento del relevo) pasa a su bitácora.
+      if (idAnterior && (await columnaExiste(p, 'SEL_TiempoMuerto', 'IdBitacora'))) {
+        await p.request().input('nueva', idNueva).input('anterior', idAnterior)
+          .input('op', e.CodigoOperarioPRD).input('desde', sql.DateTime, e.FechaHora)
+          .query(`UPDATE SEL_TiempoMuerto SET IdBitacora = @nueva
+                  WHERE IdBitacora = @anterior AND Operario = @op AND HoraInicio >= @desde`);
+      }
+      abiertas++;
+      console.log(`Bitácora ${idNueva} abierta para la entrada anticipada del operario ${e.CodigoOperarioPRD} (máquina ${e.Maquina}, turno ${turno.corto})`);
+    }
+    return abiertas;
+  } catch (err) {
+    console.error('No se pudieron abrir las bitácoras de entradas anticipadas:', { message: err.message, number: err.number });
+    return 0;
+  }
+}
+
+// Supervisores (reunión 28/09/2026): administrador (1) y los cargos que firman la autorización del
+// líder (6, 16, 27, 31). Solo ellos corrigen el turno una vez hay producción (botón 🕘 Turno).
+const CARGOS_SUPERVISOR = [1, 6, 16, 27, 31];
+function esSupervisor(usuario) {
+  return !!usuario && (usuario.codigo === 'ADMIN' || CARGOS_SUPERVISOR.includes(Number(usuario.idCargo)));
+}
+
+// ======================= Corregir el turno de una OT (28/09/2026) =======================
+// A pedido del usuario: una OT ACTIVA creada con el turno equivocado (ej. Mañana en vez de Pleno Día,
+// aunque se haya creado ayer) la corrige un supervisor desde la tableta, en la sección "Orden de
+// trabajo". Solo la OT: su código cambia (lleva la letra del turno y el consecutivo se cuenta por
+// fecha + máquina + turno) y el código nuevo se pone en TODAS las tablas que lo guardan. La bitácora
+// y el turno de los bultos NO se tocan (eso se corrige con el turno del usuario al entrar).
+// Todo en una transacción: o queda todo o nada. Deja un movimiento CAMBIO_OT en SISMovimientos con
+// la observación obligatoria.
+
+async function infoOTParaCorreccion(p, ordenProduccion) {
+  if (!ordenProduccion) return null;
+  try {
+    const dt = await p.request().input('ot', ordenProduccion).query(`
+      SELECT o.IdOrdenProduccion, o.OrdenProduccion, o.Estado, o.Turno, o.Maquina, ISNULL(t.Descripcion, '') AS Descripcion
+      FROM PRDOrdenesProduccion o LEFT JOIN NOMTurnos t ON t.Codigo = o.Turno
+      WHERE o.OrdenProduccion = @ot`);
+    if (dt.recordset.length === 0) return null;
+    const r = dt.recordset[0];
+    return { id: r.IdOrdenProduccion, codigo: r.OrdenProduccion, estado: String(r.Estado || '').trim(),
+             turno: r.Turno == null ? null : Number(r.Turno), corto: nombreCortoTurno(r.Descripcion) || '-', maquina: r.Maquina };
+  } catch (err) {
+    return null;
+  }
+}
+
+// Turnos a los que se puede pasar la OT: los de su máquina (o los base), menos el que ya tiene.
+async function turnosParaCorregirOT(p, ordenProduccion) {
+  const ot = await infoOTParaCorreccion(p, ordenProduccion);
+  if (!ot) return { ot: null, opciones: [] };
+  const franjas = await franjasMaquinaOBase(p, ot.maquina);
+  const opciones = franjas.filter(f => Number(f.CodigoTurno) !== ot.turno).map(f => ({
+    codigo: Number(f.CodigoTurno), corto: nombreCortoTurno(f.Descripcion),
+    horaInicio: String(f.HoraInicio || '').trim(), horaFin: String(f.HoraFin || '').trim()
+  }));
+  return { ot, opciones };
+}
+
+async function corregirTurnoOT(p, { ordenProduccion, codigoTurno, usuario, observacion }) {
+  const tObs = String(observacion || '').trim();
+  if (tObs.length < 5) throw new Error('Escriba una observación (por qué se corrige el turno).');
+
+  const dtOT = await p.request().input('ot', ordenProduccion).query(`
+    SELECT IdOrdenProduccion, OrdenProduccion, Fecha, Lote, Maquina, Turno, Consecutivo, Estado
+    FROM PRDOrdenesProduccion WHERE OrdenProduccion = @ot`);
+  if (dtOT.recordset.length === 0) throw new Error('No se encontró la orden de trabajo.');
+  const ot = dtOT.recordset[0];
+  if (String(ot.Estado || '').trim() !== 'Activa') throw new Error('Solo se puede corregir una orden de trabajo Activa.');
+  if (Number(ot.Turno) === Number(codigoTurno)) throw new Error('La orden de trabajo ya tiene ese turno.');
+
+  const franjas = await franjasMaquinaOBase(p, ot.Maquina);
+  if (!franjas.some(f => Number(f.CodigoTurno) === Number(codigoTurno))) throw new Error('Ese turno no está configurado para la máquina de la OT.');
+
+  // Código nuevo, igual que obtenerOCrearOrdenProduccion: OT- + año + lote + sigla máquina + letra turno + consecutivo
+  const dtSig = await p.request().input('maquina', ot.Maquina).input('turno', codigoTurno).query(`
+    SELECT (SELECT ISNULL(LetraSerial,'') + ISNULL(CodigoSerial,'') FROM PRDMaquinas WHERE Codigo = @maquina) AS Sigla,
+           (SELECT ISNULL(LetraSerial,'') FROM NOMTurnos WHERE Codigo = @turno) AS Letra,
+           (SELECT Descripcion FROM NOMTurnos WHERE Codigo = @turno) AS DescNueva`);
+  const sigla = String(dtSig.recordset[0].Sigla || '');
+  const letra = String(dtSig.recordset[0].Letra || '');
+  const fecha = new Date(ot.Fecha);
+  const lote = String(ot.Lote || '').trim();
+
+  // Tablas que guardan el código de la OT (se buscan en la base: así no se escapa ninguna nueva)
+  const dtTablas = await p.request().query(`
+    SELECT c.TABLE_NAME AS Tabla
+    FROM INFORMATION_SCHEMA.COLUMNS c
+    INNER JOIN INFORMATION_SCHEMA.TABLES t ON t.TABLE_NAME = c.TABLE_NAME AND t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_TYPE = 'BASE TABLE'
+    WHERE c.COLUMN_NAME = 'OrdenProduccion' AND c.TABLE_SCHEMA = 'dbo'
+      AND c.TABLE_NAME NOT IN ('PRDOrdenesProduccion', 'PRDOrdenesProduccionPausas')`);
+  const tablas = dtTablas.recordset.map(r => String(r.Tabla)).filter(t => /^[A-Za-z0-9_]+$/.test(t));
+  const conTipoPausa = await columnaExiste(p, 'PRDOrdenesProduccionPausas', 'Tipo');
+  const hayPausas = (await p.request().query(`SELECT OBJECT_ID('dbo.PRDOrdenesProduccionPausas') AS X`)).recordset[0].X != null;
+  const haySIS = (await p.request().query(`SELECT OBJECT_ID('dbo.SISMovimientos') AS X`)).recordset[0].X != null;
+
+  const tx = new sql.Transaction(p);
+  await tx.begin();
+  try {
+    // Consecutivo libre para fecha + máquina + turno nuevo (bajo bloqueo, para que nadie cree la misma a la vez)
+    const dtCons = await tx.request().input('fecha', sql.Date, fecha).input('maquina', ot.Maquina).input('turno', codigoTurno).query(`
+      SELECT ISNULL(MAX(Consecutivo), 0) + 1 AS NC FROM PRDOrdenesProduccion WITH (UPDLOCK, HOLDLOCK)
+      WHERE Fecha = @fecha AND Maquina = @maquina AND Turno = @turno`);
+    let nCons = Number(dtCons.recordset[0].NC);
+    let nuevo;
+    for (;;) {
+      nuevo = `OT-${fecha.getFullYear()}${lote}${sigla}${letra}${String(nCons).padStart(2, '0')}`;
+      const ex = await tx.request().input('ot', nuevo).query(`SELECT 1 AS X FROM PRDOrdenesProduccion WITH (UPDLOCK, HOLDLOCK) WHERE OrdenProduccion = @ot`);
+      if (ex.recordset.length === 0) break;
+      nCons++;
+    }
+    const viejo = ot.OrdenProduccion;
+
+    const colsPausa = 'HoraInicioPausa, HoraFinPausa, Observaciones, UsuarioPausa, UsuarioReanuda' + (conTipoPausa ? ', Tipo' : '');
+    const lineasTablas = tablas.map(t =>
+      `UPDATE [dbo].[${t}] SET OrdenProduccion = @nuevo WHERE OrdenProduccion = @viejo;
+       INSERT INTO @Conteo VALUES ('${t}', @@ROWCOUNT);`).join('\n');
+
+    const r = await tx.request()
+      .input('viejo', viejo).input('nuevo', nuevo).input('id', ot.IdOrdenProduccion)
+      .input('turno', codigoTurno).input('cons', nCons)
+      .query(`
+        DECLARE @Conteo TABLE (Tabla VARCHAR(128), Filas INT);
+        ${hayPausas ? `
+        -- La FK de las pausas no actualiza en cascada: se copian, se borran y se vuelven a insertar con el código nuevo.
+        DECLARE @Pausas TABLE (IdPausa INT, HoraInicioPausa DATETIME, HoraFinPausa DATETIME, Observaciones VARCHAR(200),
+                               UsuarioPausa INT, UsuarioReanuda INT${conTipoPausa ? ', Tipo VARCHAR(20)' : ''});
+        INSERT INTO @Pausas (IdPausa, ${colsPausa}) SELECT IdPausa, ${colsPausa} FROM PRDOrdenesProduccionPausas WHERE OrdenProduccion = @viejo;
+        DELETE FROM PRDOrdenesProduccionPausas WHERE OrdenProduccion = @viejo;` : ''}
+
+        UPDATE PRDOrdenesProduccion SET OrdenProduccion = @nuevo, Turno = @turno, Consecutivo = @cons WHERE IdOrdenProduccion = @id;
+        INSERT INTO @Conteo VALUES ('PRDOrdenesProduccion', @@ROWCOUNT);
+
+        ${hayPausas ? `
+        INSERT INTO PRDOrdenesProduccionPausas (OrdenProduccion, ${colsPausa})
+        SELECT @nuevo, ${colsPausa} FROM @Pausas ORDER BY IdPausa;
+        INSERT INTO @Conteo VALUES ('PRDOrdenesProduccionPausas', @@ROWCOUNT);` : ''}
+
+        ${lineasTablas}
+
+        -- El texto de la observación de sus movimientos de inventario también nombra la OT
+        IF COL_LENGTH('dbo.INVMovimientos', 'OrdenProduccion') IS NOT NULL
+          UPDATE INVMovimientos SET Observaciones = REPLACE(Observaciones, @viejo, @nuevo)
+          WHERE OrdenProduccion = @nuevo AND Observaciones LIKE '%' + @viejo + '%';
+
+        ${haySIS ? `UPDATE SISMovimientos SET Referencia = @nuevo WHERE Tipo = 'ORDEN_TRABAJO' AND Referencia = @viejo;` : ''}
+
+        SELECT Tabla, Filas FROM @Conteo WHERE Filas > 0;
+      `);
+    const conteo = r.recordset || [];
+
+    if (haySIS) {
+      const dtTurnoViejo = await tx.request().input('t', ot.Turno).query(`SELECT Descripcion FROM NOMTurnos WHERE Codigo = @t`);
+      const cortoViejo = nombreCortoTurno(dtTurnoViejo.recordset.length ? dtTurnoViejo.recordset[0].Descripcion : String(ot.Turno));
+      const cortoNuevo = nombreCortoTurno(dtSig.recordset[0].DescNueva || String(codigoTurno));
+      const req = tx.request()
+        .input('id', ot.IdOrdenProduccion).input('nuevo', nuevo).input('viejo', viejo)
+        .input('usuario', usuario || null).input('motivo', tObs.slice(0, 500))
+        .input('resumen', `Turno de la OT corregido: ${cortoViejo} -> ${cortoNuevo}. Código ${viejo} -> ${nuevo}.`.slice(0, 500))
+        .input('tAnt', ot.Turno == null ? null : String(ot.Turno)).input('tNue', String(codigoTurno))
+        .input('cAnt', String(ot.Consecutivo)).input('cNue', String(nCons));
+      const filas = conteo.map((c, i) => `UNION ALL SELECT Id, @tb${i}, 'Filas con el código nuevo', NULL, @fl${i} FROM @Mov`).join('\n');
+      conteo.forEach((c, i) => { req.input(`tb${i}`, String(c.Tabla)); req.input(`fl${i}`, String(c.Filas)); });
+      await req.query(`
+        DECLARE @Mov TABLE (Id INT);
+        INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
+        OUTPUT INSERTED.IdMovimiento INTO @Mov
+        VALUES ('ORDEN_TRABAJO', 'CAMBIO_OT', @id, @nuevo, GETDATE(), @usuario, 'Tableta', @motivo, @resumen);
+        INSERT INTO SISMovimientosDetalle (IdMovimiento, Tabla, Campo, ValorAnterior, ValorNuevo)
+        SELECT Id, 'PRDOrdenesProduccion', 'OrdenProduccion', @viejo, @nuevo FROM @Mov
+        UNION ALL SELECT Id, 'PRDOrdenesProduccion', 'Turno', @tAnt, @tNue FROM @Mov
+        UNION ALL SELECT Id, 'PRDOrdenesProduccion', 'Consecutivo', @cAnt, @cNue FROM @Mov
+        ${filas};
+      `);
+    }
+
+    await tx.commit();
+    console.log(`OT corregida: ${viejo} -> ${nuevo} (turno ${ot.Turno} -> ${codigoTurno})`);
+    return { viejo, nuevo, conteo };
+  } catch (err) {
+    try { await tx.rollback(); } catch (e) { /* ya abortada */ }
+    throw err;
+  }
+}
+
 // Letra de turno para el serial de la bitacora (D/V/M/T/N) -- mismo mapeo NOMTurnos ya usado en
 // Mirane (ver ConsProduccionSeguimiento.vb:LetraTurnoCodigo): 6=Mañana, 7=Tarde, 8=Noche,
 // 9=Pleno Noche, 10=Pleno Dia. Null si el codigo no se reconoce (esquema viejo 1-5, no aplica aca).
@@ -1620,12 +2032,76 @@ async function cerrarBitacorasPorFinTurno(p) {
 //
 // Nunca revienta hacia afuera: si algo falla, se registra en consola y el operario igual toma
 // control de la maquina. La bitacora es un registro, no puede bloquear la produccion.
+// 27/09/2026 (a pedido del usuario -- caso real máquina 7: Andrés terminó el alistamiento de su orden a
+// las 18:00:12, eso abrió la bitácora de Pleno Noche a su nombre, cerró sesión y el 182 retomó a las
+// 18:01:58, pero la bitácora siguió a nombre de Andrés): ¿el operario (PRDOperarios.Codigo) ya no
+// está en la tableta? Sí si su último evento en SISAccesos es 'Salida', o si su última entrada fue
+// hace más de 8 horas (lo que dura la sesión, ver cookie maxAge en server.js). Si nunca entró por la
+// tableta, tampoco está. Se cruza por SISUsuarios.CodigoOperarioPRD.
+async function operarioSalioDeSesion(p, operarioPRD) {
+  const dt = await p.request().input('op', operarioPRD).query(`
+    SELECT TOP 1
+      CASE WHEN a.TipoEvento = 'Salida' OR a.FechaHora < DATEADD(HOUR, -13, GETDATE()) THEN 1 ELSE 0 END AS Salio
+    FROM SISAccesos a
+    INNER JOIN SISUsuarios u ON u.Codigo = a.Codigo
+    WHERE u.CodigoOperarioPRD = @op
+    ORDER BY a.FechaHora DESC
+  `);
+  return dt.recordset.length === 0 || Number(dt.recordset[0].Salio) === 1;
+}
+
+// La bitácora abierta del turno pasa al operario que toma el control, SOLO si el que la tenía ya
+// salió de la tableta (fin de turno / primer retomar del turno). Si el anterior sigue conectado es un
+// relevo corto dentro del turno y la bitácora se queda con él. Lo hecho por el anterior sigue a su
+// nombre fila por fila (tiempos muertos, bultos, protocolo) -- solo cambia el encabezado, que es el
+// operario de la planilla. Deja rastro en SISMovimientos. Nunca revienta hacia afuera.
+async function pasarBitacoraSiAnteriorSalio(p, abierta, operarioCodigo) {
+  try {
+    if (!operarioCodigo || abierta.Operario == null || Number(abierta.Operario) === Number(operarioCodigo)) return;
+    if (!(await operarioSalioDeSesion(p, abierta.Operario))) return;
+    // 28/09/2026: si el que llega declaró en el login OTRO turno (entró antes para el turno
+    // siguiente), esta bitácora no es la suya: la suya se abre al terminar ésta (abrirBitacorasPendientes).
+    if (await columnaExiste(p, 'SISAccesos', 'Turno')) {
+      const dtDecl = await p.request().input('op', operarioCodigo).query(`
+        SELECT TOP 1 a.Turno FROM SISAccesos a INNER JOIN SISUsuarios u ON u.Codigo = a.Codigo
+        WHERE u.CodigoOperarioPRD = @op AND a.TipoEvento = 'Entrada' ORDER BY a.FechaHora DESC`);
+      const tDecl = dtDecl.recordset.length > 0 ? dtDecl.recordset[0].Turno : null;
+      if (tDecl != null && abierta.Turno != null && Number(tDecl) !== Number(abierta.Turno)) return;
+    }
+    const r = await p.request()
+      .input('id', abierta.IdBitacora).input('nuevo', operarioCodigo).input('anterior', abierta.Operario)
+      .input('serial', abierta.Serial || null)
+      .input('tAnt', String(abierta.Operario)).input('tNue', String(operarioCodigo))
+      .query(`
+        UPDATE SEL_BitacoraTurno SET Operario = @nuevo
+        WHERE IdBitacora = @id AND Operario = @anterior AND HoraCierre IS NULL;
+        IF @@ROWCOUNT > 0 AND OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
+        BEGIN
+          DECLARE @Mov TABLE (Id INT);
+          INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
+          OUTPUT INSERTED.IdMovimiento INTO @Mov
+          VALUES ('BITACORA_TURNO', 'CAMBIO_OPERARIO', @id, @serial, GETDATE(), NULL, 'Tableta',
+                  N'Toma de control: el operario anterior ya había cerrado sesión',
+                  N'La bitácora pasa del operario ' + @tAnt + N' al ' + @tNue);
+          INSERT INTO SISMovimientosDetalle (IdMovimiento, Tabla, Campo, ValorAnterior, ValorNuevo)
+          SELECT Id, 'SEL_BitacoraTurno', 'Operario', @tAnt, @tNue FROM @Mov;
+        END
+      `);
+    if (r.rowsAffected && r.rowsAffected[0] > 0) {
+      console.log(`Bitácora ${abierta.IdBitacora}: pasa del operario ${abierta.Operario} al ${operarioCodigo} (el anterior ya salió de la tableta)`);
+    }
+  } catch (err) {
+    console.error('No se pudo pasar la bitácora al operario que toma el control:',
+      { idBitacora: abierta.IdBitacora, message: err.message, number: err.number });
+  }
+}
+
 async function abrirOReanudarBitacora(p, maquinaCodigo, operarioCodigo) {
   try {
     const turnoAhora = await resolverTurnoMaquina(p, maquinaCodigo);
 
     const dtAbierta = await p.request().input('maquina', maquinaCodigo).query(`
-      SELECT TOP 1 IdBitacora, Operario, Turno, CONVERT(varchar(10), FechaTurno, 23) AS FechaTurno
+      SELECT TOP 1 IdBitacora, Operario, Turno, CONVERT(varchar(10), FechaTurno, 23) AS FechaTurno, Serial
       FROM SEL_BitacoraTurno WHERE Maquina = @maquina AND HoraCierre IS NULL
       ORDER BY IdBitacora DESC
     `);
@@ -1645,7 +2121,13 @@ async function abrirOReanudarBitacora(p, maquinaCodigo, operarioCodigo) {
       // el reporte de seguimiento. El "protocolo de relevo" (limpieza/alistamiento que debe repetir
       // el operario entrante, SEL_ProtocoloArranque paso 'relevo') sigue intacto -- es un control de
       // calidad/seguridad aparte, no tiene que ver con la identidad de la bitacora.
-      if (mismoTurno) return abierta.IdBitacora;  // sigue la misma bitacora del turno, sin importar el operario
+      // 27/09/2026: sigue la misma bitácora del turno, pero si el operario que la tenía ya salió de la
+      // tableta (fin de turno / primer retomar del turno), pasa al que toma el control -- ver
+      // pasarBitacoraSiAnteriorSalio.
+      if (mismoTurno) {
+        await pasarBitacoraSiAnteriorSalio(p, abierta, operarioCodigo);
+        return abierta.IdBitacora;
+      }
       await cerrarBitacora(p, abierta.IdBitacora, 'cambio_turno');
     }
 
@@ -2274,6 +2756,18 @@ module.exports = {
   activarTurnoMaquina,
   turnosParaCorregir,
   corregirTurnoMaquina,
+  turnosParaLogin,
+  sincronizarBitacoraAlEntrar,
+  infoOTParaCorreccion,
+  turnosParaCorregirOT,
+  corregirTurnoOT,
+  abrirBitacorasPendientes,
+  franjasMaquinaOBase,
+  turnoAJson,
+  nombreCortoTurno,
+  columnaExiste,
+  esSupervisor,
+  CARGOS_SUPERVISOR,
   repararCoberturaTurnos,
   cerrarBitacorasPorFinTurno,
   suspenderOTDeOrden,
