@@ -130,7 +130,16 @@ function broadcastPeso(mensaje) {
 function conectarNodeRed() {
   const ws = new WebSocket(NODERED_WS_URL);
   ws.on('message', (data) => broadcastPeso(data.toString()));
-  ws.on('close', () => setTimeout(conectarNodeRed, 5000));
+  ws.on('close', () => {
+    // Se avisa a los navegadores que ya no hay lectura valida (la verificacion de bascula del
+    // protocolo no debe capturar un peso viejo). Solo una vez: los reintentos fallidos tambien
+    // pasan por aca cada 5s. ultimoPeso queda en null, asi que el que se conecte no recibe nada.
+    if (ultimoPeso !== null) {
+      broadcastPeso(JSON.stringify({ peso: null }));
+      ultimoPeso = null;
+    }
+    setTimeout(conectarNodeRed, 5000);
+  });
   ws.on('error', (err) => {
     console.error('Error conectando a Node-RED (%s):', NODERED_WS_URL, err.message);
     ws.close();
@@ -1213,21 +1222,26 @@ function scriptPesoEnVivo() {
         var ws = new WebSocket(protocolo + '//' + location.host + '/ws/peso');
 
         ws.onopen = function() { fijarEstado(true, 'Conectado'); };
-        ws.onclose = function() { fijarEstado(false, 'Desconectado'); setTimeout(conectar, 3000); };
+        ws.onclose = function() {
+          // Sin conexion, el ultimo peso deja de ser confiable para la verificacion de bascula.
+          window.ultimoPesoBascula = null;
+          fijarEstado(false, 'Desconectado');
+          setTimeout(conectar, 3000);
+        };
         ws.onerror = function() { ws.close(); };
         ws.onmessage = function(evento) {
           var texto = '—';
           try {
             var json = JSON.parse(evento.data);
+            // peso null = el servidor perdio la conexion con Node-RED (ver conectarNodeRed).
+            if (json && json.peso === null) window.ultimoPesoBascula = null;
             if (json && typeof json.peso === 'number') {
               texto = json.peso.toFixed(2);
               // Ultimo peso recibido, en window para que lo pueda CAPTURAR la verificacion de
               // bascula del protocolo (14/09/2026). Hasta ahora este numero solo se pintaba en el
               // HTML y no quedaba en ninguna variable, asi que no habia forma de leerlo desde otro
-              // script. Se guarda tambien CUANDO llego: una lectura vieja (la bascula se
-              // desconecto hace rato) no sirve para verificar nada y hay que rechazarla.
+              // script. (Ya no se guarda CUANDO llego: ver FIX 29/09/2026 en pesoBasculaActual.)
               window.ultimoPesoBascula = json.peso;
-              window.ultimoPesoBasculaEn = Date.now();
             }
           } catch (e) { /* mensaje no valido -- se deja el guion */ }
           pesoNumeros.forEach(function(el) { el.textContent = texto; });
@@ -4171,12 +4185,17 @@ function scriptProtocoloArranque(maquinaCodigo) {
     // scriptComandos); lo unico que cambia es el paso con que se guarda y a donde se vuelve.
     var TOLERANCIA_PESO_PATRON_PCT = ${TOLERANCIA_PESO_PATRON_PCT};
     var PESO_PATRON_KG = ${PESO_PATRON_KG};
-    // Una lectura de mas de 15s es de una bascula que ya no esta reportando: no sirve para verificar.
-    var PESO_BASCULA_VENCE_MS = 15000;
 
+    // FIX 29/09/2026 (reportado por el usuario: "la primera vez que sale no muestra el peso, se
+    // queda en nulo a no ser que le demos a recargar"). Antes aca se descartaba toda lectura de mas
+    // de 15s. Pero Node-RED NO emite continuo: manda el peso cuando cambia, asi que con la bascula
+    // quieta pasan mas de 15s sin mensajes y la lectura (que sigue siendo la actual) se daba por
+    // vencida. Recargar "lo arreglaba" solo porque al reconectar el servidor reenvia el ultimo peso
+    // y eso le ponia hora nueva. Ahora la vigencia no se mide por edad sino por conexion: si el
+    // WebSocket del navegador se cae, o el servidor avisa que perdio a Node-RED (peso null), el
+    // valor se borra en scriptPesoEnVivo y aca da null.
     function pesoBasculaActual() {
       if (typeof window.ultimoPesoBascula !== 'number') return null;
-      if (!window.ultimoPesoBasculaEn || (Date.now() - window.ultimoPesoBasculaEn) > PESO_BASCULA_VENCE_MS) return null;
       return window.ultimoPesoBascula;
     }
 
@@ -8973,7 +8992,9 @@ async function marcarRelevoProtocolo(p, { idOrden, operario, esOtroOperario }) {
 }
 
 // Interruptor de la verificacion de la bascula contra el elemento patron. Estuvo APAGADA del
-// 18/09/2026 al 21/09/2026 a pedido del usuario; desde el 21/09/2026 vuelve a estar ENCENDIDA. Se
+// 18/09/2026 al 21/09/2026 a pedido del usuario; del 21/09/2026 al 29/09/2026 estuvo ENCENDIDA y el
+// 29/09/2026 se vuelve a APAGAR a pedido del usuario (la ventana no mostraba el peso la primera vez,
+// ver FIX 29/09/2026 en pesoBasculaActual; queda apagada mientras se prueba ese arreglo). Se
 // deja como constante para poder apagarla y prenderla otra vez sin tocar nada mas.
 //
 // En false apaga tres cosas, todas desde aca:
@@ -8988,7 +9009,7 @@ async function marcarRelevoProtocolo(p, { idOrden, operario, esOtroOperario }) {
 // alistamiento hecho pero SIN amperaje durante el apagon si pasan por la verificacion, que es
 // justo lo que se quiere. Y la revision periodica sale en la primera ronda de sondeo de cada
 // maquina que ya tenga verificaciones guardadas, porque su ultima quedo pasada de los 30-40 min.
-const VERIFICACION_BASCULA_ACTIVA = true;
+const VERIFICACION_BASCULA_ACTIVA = false;
 
 // Tolerancia con la que se acepta que el peso de la bascula "concuerda" con el elemento patron
 // (decision del usuario, 14/09/2026: por porcentaje, +-1%). ES EL UNICO SITIO donde vive ese
