@@ -92,6 +92,76 @@ trigger saca operario y `GeneradoPor` de los bultos), bitácora del turno y marc
 
 ---
 
+## 3. La bitácora queda con el operario que toma el control (si el anterior ya se fue)
+
+### Qué pasó
+Andrés inició una orden a las 17:30 (turno Pleno Día) y terminó su alistamiento a las **18:00:12**. En
+ese momento se crea el primer bulto y se abre la bitácora con el operario que pitó el rollo: como ya era
+Pleno Noche, se abrió **la bitácora de Pleno Noche a nombre de Andrés**. Andrés cerró sesión y el 182
+retomó a las 18:01:58: la máquina y la ejecución pasaron al 182, pero la bitácora **se reusó sin cambiar
+el operario** (`if (mismoTurno) return abierta.IdBitacora;`). La planilla de la noche salía a nombre de
+Andrés.
+
+### Qué cambió (`sel-inventario-mp.js`)
+- **`operarioSalioDeSesion`** (nueva): el operario ya no está en la tableta si su último evento en
+  `SISAccesos` es `'Salida'` o su última entrada fue hace más de 8 horas (lo que dura la sesión). Se cruza
+  por `SISUsuarios.CodigoOperarioPRD`.
+- **`pasarBitacoraSiAnteriorSalio`** (nueva), llamada desde `abrirOReanudarBitacora` cuando reusa la
+  bitácora del mismo turno (Retomar e Iniciar): si el que toma el control es **otro** operario y el
+  anterior **ya salió**, la bitácora pasa a su nombre y queda un movimiento
+  `BITACORA_TURNO / CAMBIO_OPERARIO` en `SISMovimientos`. Si el anterior sigue conectado (relevo corto
+  dentro del turno), la bitácora se queda con él.
+- Lo que hizo el operario anterior sigue a su nombre fila por fila (tiempos muertos, bultos, protocolo);
+  solo cambia el encabezado de la bitácora (el operario de la planilla).
+
+Dato del 27/09: `UPDATE SEL_BitacoraTurno SET Operario = 182 WHERE IdBitacora = 10;`
+
+---
+
+## 4. El turno se escoge en el login (reunión 28/09/2026)
+
+- **Login**: desplegable "Turno" con los turnos que cubren la hora y los que empiezan en los próximos
+  **30 min** (`turnosParaLogin`), preseleccionado con el de la bitácora abierta de la máquina. Obligatorio
+  para operarios (`CodigoOperarioPRD`); los demás usuarios no lo necesitan.
+- **Sesión**: dura hasta el **fin del turno escogido + 15 min** → en el cambio de turno obliga a volver a entrar.
+- **Al entrar** (tableta fija, `sincronizarBitacoraAlEntrar`):
+  - sin bitácora abierta → se crea con su turno;
+  - misma bitácora/turno → se reusa (y pasa a él si el anterior ya salió);
+  - otro turno con registros **suyos** → pantalla `/confirmar-turno`: "tiene N bultos, M tiempos muertos… si
+    continúa pasan al turno X" → `corregirTurnoMaquina` (la OT no cambia) o se queda en el turno anterior;
+  - otro turno con registros **de otros operarios** → bloqueado: entra con el turno de la bitácora o pide al supervisor;
+  - bitácora de otro operario sin nada suyo → se cierra y se abre la suya.
+- **Entrada anticipada**: si escoge un turno que todavía no empieza, no se toca la bitácora actual; cuando
+  ésta se cierra por fin de turno, la guardia (`abrirBitacorasPendientes`) abre la suya con su turno y le pasa
+  los tiempos muertos que ya registró desde que entró. Requiere `SISAccesos.Turno/Maquina`
+  (`sql/pendientes/20260928_turno_en_login.sql`).
+- El turno se ve **al lado del logo** en todas las pantallas.
+- Iniciar y Retomar **ya no preguntan el turno** (se activa el de la sesión en la máquina).
+- **🕘 Turno** solo para supervisores: IdCargo 1, 6, 16, 27, 31 (`esSupervisor`), también validado en el servidor.
+
+---
+
+## 5. Corregir el turno de una OT desde la tableta (28/09/2026)
+
+- Sección **"Orden de trabajo"** debajo del historial (pantalla de la orden y del grupo): muestra la OT, su
+  turno y su estado. A un **supervisor**, con la OT **Activa**, le sale **⚙ Corregir turno de la OT**.
+- La ventana pide el **turno correcto** (los de la máquina) y una **observación obligatoria**.
+- `corregirTurnoOT` (una sola transacción, todo o nada):
+  - código nuevo `OT-` + año + lote + sigla de máquina + **letra del turno nuevo** + **consecutivo libre**
+    para fecha + máquina + turno nuevo;
+  - `PRDOrdenesProduccion`: código, `Turno` y `Consecutivo` (mismo registro: el Id no cambia);
+  - el código nuevo en **todas las tablas con columna `OrdenProduccion`** (se buscan en la base:
+    `PRDProduccion`, `PRDProduccionMateriaPrima`, `SEL_TiempoMuerto`, `INVMovimientos`, …);
+  - `PRDOrdenesProduccionPausas`: su FK no actualiza en cascada → se copian, se borran y se reinsertan;
+  - texto de `INVMovimientos.Observaciones` y `SISMovimientos.Referencia` de la OT;
+  - movimiento **`ORDEN_TRABAJO / CAMBIO_OT`** con la observación, quién, turno y código viejo → nuevo y las
+    filas actualizadas por tabla.
+- **No toca** la bitácora ni el turno de los bultos.
+- Fix de paso: el botón 🕘 Turno usaba `esSupervisor(usuario)` donde `usuario` era el nombre → nunca salía;
+  ahora las rutas pasan el flag `esSup`.
+
+---
+
 ## Al desplegar
 
 1. Reiniciar Node. En la primera pasada de la guardia se reparan los turnos activos (ver consola:

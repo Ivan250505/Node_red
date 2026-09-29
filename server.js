@@ -13,7 +13,9 @@ const { consultarSerial, confirmarRollo, alternarReferenciaGrupo, materializarIn
 const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
 const {
   obtenerLineaOriginalControlSellado, resolverTurnoMaquina, cerrarBitacora, cerrarBitacorasPorFinTurno,
-  repararCoberturaTurnos,
+  repararCoberturaTurnos, turnosParaLogin, sincronizarBitacoraAlEntrar, abrirBitacorasPendientes,
+  franjasMaquinaOBase, turnoAJson, columnaExiste, esSupervisor,
+  infoOTParaCorreccion, turnosParaCorregirOT, corregirTurnoOT,
   abrirOReanudarBitacora, suspenderOTDeOrden, horaServidorBD,
   candidatosTurnoMaquina, activarTurnoMaquina, turnosParaCorregir, corregirTurnoMaquina,
   obtenerAnclaGrupoSellado, obtenerEstadoAjusteConsumo, ajustarConsumoRollo
@@ -67,6 +69,25 @@ app.use(session({
   saveUninitialized: false,
   cookie: { maxAge: 8 * 60 * 60 * 1000 } // 8 horas, un turno
 }));
+
+// 28/09/2026 (reunión): el turno escogido en el login se ve al lado del logo en todas las pantallas,
+// "para que no pueda decir que no se dio cuenta". Se inyecta al enviar el HTML, en el primer
+// <div class="logo-wrap">, en vez de tocar cada función que dibuja un encabezado.
+app.use((req, res, next) => {
+  const t = req.session && req.session.turno;
+  if (!t) return next();
+  const enviar = res.send.bind(res);
+  res.send = (cuerpo) => {
+    if (typeof cuerpo === 'string' && cuerpo.indexOf('<div class="logo-wrap">') !== -1) {
+      const txt = String(t.corto || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+      const pastilla = `<span style="display:inline-block;margin-left:10px;padding:4px 10px;border-radius:999px;` +
+        `background:#fff3cd;color:#7a4b00;font-weight:700;font-size:14px;vertical-align:middle;">Turno ${txt}</span>`;
+      cuerpo = cuerpo.replace(/<div class="logo-wrap">([\s\S]*?)<\/div>/, (x, adentro) => `<div class="logo-wrap">${adentro}${pastilla}</div>`);
+    }
+    return enviar(cuerpo);
+  };
+  next();
+});
 
 // --- Tablet fija a una maquina -----------------------------------------------
 // A pedido del usuario (29/08/2026): cada tablet queda pegada a una sola selladora fisicamente, asi
@@ -225,7 +246,18 @@ function formatearFechaHora(fecha) {
   });
 }
 
-function renderLogin(error) {
+function renderLogin(error, opcionesTurno, turnoPreseleccionado) {
+  // 28/09/2026: desplegable del turno (solo lo exigen los operarios de planta, ver POST /login).
+  const opciones = opcionesTurno || [];
+  const esc = t => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  const bloqueTurno = opciones.length === 0 ? '' : `
+      <label>Turno</label>
+      <select name="turno">
+        <option value="">— Escoja su turno —</option>
+        ${opciones.map(o => `<option value="${o.codigo}"${o.codigo === Number(turnoPreseleccionado) ? ' selected' : ''}>` +
+          `${esc(o.corto)} (${esc(o.horaInicio)} a ${esc(o.horaFin)})${o.cubreAhora ? '' : ' · empieza a las ' + esc(o.horaInicio)}</option>`).join('')}
+      </select>
+      <div class="nota-turno">Operarios: escoja el turno en el que va a trabajar. Para cambiarlo, cierre sesión y vuelva a entrar.</div>`;
   return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -266,6 +298,11 @@ function renderLogin(error) {
       position: relative; z-index: 1;
     }
     .logo-login { height: 40px; display: block; margin: 0 auto 14px; }
+    select {
+      width: 100%; padding: 12px 14px; margin-bottom: 6px; border: 1px solid #d0d7de;
+      border-radius: 10px; font-size: 16px; box-sizing: border-box; background: white;
+    }
+    .nota-turno { font-size: 12px; color: #64748b; margin-bottom: 16px; }
     .caja .sub { text-align: center; color: #64748b; font-size: 13px; margin-bottom: 24px; }
     label { display: block; font-size: 13px; font-weight: 600; color: #1c2733; margin-bottom: 6px; }
     input {
@@ -292,6 +329,7 @@ function renderLogin(error) {
       <input type="text" name="codigo" autocapitalize="none" autocomplete="username" required autofocus>
       <label>Contraseña</label>
       <input type="password" name="password" autocomplete="current-password" required>
+      ${bloqueTurno}
       <button type="submit">Ingresar</button>
     </form>
   </div>
@@ -3483,7 +3521,8 @@ function scriptConfirmarFinalizar() {
         var i = partes.indexOf('orden');
         var idOrden = i >= 0 ? Number(partes[i + 1]) : 0;
         if (!idOrden) { enviarRetomar(); return; }
-        elegirTurnoSiHaceFalta(idOrden, enviarRetomar);
+        // 28/09/2026: el turno ya se escogió en el login -- no se vuelve a preguntar.
+        enviarRetomar();
       });
       return false;
     }
@@ -4369,9 +4408,10 @@ function scriptProtocoloArranque(maquinaCodigo) {
             return;
           }
           // 26/09/2026: el turno activo se escoge ANTES del protocolo y del primer rollo
-          elegirTurnoSiHaceFalta(idOrden, function() { seguirIniciarProtocoloArranque(idOrden); });
+          // 28/09/2026: el turno ya se escogió en el login -- no se vuelve a preguntar.
+          seguirIniciarProtocoloArranque(idOrden);
         })
-        .catch(function() { elegirTurnoSiHaceFalta(idOrden, function() { seguirIniciarProtocoloArranque(idOrden); }); });
+        .catch(function() { seguirIniciarProtocoloArranque(idOrden); });
     }
 
     function seguirIniciarProtocoloArranque(idOrden) {
@@ -4706,7 +4746,69 @@ function colorReferenciaGrupo(indice) {
   return COLORES_REFERENCIA_GRUPO[indice % COLORES_REFERENCIA_GRUPO.length];
 }
 
-function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, ordenProduccion) {
+// 28/09/2026: sección "Orden de trabajo" debajo del historial (pantalla de la orden y del grupo).
+// Muestra la OT y, a un supervisor con la OT Activa, el botón para corregirle el turno
+// (ver corregirTurnoOT en sel-inventario-mp.js). La ventana pide el turno correcto y una observación.
+function seccionOrdenTrabajo(otInfo, esSup) {
+  if (!otInfo) return '';
+  const esc = t => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  const puede = !!esSup && otInfo.estado === 'Activa';
+  return `
+    <h2 style="font-size:15px;margin:22px 0 10px;">Orden de trabajo</h2>
+    <div class="ejecucion-box" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+      <div style="font-size:15px;"><b>${esc(otInfo.codigo)}</b> · Turno ${esc(otInfo.corto)} · ${esc(otInfo.estado)}</div>
+      ${puede ? `<button type="button" class="btn-accion" style="background:#b46200;" onclick="corregirTurnoOT(${esc(JSON.stringify(otInfo.codigo))})">⚙ Corregir turno de la OT</button>` : ''}
+    </div>
+    ${puede ? `<script>
+      function corregirTurnoOT(ot) {
+        function esc(t) { return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'); }
+        fetch('/api/selladora/ot-correccion?ot=' + encodeURIComponent(ot))
+          .then(function(r) { return r.json(); })
+          .then(function(v) {
+            if (!v || !v.ok) { Swal.fire({ icon: 'error', title: 'No se pudo consultar la OT', text: (v && v.error) || '', confirmButtonColor: '#71bf44' }); return; }
+            if (!v.opciones || v.opciones.length === 0) { Swal.fire({ icon: 'info', title: 'Sin otros turnos', text: 'La máquina no tiene otros turnos configurados.', confirmButtonColor: '#71bf44' }); return; }
+            var html = '<div style="text-align:left;margin-bottom:10px;">OT <b>' + esc(v.ot.codigo) + '</b><br>Turno actual: <b>' + esc(v.ot.corto) + '</b></div>'
+              + '<div style="text-align:left;display:flex;flex-direction:column;gap:8px;">';
+            v.opciones.forEach(function(o) {
+              html += '<label style="display:flex;align-items:center;gap:10px;font-size:1.05em;padding:8px 10px;border:1px solid #ccc;border-radius:8px;cursor:pointer;">'
+                + '<input type="radio" name="turnoOT" value="' + o.codigo + '" style="width:20px;height:20px;">'
+                + '<span><b>' + esc(o.corto) + '</b> (' + esc(o.horaInicio) + ' a ' + esc(o.horaFin) + ')</span></label>';
+            });
+            html += '</div><textarea id="obsCorreccionOT" placeholder="Observación: ¿por qué se corrige el turno?" '
+              + 'style="width:100%;box-sizing:border-box;margin-top:12px;min-height:70px;font-size:15px;padding:8px;border-radius:8px;border:1px solid #ccc;"></textarea>'
+              + '<div style="text-align:left;margin-top:8px;font-size:0.9em;color:#666;">Cambia el código de la OT (lleva la letra del turno) en todos sus registros. La bitácora no se toca.</div>';
+            Swal.fire({
+              icon: 'question', title: 'Corregir turno de la OT', html: html,
+              showCancelButton: true, confirmButtonText: 'Corregir', cancelButtonText: 'Cancelar',
+              confirmButtonColor: '#b46200', cancelButtonColor: '#71bf44', allowOutsideClick: false,
+              preConfirm: function() {
+                var sel = document.querySelector('input[name="turnoOT"]:checked');
+                var obs = (document.getElementById('obsCorreccionOT').value || '').trim();
+                if (!sel) { Swal.showValidationMessage('Escoja el turno correcto'); return false; }
+                if (obs.length < 5) { Swal.showValidationMessage('Escriba la observación'); return false; }
+                return { codigoTurno: Number(sel.value), observacion: obs };
+              }
+            }).then(function(res) {
+              if (!res.isConfirmed) return;
+              fetch('/api/selladora/ot-correccion', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ot: ot, codigoTurno: res.value.codigoTurno, observacion: res.value.observacion })
+              })
+                .then(function(r) { return r.json(); })
+                .then(function(g) {
+                  if (!g || g.ok === false) { Swal.fire({ icon: 'error', title: 'No se corrigió la OT', text: (g && g.error) || '', confirmButtonColor: '#71bf44' }); return; }
+                  Swal.fire({ icon: 'success', title: 'OT corregida', text: g.viejo + '  →  ' + g.nuevo, confirmButtonColor: '#71bf44' })
+                    .then(function() { location.reload(); });
+                })
+                .catch(function() { Swal.fire({ icon: 'error', title: 'Sin conexión', text: 'No se corrigió nada. Intente de nuevo.', confirmButtonColor: '#71bf44' }); });
+            });
+          })
+          .catch(function() { Swal.fire({ icon: 'error', title: 'Sin conexión', text: 'Intente de nuevo.', confirmButtonColor: '#71bf44' }); });
+      }
+    </script>` : ''}`;
+}
+
+function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, ordenProduccion, esSup, otInfo) {
   // Sellado en paralelo (ver DISENO_SELLADO_PARALELO_08092026.md): si esta orden comparte máquina
   // con otras (mismo rollo, hasta 3 referencias de salida distintas), grupoSellado trae TODAS las
   // referencias del grupo (incluida esta misma) -- solo se usa para saber si hay que ocultar
@@ -4771,7 +4873,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     acciones = `
       ${grupoSelladoOtras.length === 0 ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${orden.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>` : ''}
       ${!pausaActiva ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>` : ''}
-      <button type="button" class="btn-accion" style="background:#b46200;" onclick="corregirTurnoMaquina(${Number(maquinaCodigo)})">🕘 Turno</button>
+      ${esSup ? `<button type="button" class="btn-accion" style="background:#b46200;" onclick="corregirTurnoMaquina(${Number(maquinaCodigo)})">🕘 Turno</button>` : ''}
       <form method="post" action="/api/selladora/orden/${orden.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
         <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
       </form>`;
@@ -4933,6 +5035,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     <h2 style="font-size:15px;margin:22px 0 10px;">Historial rollo</h2>
     ${botonAjusteConsumo}
     <div class="ejecucion-box">${filasHistorial}</div>
+    ${seccionOrdenTrabajo(otInfo, esSup)}
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptNotificaciones(maquinaCodigo)}</script>
@@ -5615,24 +5718,158 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, usu
 </html>`;
 }
 
-app.get('/login', (req, res) => {
+app.get('/login', async (req, res) => {
   if (req.session && req.session.usuario) return res.redirect('/');
-  res.send(renderLogin());
+  // 28/09/2026: el desplegable del turno sale con las opciones que tienen sentido a esta hora en la
+  // máquina de la tableta (ver turnosParaLogin). Si algo falla, el login sale igual, sin turnos.
+  try {
+    const p = await getPool();
+    const maquina = await resolverMaquinaFija(req);
+    const { opciones, preseleccion } = await turnosParaLogin(p, maquina, await horaServidorBD(p));
+    res.send(renderLogin(null, opciones, preseleccion));
+  } catch (err) {
+    console.error('Login: no se pudieron calcular los turnos:', err.message);
+    res.send(renderLogin());
+  }
 });
+
+// Guarda en la sesión el turno escogido; la sesión dura hasta el fin de ese turno (+15 min), así en
+// el cambio de turno la tableta obliga a volver a entrar y escoger (reunión 28/09/2026).
+function guardarTurnoEnSesion(req, turno, ahora) {
+  req.session.turno = {
+    codigo: turno.codigo, corto: turno.corto, horaInicio: turno.horaInicio, horaFin: turno.horaFin,
+    fechaTurno: turno.fechaTurno, inicio: new Date(turno.inicio).toISOString(), fin: new Date(turno.fin).toISOString()
+  };
+  req.session.cookie.maxAge = Math.max(15 * 60000, new Date(turno.fin).getTime() - ahora.getTime() + 15 * 60000);
+}
+
+// Si el turno de la sesión está corriendo ahora, lo deja activo en la máquina (Retomar / Iniciar en
+// una tableta que no está fija). Nunca revienta.
+async function activarTurnoDeSesion(p, req, maquina) {
+  try {
+    const t = req.session && req.session.turno;
+    if (!t || !maquina) return;
+    const ahora = await horaServidorBD(p);
+    if (!(new Date(t.inicio) <= ahora && ahora < new Date(t.fin))) return;
+    await activarTurnoMaquina(p, maquina, t.codigo);
+  } catch (err) {
+    console.error('No se pudo activar el turno de la sesión en la máquina:', err.message);
+  }
+}
 
 app.post('/login', async (req, res) => {
   const { codigo, password } = req.body;
+  const nTurnoElegido = Number(req.body.turno) || 0;
+  let opciones = [], preseleccion = null;
   try {
     const p = await getPool();
+    const maquina = await resolverMaquinaFija(req);
+    const ahora = await horaServidorBD(p);
+    ({ opciones, preseleccion } = await turnosParaLogin(p, maquina, ahora));
+
     const usuario = await validarLogin(p, codigo, password);
-    if (!usuario) return res.send(renderLogin('Usuario o contraseña incorrectos.'));
+    if (!usuario) return res.send(renderLogin('Usuario o contraseña incorrectos.', opciones, nTurnoElegido || preseleccion));
+
+    // 28/09/2026: los operarios de planta tienen que escoger su turno (los demás usuarios no).
+    let turno = null;
+    if (usuario.codigoOperarioPRD && opciones.length > 0) {
+      turno = opciones.find(o => o.codigo === nTurnoElegido) || null;
+      if (!turno) return res.send(renderLogin('Escoja el turno en el que va a trabajar.', opciones, preseleccion));
+    }
+
     req.session.usuario = usuario;
-    await registrarEvento(p, usuario.codigo, 'Entrada', 'Manual');
+    if (turno) guardarTurnoEnSesion(req, turno, ahora);
+    await registrarEvento(p, usuario.codigo, 'Entrada', 'Manual', { turno: turno ? turno.codigo : null, maquina: turno ? maquina : null });
+
+    if (turno && maquina) {
+      const r = await sincronizarBitacoraAlEntrar(p, { maquina, operario: usuario.codigoOperarioPRD, codigoTurno: turno.codigo, ahora });
+      if (r.accion === 'confirmar') {
+        req.session.turnoPorConfirmar = { maquina, anterior: r.anterior, registros: r.registros };
+        return res.redirect('/confirmar-turno');
+      }
+      if (r.accion === 'bloqueado') {
+        await registrarEvento(p, usuario.codigo, 'Salida', 'TurnoBloqueado').catch(() => {});
+        return req.session.destroy(() => res.send(renderLogin(
+          `La bitácora de esta máquina está en el turno ${r.anterior.corto} y ya tiene registros de otros operarios, ` +
+          `así que usted no puede cambiarle el turno. Entre con el turno ${r.anterior.corto} o pida al supervisor que lo corrija.`,
+          opciones, r.anterior.turno)));
+      }
+    }
     res.redirect('/');
   } catch (err) {
-    res.send(renderLogin('Error al validar: ' + err.message));
+    res.send(renderLogin('Error al validar: ' + err.message, opciones, preseleccion));
   }
 });
+
+// 28/09/2026: el operario volvió a entrar con otro turno y la bitácora abierta tiene registros suyos
+// del turno anterior (se había equivocado). Se le muestra qué se va a mover antes de hacerlo.
+app.get('/confirmar-turno', requireLogin, (req, res) => {
+  const c = req.session.turnoPorConfirmar;
+  const t = req.session.turno;
+  if (!c || !t) return res.redirect('/');
+  const reg = c.registros || {};
+  const partes = [];
+  if (reg.bultosMios) partes.push(`${reg.bultosMios} bulto(s)`);
+  if (reg.tmMios) partes.push(`${reg.tmMios} tiempo(s) muerto(s)`);
+  if (reg.protMios) partes.push(`${reg.protMios} paso(s) del protocolo`);
+  const tRegistros = partes.length ? partes.join(', ') : 'la bitácora abierta a su nombre';
+  res.send(`<!DOCTYPE html>
+<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Confirmar turno — Bultos</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; min-height: 100vh;
+         display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #00a2cb, #006984); }
+  .caja { background: white; border-radius: 16px; padding: 28px 26px; width: 100%; max-width: 420px; box-shadow: 0 8px 30px rgba(0,0,0,0.25); }
+  h1 { font-size: 20px; margin: 0 0 12px; color: #1c2733; }
+  p { font-size: 15px; color: #334155; line-height: 1.45; }
+  button { width: 100%; padding: 13px; border: none; border-radius: 10px; font-size: 16px; font-weight: 600; color: white; cursor: pointer; margin-top: 10px; }
+  .si { background: #b46200; } .no { background: #71bf44; }
+</style></head><body><div class="caja">
+  <h1>¿Cambiar de turno?</h1>
+  <p>La bitácora de esta máquina está en el turno <b>${escapeHtmlTurno(c.anterior.corto)}</b> y ya tiene registros suyos: <b>${escapeHtmlTurno(tRegistros)}</b>.</p>
+  <p>Si continúa, esos registros pasan al turno <b>${escapeHtmlTurno(t.corto)}</b>. La orden de trabajo no cambia.</p>
+  <form method="post" action="/confirmar-turno"><input type="hidden" name="accion" value="cambiar">
+    <button class="si" type="submit">Sí, cambiar a ${escapeHtmlTurno(t.corto)}</button></form>
+  <form method="post" action="/confirmar-turno"><input type="hidden" name="accion" value="mantener">
+    <button class="no" type="submit">No, seguir en ${escapeHtmlTurno(c.anterior.corto)}</button></form>
+</div></body></html>`);
+});
+
+app.post('/confirmar-turno', requireLogin, async (req, res) => {
+  const c = req.session.turnoPorConfirmar;
+  const t = req.session.turno;
+  const usuario = req.session.usuario;
+  if (!c || !t) return res.redirect('/');
+  try {
+    const p = await getPool();
+    const ahora = await horaServidorBD(p);
+    if (req.body.accion === 'cambiar') {
+      await corregirTurnoMaquina(p, {
+        maquina: c.maquina, codigoTurno: t.codigo,
+        usuario: Number(usuario && usuario.codigo) || null,
+        motivo: 'El operario se equivocó de turno y volvió a entrar con el turno correcto'
+      });
+    } else {
+      // Se queda con el turno de la bitácora: la sesión y su registro de entrada pasan a ese turno.
+      const franjas = await franjasMaquinaOBase(p, c.maquina);
+      const f = franjas.find(x => Number(x.CodigoTurno) === Number(c.anterior.turno));
+      if (f) guardarTurnoEnSesion(req, turnoAJson(f, ahora), ahora);
+      if (await columnaExiste(p, 'SISAccesos', 'Turno')) {
+        await p.request().input('codigo', usuario.codigo).input('turno', c.anterior.turno).query(`
+          UPDATE SISAccesos SET Turno = @turno
+          WHERE IdAcceso = (SELECT TOP 1 IdAcceso FROM SISAccesos WHERE Codigo = @codigo AND TipoEvento = 'Entrada' ORDER BY FechaHora DESC)`);
+      }
+    }
+    delete req.session.turnoPorConfirmar;
+    res.redirect('/');
+  } catch (err) {
+    res.status(500).send(renderErrorSimple('No se pudo aplicar el turno: ' + err.message, '/'));
+  }
+});
+
+function escapeHtmlTurno(t) {
+  return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 
 app.get('/logout', async (req, res) => {
   const usuario = req.session && req.session.usuario;
@@ -6661,7 +6898,7 @@ function renderTarjetaReferenciaGrupo(m, indice) {
 //   - Una tarjeta interactiva por referencia (ver renderTarjetaReferenciaGrupo).
 // "Ver bultos" lleva a la pagina de bultos del GRUPO (/grupo/:idGrupo/bultos), con el filtro por
 // referencia -- no a la de una sola orden.
-function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquinaCodigo, miembros, usuario, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, ordenProduccion) {
+function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquinaCodigo, miembros, usuario, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, ordenProduccion, esSup, otInfo) {
   // "Activo ahora" es el que esta recibiendo paquetes en este momento (su bulto esta Activo o
   // Temporal). Si ninguno lo esta (grupo recien creado, nadie ha dado Iniciar) no se ofrece
   // "+ Rollo": el rollo se registra siempre contra la referencia activa.
@@ -6717,7 +6954,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
     (miembroAncla && !pausaActiva)
       ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>`
       : '',
-    miembroAncla
+    (miembroAncla && esSup)
       ? `<button type="button" class="btn-accion" style="background:#b46200;" onclick="corregirTurnoMaquina(${Number(maquinaCodigo)})">🕘 Turno</button>`
       : '',
     miembroAncla
@@ -6814,6 +7051,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
     <h2 style="font-size:15px;margin:22px 0 10px;">Historial rollo (todo el grupo)</h2>
     ${botonAjusteConsumo}
     <div class="ejecucion-box">${filasHistorial}</div>
+    ${seccionOrdenTrabajo(otInfo, esSup)}
   </main>
   <script src="/sweetalert2.min.js"></script>
   <!-- Los tres avisos automaticos que antes solo estaban en la pagina de una referencia suelta se
@@ -7036,7 +7274,8 @@ app.get('/selladora/:codigo/grupo/:idGrupo', requireLogin, async (req, res) => {
     const protocoloPendiente = miembroAncla ? await obtenerProtocoloPendiente(p, miembroAncla.IdOrden) : null;
 
     const textoOT = await textoOTConOperario(p, ordenProduccion, req.session.usuario.codigoOperarioPRD);
-    res.send(renderGrupoSelladoDetalle(idGrupo, miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, textoOT));
+    res.send(renderGrupoSelladoDetalle(idGrupo, miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, textoOT,
+      esSupervisor(req.session.usuario), await infoOTParaCorreccion(p, ordenProduccion)));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
@@ -7194,7 +7433,8 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
 
     const esAdmin = req.session.usuario.codigo === ADMIN_CODIGO;
     const textoOT = await textoOTConOperario(p, ordenProduccion, req.session.usuario.codigoOperarioPRD);
-    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, textoOT));
+    res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, textoOT,
+      esSupervisor(req.session.usuario), await infoOTParaCorreccion(p, ordenProduccion)));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
@@ -7832,6 +8072,7 @@ app.post('/api/selladora/orden/:idOrden/tomar-control-ejecucion', requireLogin, 
     // otra: reusa la que ya esta abierta (un corte de red o un retome no pueden partir la bitacora
     // en dos, requisito del usuario). Si es otro operario, cierra la anterior por 'relevo'.
     // No revienta hacia afuera: si falla, el operario igual toma control -- ver abrirOReanudarBitacora.
+    await activarTurnoDeSesion(p, req, Maquina);   // 28/09/2026: turno escogido en el login
     await abrirOReanudarBitacora(p, Maquina, miOperario);
     // FIX 31/08/2026: si la ejecucion NO estaba 'En pausa' (o sea, con este cambio quedo 'Activa' --
     // ver el CASE de arriba), se pregunta en la cola de la maquina si hay alguna actividad por hacer
@@ -7945,6 +8186,7 @@ app.post('/api/selladora/orden/:idOrden/rollo', requireLogin, async (req, res) =
     if (!check.ok) return res.json({ ok: false, error: check.error });
 
     const maquinaCodigo = await obtenerCodigoMaquinaDeOrden(p, idOrden);
+    await activarTurnoDeSesion(p, req, maquinaCodigo);   // 28/09/2026: turno escogido en el login
 
     await confirmarRollo(p, {
       idOrden,
@@ -9089,6 +9331,36 @@ app.post('/api/selladora/orden/:idOrden/turno', requireLogin, async (req, res) =
   }
 });
 
+// 28/09/2026: corregir el turno de una OT Activa (sección "Orden de trabajo") -- solo supervisores.
+app.get('/api/selladora/ot-correccion', requireLogin, async (req, res) => {
+  try {
+    if (!esSupervisor(req.session.usuario)) return res.json({ ok: false, error: 'Solo un supervisor puede corregir la OT.' });
+    const p = await getPool();
+    const r = await turnosParaCorregirOT(p, String(req.query.ot || ''));
+    if (!r.ot) return res.json({ ok: false, error: 'No se encontró la orden de trabajo.' });
+    if (r.ot.estado !== 'Activa') return res.json({ ok: false, error: 'Solo se puede corregir una orden de trabajo Activa.' });
+    res.json({ ok: true, ot: r.ot, opciones: r.opciones });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/selladora/ot-correccion', requireLogin, async (req, res) => {
+  try {
+    if (!esSupervisor(req.session.usuario)) return res.json({ ok: false, error: 'Solo un supervisor puede corregir la OT.' });
+    const p = await getPool();
+    const r = await corregirTurnoOT(p, {
+      ordenProduccion: String((req.body && req.body.ot) || ''),
+      codigoTurno: Number(req.body && req.body.codigoTurno),
+      usuario: Number(req.session.usuario && req.session.usuario.codigo) || null,
+      observacion: String((req.body && req.body.observacion) || '') + ' (corregido por ' + (req.session.usuario.nombre || req.session.usuario.codigo) + ')'
+    });
+    res.json({ ok: true, viejo: r.viejo, nuevo: r.nuevo });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
 // 26/09/2026: corregir el turno (botón "Turno" de la tableta) -- ver corregirTurnoMaquina.
 app.get('/api/selladora/maquina/:codigo/turno-correccion', requireLogin, async (req, res) => {
   try {
@@ -9105,6 +9377,8 @@ app.post('/api/selladora/maquina/:codigo/turno-correccion', requireLogin, async 
     const maquina = Number(req.params.codigo);
     const codigoTurno = Number(req.body && req.body.codigoTurno);
     if (!maquina || !codigoTurno) return res.json({ ok: false, error: 'Falta la máquina o el turno.' });
+    // 28/09/2026 (reunión): una vez hay producción, el turno solo lo corrige un supervisor.
+    if (!esSupervisor(req.session.usuario)) return res.json({ ok: false, error: 'Solo un supervisor puede corregir el turno.' });
     const r = await corregirTurnoMaquina(p, {
       maquina, codigoTurno,
       usuario: Number(req.session.usuario && req.session.usuario.codigo) || null
@@ -9733,6 +10007,7 @@ server.listen(webPort, '0.0.0.0', () => {
   const revisarFinTurno = async () => {
     try { await repararCoberturaTurnos(await getPool()); } catch (err) { /* ya se registro adentro */ }
     try { await cerrarBitacorasPorFinTurno(await getPool()); } catch (err) { /* ya se registro adentro */ }
+    try { await abrirBitacorasPendientes(await getPool()); } catch (err) { /* ya se registro adentro */ }
   };
   revisarFinTurno();
   setInterval(revisarFinTurno, 5 * 60 * 1000);
