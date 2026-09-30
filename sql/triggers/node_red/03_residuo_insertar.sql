@@ -1,6 +1,9 @@
 -- ===== NODO NODE-RED: INSERTAR RESIDUO (retal / troquelado / no conforme, con cantidad) =====
 -- Copia canónica 27/09/2026 de insertar_residuo_hijo_nodered.sql (versión 23/09, bodega por serial del padre).
--- Los DECLARE de arriba son de ejemplo: Node-RED reemplaza @IdBulto, @TipoResiduo, @Cantidad, @GeneradoPor. Ver LEEME.md.
+-- Los DECLARE de arriba son de ejemplo: Node-RED reemplaza @IdBulto, @TipoResiduo, @Cantidad. Ver LEEME.md.
+-- 30/09/2026: @GeneradoPor y el operario ya NO llegan de Node-RED: se resuelven aqui con el OPERARIO ACTIVO
+-- de la maquina (SEL_OperarioActualMaquina -> SISUsuarios.CodigoOperarioPRD -> SISUsuarios.Tercero), el mismo
+-- mecanismo de trg_SEL_Bultos_CierreBulto para el bulto padre. Antes quedaba fijo en 0.
 
 -- Generado 01/09/2026 -- referencia para Node-RED (el mecatrónico): al presionar Retal/Troquelado/
 -- No Conforme y digitar la cantidad, esto es lo que hay que insertar/actualizar -- migrado 1:1
@@ -10,7 +13,7 @@
 --   @IdBulto      -- SEL_Bultos.id del bulto padre
 --   @TipoResiduo  -- 1=Retal, 3=Troquelado, 4=No Conforme (2=Refilado NO aplica a Selladora)
 --   @Cantidad     -- valor digitado (kg)
---   @GeneradoPor  -- id del usuario/operario que confirma (SISUsuarios o PRDOperarios, ajustar)
+--   (@GeneradoPor se calcula en el PASO 1b: usuario del operario activo de la maquina)
 --
 -- CONFIRMADO: esto NO toca PRDExtrusionControl ni calcula Merma -- esa lógica vive SOLO en
 -- "Cerrar Definitivo" (frmValidacionSelladora.vb:HandleCerrar -> RecalcularMermaSellado/
@@ -29,7 +32,9 @@
 DECLARE @IdBulto INT = /* llega de la tablet */ 1;
 DECLARE @TipoResiduo INT = /* 1=Retal, 3=Troquelado, 4=No Conforme */ 1;
 DECLARE @Cantidad DECIMAL(12,4) = /* llega de la tablet */ 0;
-DECLARE @GeneradoPor INT = /* usuario/operario que confirma -- AJUSTAR */ 0;
+DECLARE @GeneradoPor INT = NULL;   -- se resuelve en el PASO 1b (ya no queda fijo en 0)
+
+SET XACT_ABORT ON;   -- si algo falla dentro de la transaccion, se deshace todo y no queda abierta en Node-RED
 
 -- ── PASO 1: contexto del bulto padre (igual que ResolverContextoBultoParaHijo) ──────────────────
 DECLARE @Elemento INT, @Fecha DATE, @Lote VARCHAR(6), @LineaPadre INT, @Maquina INT, @IdOrden INT;
@@ -54,6 +59,21 @@ BEGIN
     RAISERROR('No se encontró el bulto.', 16, 1);
     RETURN;
 END
+
+-- ── PASO 1b: operario activo de la maquina y su usuario (GeneradoPor) ─────────────────────────
+-- 30/09/2026: igual que trg_SEL_Bultos_CierreBulto -- SEL_OperarioActualMaquina.Operario (codigo PRDOperarios)
+-- -> SISUsuarios.CodigoOperarioPRD -> SISUsuarios.Tercero (lo que espera PRDProduccion.GeneradoPor).
+-- Respaldo: el GeneradoPor del bulto padre; si tampoco hay, 0. El operario del hijo tambien es el
+-- activo de la maquina; si no hay, el de la ejecucion (como antes).
+DECLARE @OperarioActivo INT;
+SELECT TOP 1 @OperarioActivo = Operario FROM SEL_OperarioActualMaquina WHERE Maquina = @Maquina;
+IF ISNULL(@OperarioActivo, 0) > 0 SET @Operario = @OperarioActivo;
+
+IF ISNULL(@OperarioActivo, 0) > 0
+    SELECT TOP 1 @GeneradoPor = su.Tercero FROM SISUsuarios su WHERE su.CodigoOperarioPRD = @OperarioActivo;
+IF ISNULL(@GeneradoPor, 0) = 0
+    SELECT TOP 1 @GeneradoPor = GeneradoPor FROM PRDProduccion WHERE Detalle = @SerialPadre AND ISNULL(GeneradoPor, 0) <> 0;
+SET @GeneradoPor = ISNULL(@GeneradoPor, 0);
 
 -- NumeroPedido: de SEL_OrdenProduccion (texto, confiable), NO de SEL_Bultos.NumeroPedido.
 DECLARE @NumeroPedido VARCHAR(20) = '';
