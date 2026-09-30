@@ -4890,11 +4890,11 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   } else if (activa) {
     // Sellado en paralelo (08/09/2026): "+Rollo" no aplica a una orden agrupada -- el rollo de
     // entrada ya quedó registrado UNA sola vez para las 3 referencias al dar "Iniciar" en la ancla.
-    // Orden de izquierda a derecha: Rollo, Pausa, Turno, Finalizar (a pedido del usuario, 28/09/2026).
+    // Orden de izquierda a derecha: Rollo, Pausa, Finalizar. El boton Turno se quito de aca
+    // (a pedido del usuario, 30/09/2026).
     acciones = `
       ${grupoSelladoOtras.length === 0 ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${orden.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>` : ''}
       ${!pausaActiva ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>` : ''}
-      ${esSup ? `<button type="button" class="btn-accion" style="background:#b46200;" onclick="corregirTurnoMaquina(${Number(maquinaCodigo)})">🕘 Turno</button>` : ''}
       <form method="post" action="/api/selladora/orden/${orden.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
         <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
       </form>`;
@@ -7050,16 +7050,14 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
          onclick="abrirAjusteConsumo(${miembroParaAjuste.IdOrden})">⚖ Ajustar consumo de rollo</button>`
     : '';
 
-  // Orden de izquierda a derecha: Rollo, Pausa, Turno, Finalizar (a pedido del usuario, 28/09/2026).
+  // Orden de izquierda a derecha: Rollo, Pausa, Finalizar. El boton Turno se quito de aca
+  // (a pedido del usuario, 30/09/2026).
   const accionesProduccion = [
     miembroActivoAhora
       ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${miembroActivoAhora.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>`
       : '',
     (miembroAncla && !pausaActiva)
       ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>`
-      : '',
-    (miembroAncla && esSup)
-      ? `<button type="button" class="btn-accion" style="background:#b46200;" onclick="corregirTurnoMaquina(${Number(maquinaCodigo)})">🕘 Turno</button>`
       : '',
     miembroAncla
       ? `<form method="post" action="/api/selladora/orden/${miembroAncla.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
