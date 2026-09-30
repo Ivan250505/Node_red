@@ -79,7 +79,9 @@ app.use((req, res, next) => {
   const enviar = res.send.bind(res);
   res.send = (cuerpo) => {
     if (typeof cuerpo === 'string' && cuerpo.indexOf('<div class="logo-wrap">') !== -1) {
-      const txt = String(t.corto || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+      // 30/09/2026: además del nombre, el rango de horas del turno (ej. "Turno A · 06:00 a 14:00").
+      const rango = t.horaInicio && t.horaFin ? ` · ${t.horaInicio} a ${t.horaFin}` : '';
+      const txt = (String(t.corto || '') + rango).replace(/&/g, '&amp;').replace(/</g, '&lt;');
       const pastilla = `<span style="display:inline-block;margin-left:10px;padding:4px 10px;border-radius:999px;` +
         `background:#fff3cd;color:#7a4b00;font-weight:700;font-size:14px;vertical-align:middle;">Turno ${txt}</span>`;
       cuerpo = cuerpo.replace(/<div class="logo-wrap">([\s\S]*?)<\/div>/, (x, adentro) => `<div class="logo-wrap">${adentro}${pastilla}</div>`);
@@ -4775,7 +4777,7 @@ function seccionOrdenTrabajo(otInfo, esSup) {
   return `
     <h2 style="font-size:15px;margin:22px 0 10px;">Orden de trabajo</h2>
     <div class="ejecucion-box" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-      <div style="font-size:15px;"><b>${esc(otInfo.codigo)}</b> · Turno ${esc(otInfo.corto)} · ${esc(otInfo.estado)}</div>
+      <div style="font-size:15px;"><b>${esc(otInfo.codigo)}</b> · Turno ${esc(otInfo.corto)}${otInfo.rango ? ' (' + esc(otInfo.rango) + ')' : ''} · ${esc(otInfo.estado)}</div>
       ${puede ? `<button type="button" class="btn-accion" style="background:#b46200;" onclick="corregirTurnoOT(${esc(JSON.stringify(otInfo.codigo))})">⚙ Corregir turno de la OT</button>` : ''}
     </div>
     ${puede ? `<script>

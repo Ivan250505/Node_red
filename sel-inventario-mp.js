@@ -1648,13 +1648,31 @@ async function infoOTParaCorreccion(p, ordenProduccion) {
   if (!ordenProduccion) return null;
   try {
     const dt = await p.request().input('ot', ordenProduccion).query(`
-      SELECT o.IdOrdenProduccion, o.OrdenProduccion, o.Estado, o.Turno, o.Maquina, ISNULL(t.Descripcion, '') AS Descripcion
+      SELECT o.IdOrdenProduccion, o.OrdenProduccion, o.Estado, o.Turno, o.Maquina, ISNULL(t.Descripcion, '') AS Descripcion,
+             h.HoraInicio, h.HoraFin
       FROM PRDOrdenesProduccion o LEFT JOIN NOMTurnos t ON t.Codigo = o.Turno
+      -- 30/09/2026: rango de horas del turno para mostrarlo junto al nombre. Primero el horario de la
+      -- máquina (TURHorariosMaquinas) y si no tiene, el general de NOMTurnos.
+      OUTER APPLY (
+          SELECT TOP 1 x.HoraInicio, x.HoraFin
+          FROM (
+              SELECT th.HoraInicio, th.HoraFin, 1 AS Prioridad
+              FROM TURHorariosMaquinas th
+              WHERE th.CodigoMaquina = o.Maquina AND th.CodigoTurno = o.Turno
+              UNION ALL
+              SELECT t2.HoraInicial, t2.HoraFinal, 2
+              FROM NOMTurnos t2
+              WHERE t2.Codigo = o.Turno
+          ) x
+          ORDER BY x.Prioridad
+      ) h
       WHERE o.OrdenProduccion = @ot`);
     if (dt.recordset.length === 0) return null;
     const r = dt.recordset[0];
+    const hIni = String(r.HoraInicio || '').trim(), hFin = String(r.HoraFin || '').trim();
     return { id: r.IdOrdenProduccion, codigo: r.OrdenProduccion, estado: String(r.Estado || '').trim(),
-             turno: r.Turno == null ? null : Number(r.Turno), corto: nombreCortoTurno(r.Descripcion) || '-', maquina: r.Maquina };
+             turno: r.Turno == null ? null : Number(r.Turno), corto: nombreCortoTurno(r.Descripcion) || '-', maquina: r.Maquina,
+             rango: hIni && hFin ? `${hIni} a ${hFin}` : '' };
   } catch (err) {
     return null;
   }
