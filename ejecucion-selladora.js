@@ -139,7 +139,8 @@ async function finalizarOrden(pool, idOrden, generadoPor, operarioFinal) {
         -- NULL). La hora real de fin de un bulto EnEspera es la de su ultimo paquete pesado.
         HoraFin = ISNULL((SELECT MAX(pe.FechaHora) FROM SEL_PesajeElemento pe WHERE pe.id_bulto = SEL_Bultos.id), GETDATE())
       WHERE id_ejecucion IN (SELECT IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden IN (${idsActivos.join(',')}))
-        AND estado = 'EnEspera' AND number_paqu > 0
+        AND estado = 'EnEspera'
+        AND EXISTS (SELECT 1 FROM SEL_PesajeElemento pe WHERE pe.id_bulto = SEL_Bultos.id)
     `);
 
     for (const nIdOrdenMiembro of idsActivos) {
@@ -160,12 +161,16 @@ async function finalizarOrden(pool, idOrden, generadoPor, operarioFinal) {
       // para identificar la fila exacta.
       // FIX 08/09/2026 (Sellado en paralelo): también incluye 'EnEspera' vacío -- una referencia a
       // la que el operario alternó pero nunca llegó a pesar nada antes de irse a otra.
+      // FIX 30/09/2026: "vacío" = sin filas en SEL_PesajeElemento, ya no number_paqu = 0 -- un pesaje
+      // que falla después de sumar el conteo deja number_paqu > 0 sin paquetes (pedido 110926, bulto
+      // 164) y ese Temporal nunca se borraba. Mismo criterio para cerrar los 'EnEspera' de arriba.
       await tx.request().input('idOrden', nIdOrdenMiembro).query(`
         DELETE FROM PRDExtrusionRollos
         WHERE EXISTS (
           SELECT 1 FROM SEL_Bultos b
           WHERE b.id_ejecucion IN (SELECT IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden)
-            AND b.estado IN ('Temporal', 'EnEspera') AND b.number_paqu = 0
+            AND b.estado IN ('Temporal', 'EnEspera')
+            AND NOT EXISTS (SELECT 1 FROM SEL_PesajeElemento pe WHERE pe.id_bulto = b.id)
             AND PRDExtrusionRollos.Elemento = b.refsalida
             AND PRDExtrusionRollos.Fecha = DATEFROMPARTS(b.agno, b.mes, b.dia)
             AND PRDExtrusionRollos.Linea = b.num_bulto
@@ -177,7 +182,8 @@ async function finalizarOrden(pool, idOrden, generadoPor, operarioFinal) {
         WHERE EXISTS (
           SELECT 1 FROM SEL_Bultos b
           WHERE b.id_ejecucion IN (SELECT IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden)
-            AND b.estado IN ('Temporal', 'EnEspera') AND b.number_paqu = 0
+            AND b.estado IN ('Temporal', 'EnEspera')
+            AND NOT EXISTS (SELECT 1 FROM SEL_PesajeElemento pe WHERE pe.id_bulto = b.id)
             AND PRDProduccionOperarios.Elemento = b.refsalida
             AND PRDProduccionOperarios.Fecha = DATEFROMPARTS(b.agno, b.mes, b.dia)
             AND PRDProduccionOperarios.Linea = b.num_bulto
@@ -189,13 +195,15 @@ async function finalizarOrden(pool, idOrden, generadoPor, operarioFinal) {
         WHERE Detalle IN (
           SELECT b.serialPadre FROM SEL_Bultos b
           WHERE b.id_ejecucion IN (SELECT IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden)
-            AND b.estado IN ('Temporal', 'EnEspera') AND b.number_paqu = 0
+            AND b.estado IN ('Temporal', 'EnEspera')
+            AND NOT EXISTS (SELECT 1 FROM SEL_PesajeElemento pe WHERE pe.id_bulto = b.id)
         )
       `);
       await tx.request().input('idOrden', nIdOrdenMiembro).query(`
         DELETE FROM SEL_Bultos
         WHERE id_ejecucion IN (SELECT IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden)
-        AND estado IN ('Temporal', 'EnEspera') AND number_paqu = 0
+        AND estado IN ('Temporal', 'EnEspera')
+        AND NOT EXISTS (SELECT 1 FROM SEL_PesajeElemento pe WHERE pe.id_bulto = SEL_Bultos.id)
       `);
 
       // Retal/Torta fijos en 0 -- igual que EjecucionSelladora.vb hoy (ya no se piden por InputBox,

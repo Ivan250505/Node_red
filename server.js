@@ -5098,6 +5098,87 @@ const PAQUETES_POR_PAGINA = 10;
 // tarjeta lleva ademas el subrayado del color de SU referencia con el nombre debajo (a pedido del
 // usuario) y un data-ref para que el filtro por referencia pueda esconderla. Sin `opciones` se
 // comporta igual que siempre (una sola orden, sin subrayado ni filtro).
+// 30/09/2026 (a pedido del usuario): botones de la tarjeta para bultos que quedaron vacíos por un
+// error (ej. un traslado equivocado, o pesajes que fallaron y solo subieron el conteo):
+//   - "Eliminar bulto vacío": solo un bulto Cerrado SIN paquetes en SEL_PesajeElemento, con
+//     cantidad 0, sin validar y que no sea la ancla (primer bulto de la orden). El Temporal/Activo
+//     nunca: la báscula necesita siempre un bulto abierto (el Temporal vacío lo borra Finalizar).
+//   - "Corregir conteo": bulto abierto cuyo number_paqu no coincide con el último paquete guardado
+//     (el siguiente paquete saldría con un número corrido).
+// El servidor vuelve a revisar todo antes de hacer nada (ver /api/selladora/bulto/...).
+function accionesBultoVacio(b, pesajes) {
+  const botones = [];
+  const cantidad = Number(b.CantidadTotal || 0);
+  if (b.estado === 'Cerrado' && pesajes.length === 0 && Number(b.EsAncla) !== 1
+      && Number(b.Validado) !== 1 && cantidad === 0) {
+    botones.push(`<button type="button" class="btn-accion" style="background:#c0392b;"
+      onclick="eliminarBultoVacio(${JSON.stringify(b.id)}, ${jsString(b.serialPadre).replace(/"/g, '&quot;')})">🗑 Eliminar bulto vacío</button>`);
+  }
+  // El consecutivo del paquete NO se reusa nunca mientras el bulto tenga paquetes (a pedido del
+  // usuario): si de 20 se trasladó el #18 o el #20, el siguiente sigue siendo el #21. Solo se corrige
+  // cuando el bulto quedó sin ningún paquete (vuelve a 0) o si el conteo quedó por DEBAJO del último
+  // paquete (el siguiente repetiría un número ya usado).
+  const ultimoPaquete = pesajes.reduce((m, pe) => Math.max(m, Number(pe.ConsecutivoPaquete) || 0), 0);
+  const numPaqu = Number(b.NumPaqu) || 0;
+  const conteoMalo = pesajes.length === 0 ? numPaqu !== 0 : numPaqu < ultimoPaquete;
+  if ((b.estado === 'Temporal' || b.estado === 'Activo' || b.estado === 'EnEspera') && conteoMalo) {
+    botones.push(`<button type="button" class="btn-accion" style="background:#b46200;"
+      onclick="corregirConteoBulto(${JSON.stringify(b.id)}, ${JSON.stringify(numPaqu)}, ${JSON.stringify(ultimoPaquete)})">↺ Corregir conteo (dice ${numPaqu}, ${pesajes.length === 0 ? 'no tiene paquetes' : 'último #' + ultimoPaquete})</button>`);
+  }
+  return botones.length ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">${botones.join('')}</div>` : '';
+}
+
+function scriptBultosVacios() {
+  return `
+    function eliminarBultoVacio(idBulto, serial) {
+      Swal.fire({
+        icon: 'warning',
+        title: '¿Eliminar el bulto ' + serial + '?',
+        text: 'No tiene paquetes. Se borra de producción, existencias y movimientos. No se puede deshacer.',
+        showCancelButton: true,
+        confirmButtonText: 'Sí, eliminar',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#c0392b',
+        cancelButtonColor: '#7f8c8d'
+      }).then(function(r) {
+        if (!r.isConfirmed) return;
+        Swal.fire({ title: 'Eliminando…', allowOutsideClick: false, didOpen: function() { Swal.showLoading(); } });
+        fetch('/api/selladora/bulto/eliminar-vacio', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idBulto: idBulto })
+        }).then(function(x) { return x.json(); }).then(function(data) {
+          if (!data.ok) { Swal.fire({ icon: 'error', title: 'No se pudo eliminar', text: data.error || '', confirmButtonColor: '#71bf44' }); return; }
+          Swal.fire({ icon: 'success', title: 'Bulto eliminado', confirmButtonColor: '#71bf44' }).then(function() { location.reload(); });
+        }).catch(function(e) { Swal.fire({ icon: 'error', title: 'Error', text: String(e), confirmButtonColor: '#71bf44' }); });
+      });
+    }
+
+    function corregirConteoBulto(idBulto, dice, tiene) {
+      Swal.fire({
+        icon: 'question',
+        title: '¿Corregir el conteo del bulto?',
+        text: (tiene === 0
+          ? 'El bulto dice ' + dice + ' paquete(s) pero no tiene ninguno guardado. El conteo vuelve a 0 y el siguiente paquete saldrá como el #1.'
+          : 'El bulto dice ' + dice + ' pero ya tiene hasta el paquete #' + tiene + '. El siguiente paquete saldrá como el #' + (tiene + 1) + '.'),
+        showCancelButton: true,
+        confirmButtonText: 'Sí, corregir',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#71bf44',
+        cancelButtonColor: '#c0392b'
+      }).then(function(r) {
+        if (!r.isConfirmed) return;
+        fetch('/api/selladora/bulto/corregir-conteo', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idBulto: idBulto })
+        }).then(function(x) { return x.json(); }).then(function(data) {
+          if (!data.ok) { Swal.fire({ icon: 'error', title: 'No se pudo corregir', text: data.error || '', confirmButtonColor: '#71bf44' }); return; }
+          Swal.fire({ icon: 'success', title: 'Conteo corregido', text: 'Ahora el bulto dice ' + data.conteo + '.', confirmButtonColor: '#71bf44' }).then(function() { location.reload(); });
+        }).catch(function(e) { Swal.fire({ icon: 'error', title: 'Error', text: String(e), confirmButtonColor: '#71bf44' }); });
+      });
+    }
+  `;
+}
+
 function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto, opciones) {
   const modoGrupo = !!(opciones && opciones.referencia);
   const idOrdenTarjetas = (opciones && opciones.idOrden) || null;
@@ -5190,6 +5271,7 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto, opcione
         ${contenidoPesajes}
       </details>
       ${contenidoResiduos}
+      ${accionesBultoVacio(b, pesajes)}
     </div>`;
   }).join('');
 
@@ -5732,6 +5814,7 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, usu
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
   <script>${scriptReimprimir(orden.IdOrden, maquinaCodigo)}</script>
   <script>${scriptTraslado(orden.IdOrden, maquinaCodigo)}</script>
+  <script>${scriptBultosVacios()}</script>
   <script>${scriptPaginadorPesajes()}</script>
   <script>${scriptTarjetaBultoInteractiva()}</script>
   <script>${scriptActualizarBultos()}</script>
@@ -7193,6 +7276,7 @@ function renderBultosGrupo(idGrupo, numeroPedido, maquinaCodigo, datosPorReferen
        seccion de traslado traen el IdOrden de SU referencia, y ese es el que se usa. -->
   <script>${scriptReimprimir(datosPorReferencia[0] ? datosPorReferencia[0].idOrden : 0, maquinaCodigo)}</script>
   <script>${scriptTraslado(datosPorReferencia[0] ? datosPorReferencia[0].idOrden : 0, maquinaCodigo)}</script>
+  <script>${scriptBultosVacios()}</script>
   <script>${scriptPaginadorPesajes()}</script>
   <script>${scriptTarjetaBultoInteractiva()}</script>
   <script>${scriptFiltroReferencias()}</script>
@@ -7493,7 +7577,14 @@ async function obtenerBultosYPesajes(p, idOrden) {
   const bultosResult = await p.request().input('idOrden', idOrden).query(`
     SELECT b.id, b.num_bulto, b.serialPadre, b.CantidadTotal, b.estado, ISNULL(b.Golpes,0) AS Golpes, b.Potencia,
            FORMAT(b.HoraInicio, 'dd/MM/yyyy HH:mm') AS HoraInicio,
-           FORMAT(b.HoraFin, 'dd/MM/yyyy HH:mm') AS HoraFin
+           FORMAT(b.HoraFin, 'dd/MM/yyyy HH:mm') AS HoraFin,
+           -- 30/09/2026: para los botones "Eliminar bulto vacío" y "Corregir conteo" (ver
+           -- renderTarjetasBultos). La ancla es el PRIMER bulto de la orden (por id) y no se elimina.
+           ISNULL(b.number_paqu, 0) AS NumPaqu,
+           CASE WHEN b.id = (SELECT MIN(b2.id) FROM SEL_Bultos b2
+                             INNER JOIN SEL_EjecucionOrden e2 ON e2.IdEjecucion = b2.id_ejecucion
+                             WHERE e2.IdOrden = @idOrden) THEN 1 ELSE 0 END AS EsAncla,
+           ISNULL((SELECT TOP 1 CAST(pv.Validado AS INT) FROM PRDProduccion pv WHERE pv.Detalle = b.serialPadre), 0) AS Validado
     FROM SEL_Bultos b
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
     WHERE ej.IdOrden = @idOrden AND b.estado <> 'Anulado'
@@ -7683,6 +7774,189 @@ app.post('/api/selladora/paquete/trasladar', requireLogin, async (req, res) => {
       idBultoOrigen: fila.IdBultoOrigen
     });
   } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// 30/09/2026 (a pedido del usuario): eliminar un bulto que quedó VACÍO por un error del operario
+// (ej. trasladó mal y cerró un bulto sin paquetes). Lo puede hacer cualquier operario; la fila de
+// SEL_Bultos se BORRA del todo (decisión del usuario), junto con todo lo que el bulto generó.
+// Condiciones (todas se revisan aquí, dentro de la transacción, aunque el botón ya las filtre):
+//   - estado Cerrado (el Temporal/Activo es el bulto abierto de la máquina y el EnEspera el de una
+//     referencia pausada del grupo: no se tocan; si quedan vacíos los borra Finalizar);
+//   - cero filas en SEL_PesajeElemento (NO se mira number_paqu: puede haber subido sin paquetes);
+//   - no es la ancla (primer bulto de la orden, ahí se amarra la MP/control/OT);
+//   - cantidad 0 en SEL_Bultos, PRDProduccion e INVExistencias, y PRDProduccion sin validar;
+//   - sin residuos hijos (Linea + 1000/2000/3000/4000) ni remisiones (movimientos distintos de Tipo 35);
+//   - sin rollo montado ni chequeo de calidad amarrados a ese bulto.
+// Borra: PRDExtrusionRollos, PRDProduccionOperarios, INVMovimientosLotes/Elementos Tipo 35 (y el
+// encabezado INVMovimientos si queda sin líneas), INVExistencias, PRDProduccion y SEL_Bultos. Deja
+// constancia en SISMovimientos (SELLADORA / ELIMINAR_BULTO_VACIO). No dispara triggers: los de
+// SEL_Bultos son solo de INSERT/UPDATE.
+app.post('/api/selladora/bulto/eliminar-vacio', requireLogin, async (req, res) => {
+  const idBulto = Number(req.body && req.body.idBulto);
+  if (!Number.isFinite(idBulto) || idBulto <= 0) return res.json({ ok: false, error: 'Falta el bulto.' });
+
+  let tx;
+  try {
+    const p = await getPool();
+    tx = new sql.Transaction(p);
+    await tx.begin();
+
+    const dt = await tx.request().input('idBulto', idBulto).query(`
+      SELECT b.id, b.estado, b.serialPadre, b.refsalida, b.num_bulto, b.agno, b.mes, b.dia,
+             ISNULL(b.number_paqu, 0) AS NumPaqu, ISNULL(b.CantidadTotal, 0) AS CantidadTotal, ej.IdOrden,
+             (SELECT COUNT(*) FROM SEL_PesajeElemento pe WHERE pe.id_bulto = b.id) AS Paquetes,
+             (SELECT MIN(b2.id) FROM SEL_Bultos b2 INNER JOIN SEL_EjecucionOrden e2 ON e2.IdEjecucion = b2.id_ejecucion
+               WHERE e2.IdOrden = ej.IdOrden) AS IdAncla
+      FROM SEL_Bultos b WITH (UPDLOCK, ROWLOCK)
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+      WHERE b.id = @idBulto
+    `);
+    if (dt.recordset.length === 0) { await tx.rollback(); return res.json({ ok: false, error: 'No se encontró el bulto.' }); }
+    const b = dt.recordset[0];
+    const fecha = new Date(b.agno, b.mes - 1, b.dia);
+    const lote = String(b.mes).padStart(2, '0') + String(b.dia).padStart(2, '0');
+
+    const rechazar = async (msg) => { await tx.rollback(); return res.json({ ok: false, error: msg }); };
+    if (b.estado !== 'Cerrado') {
+      return rechazar('Solo se puede eliminar un bulto cerrado. El bulto abierto (' + b.estado + ') lo necesita la báscula; si queda vacío se borra solo al Finalizar.');
+    }
+    if (Number(b.Paquetes) > 0) return rechazar('El bulto tiene ' + b.Paquetes + ' paquete(s). Solo se eliminan bultos sin paquetes.');
+    if (Number(b.IdAncla) === Number(b.id)) return rechazar('Es el primer bulto de la orden (ancla): ahí está amarrada la materia prima y la OT. No se puede eliminar.');
+    if (Number(b.CantidadTotal) !== 0) return rechazar('El bulto tiene cantidad ' + b.CantidadTotal + ' kg. Solo se eliminan bultos en 0.');
+
+    const dtChk = await tx.request()
+      .input('serial', b.serialPadre).input('idBulto', idBulto).input('elem', b.refsalida)
+      .input('fecha', sql.Date, fecha).input('lote', lote).input('linea', b.num_bulto)
+      .query(`
+        SELECT
+          (SELECT COUNT(*) FROM PRDProduccion WHERE Detalle = @serial AND (ISNULL(Validado, 0) = 1 OR ISNULL(Cantidad, 0) <> 0)) AS ProdConDatos,
+          (SELECT COUNT(*) FROM INVExistencias WHERE Detalle = @serial AND ISNULL(Cantidad, 0) <> 0) AS ExistConCantidad,
+          (SELECT COUNT(*) FROM PRDProduccion WHERE Fecha = @fecha AND Lote = @lote AND Elemento = @elem
+             AND Linea IN (@linea + 1000, @linea + 2000, @linea + 3000, @linea + 4000)) AS Residuos,
+          (SELECT COUNT(*) FROM INVMovimientosElementos WHERE Detalle = @serial AND Tipo <> 35) AS Remisiones,
+          CASE WHEN OBJECT_ID('dbo.SEL_RolloEjecucion') IS NULL THEN 0
+               ELSE (SELECT COUNT(*) FROM SEL_RolloEjecucion WHERE id_bulto = @idBulto) END AS Rollos,
+          CASE WHEN OBJECT_ID('dbo.SEL_ChequeoCalidad') IS NULL THEN 0
+               ELSE (SELECT COUNT(*) FROM SEL_ChequeoCalidad WHERE id_bulto = @idBulto) END AS Calidad
+      `);
+    const c = dtChk.recordset[0];
+    if (Number(c.ProdConDatos) > 0) return rechazar('El bulto ya tiene cantidad o está validado en Producción. No se puede eliminar.');
+    if (Number(c.ExistConCantidad) > 0) return rechazar('El bulto tiene existencias con cantidad. No se puede eliminar.');
+    if (Number(c.Residuos) > 0) return rechazar('El bulto tiene residuos (retal/troquelado/no conforme) asociados. No se puede eliminar.');
+    if (Number(c.Remisiones) > 0) return rechazar('El bulto ya tiene movimientos de inventario (remisión). No se puede eliminar.');
+    if (Number(c.Rollos) > 0) return rechazar('El bulto tiene un rollo montado amarrado. No se puede eliminar.');
+    if (Number(c.Calidad) > 0) return rechazar('El bulto tiene chequeos de calidad. No se puede eliminar.');
+
+    const dtBorrado = await tx.request()
+      .input('serial', b.serialPadre).input('idBulto', idBulto).input('elem', b.refsalida)
+      .input('fecha', sql.Date, fecha).input('lote', lote).input('linea', b.num_bulto)
+      .query(`
+        DECLARE @n TABLE (Tabla VARCHAR(40), Filas INT);
+        DECLARE @Movs TABLE (Fecha DATE, Numero VARCHAR(20));
+
+        DELETE FROM PRDExtrusionRollos WHERE Elemento = @elem AND Fecha = @fecha AND Lote = @lote AND Linea = @linea;
+        INSERT INTO @n VALUES ('PRDExtrusionRollos', @@ROWCOUNT);
+        DELETE FROM PRDProduccionOperarios WHERE Elemento = @elem AND Fecha = @fecha AND Lote = @lote AND Linea = @linea;
+        INSERT INTO @n VALUES ('PRDProduccionOperarios', @@ROWCOUNT);
+
+        INSERT INTO @Movs (Fecha, Numero)
+        SELECT DISTINCT Fecha, Numero FROM INVMovimientosElementos WHERE Subempresa = 0 AND Tipo = 35 AND Detalle = @serial;
+        DELETE FROM INVMovimientosLotes WHERE Subempresa = 0 AND Tipo = 35 AND Lote = @serial;
+        INSERT INTO @n VALUES ('INVMovimientosLotes', @@ROWCOUNT);
+        DELETE FROM INVMovimientosElementos WHERE Subempresa = 0 AND Tipo = 35 AND Detalle = @serial;
+        INSERT INTO @n VALUES ('INVMovimientosElementos', @@ROWCOUNT);
+        DELETE m FROM INVMovimientos m
+        INNER JOIN @Movs x ON x.Fecha = m.Fecha AND x.Numero = m.Numero
+        WHERE m.Subempresa = 0 AND m.Tipo = 35
+          AND NOT EXISTS (SELECT 1 FROM INVMovimientosElementos me
+                          WHERE me.Subempresa = 0 AND me.Tipo = 35 AND me.Fecha = m.Fecha AND me.Numero = m.Numero);
+        INSERT INTO @n VALUES ('INVMovimientos (sin lineas)', @@ROWCOUNT);
+
+        DELETE FROM INVExistencias WHERE Detalle = @serial AND Elemento = @elem;
+        INSERT INTO @n VALUES ('INVExistencias', @@ROWCOUNT);
+        DELETE FROM PRDProduccion WHERE Detalle = @serial;
+        INSERT INTO @n VALUES ('PRDProduccion', @@ROWCOUNT);
+        DELETE FROM SEL_Bultos WHERE id = @idBulto;
+        INSERT INTO @n VALUES ('SEL_Bultos', @@ROWCOUNT);
+
+        SELECT Tabla, Filas FROM @n;
+      `);
+
+    const resumen = dtBorrado.recordset.map(r => r.Tabla + ': ' + r.Filas).join(', ');
+    await tx.request()
+      .input('idBulto', idBulto).input('serial', b.serialPadre).input('usuario', req.session.usuario.codigo || null)
+      .input('resumen', ('Estado ' + b.estado + ', conteo ' + b.NumPaqu + ', orden ' + b.IdOrden + '. Borrado -> ' + resumen).slice(0, 500))
+      .query(`
+        IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
+          INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
+          VALUES ('SELLADORA', 'ELIMINAR_BULTO_VACIO', @idBulto, @serial, GETDATE(), @usuario, 'Tableta',
+                  'Bulto vacío (sin paquetes) eliminado por el operario', @resumen);
+      `);
+
+    await tx.commit();
+    console.log(`Bulto vacío eliminado ${b.serialPadre} (id ${idBulto}, orden ${b.IdOrden}) por ${req.session.usuario.codigo}: ${resumen}`);
+    res.json({ ok: true, borrado: dtBorrado.recordset });
+  } catch (err) {
+    try { if (tx) await tx.rollback(); } catch (e) { /* ya abortada */ }
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// 30/09/2026 (a pedido del usuario): "Corregir conteo" de un bulto abierto. El consecutivo del
+// paquete es la llave de su serial y NO se reusa: mientras el bulto tenga paquetes el conteo nunca
+// BAJA (de 20, trasladar el #18 o el #20 deja el siguiente en #21). Solo se corrige:
+//   - sin ningún paquete guardado (todos trasladados, o pesajes que fallaron después de sumar) -> 0;
+//   - conteo por DEBAJO del último paquete (el siguiente repetiría un número) -> sube a ese último.
+// No dispara triggers: los de SEL_Bultos solo reaccionan a cambios de estado.
+app.post('/api/selladora/bulto/corregir-conteo', requireLogin, async (req, res) => {
+  const idBulto = Number(req.body && req.body.idBulto);
+  if (!Number.isFinite(idBulto) || idBulto <= 0) return res.json({ ok: false, error: 'Falta el bulto.' });
+
+  let tx;
+  try {
+    const p = await getPool();
+    tx = new sql.Transaction(p);
+    await tx.begin();
+    const dt = await tx.request().input('idBulto', idBulto).query(`
+      SELECT b.estado, b.serialPadre, ISNULL(b.number_paqu, 0) AS NumPaqu,
+             (SELECT COUNT(*) FROM SEL_PesajeElemento pe WHERE pe.id_bulto = b.id) AS Paquetes,
+             (SELECT ISNULL(MAX(pe.ConsecutivoPaquete), 0) FROM SEL_PesajeElemento pe WHERE pe.id_bulto = b.id) AS Ultimo
+      FROM SEL_Bultos b WITH (UPDLOCK, ROWLOCK) WHERE b.id = @idBulto
+    `);
+    if (dt.recordset.length === 0) { await tx.rollback(); return res.json({ ok: false, error: 'No se encontró el bulto.' }); }
+    const b = dt.recordset[0];
+    if (!['Temporal', 'Activo', 'EnEspera'].includes(b.estado)) {
+      await tx.rollback();
+      return res.json({ ok: false, error: 'Solo se corrige el conteo de un bulto abierto (está ' + b.estado + ').' });
+    }
+    // Nunca se baja el conteo si hay paquetes: solo 0 cuando no queda ninguno, o subirlo al último.
+    const nuevoConteo = Number(b.Paquetes) === 0 ? 0 : Math.max(Number(b.NumPaqu), Number(b.Ultimo));
+    if (Number(b.NumPaqu) === nuevoConteo) { await tx.rollback(); return res.json({ ok: true, conteo: nuevoConteo }); }
+    b.Ultimo = nuevoConteo;
+
+    await tx.request().input('idBulto', idBulto).input('conteo', Number(b.Ultimo))
+      .query(`UPDATE SEL_Bultos SET number_paqu = @conteo WHERE id = @idBulto`);
+    await tx.request()
+      .input('idBulto', idBulto).input('serial', b.serialPadre).input('usuario', req.session.usuario.codigo || null)
+      .input('ant', String(b.NumPaqu)).input('nue', String(b.Ultimo))
+      .query(`
+        IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
+        BEGIN
+          DECLARE @Mov TABLE (Id INT);
+          INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
+          OUTPUT INSERTED.IdMovimiento INTO @Mov
+          VALUES ('SELLADORA', 'CORREGIR_CONTEO_BULTO', @idBulto, @serial, GETDATE(), @usuario, 'Tableta',
+                  'Conteo de paquetes distinto de los paquetes guardados', 'number_paqu ' + @ant + ' -> ' + @nue);
+          INSERT INTO SISMovimientosDetalle (IdMovimiento, Tabla, Campo, ValorAnterior, ValorNuevo)
+          SELECT Id, 'SEL_Bultos', 'number_paqu', @ant, @nue FROM @Mov;
+        END
+      `);
+    await tx.commit();
+    res.json({ ok: true, conteo: Number(b.Ultimo) });
+  } catch (err) {
+    try { if (tx) await tx.rollback(); } catch (e) { /* ya abortada */ }
     res.json({ ok: false, error: err.message });
   }
 });
