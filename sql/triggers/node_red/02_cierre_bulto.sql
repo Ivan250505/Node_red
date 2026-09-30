@@ -16,17 +16,22 @@
 -- HoraFin), y en cascada trg_SEL_Bultos_SuspenderTemporal y trg_SEL_Bultos_GenerarEntradaInventario.
 -- Instrucciones para quien lo pega: CAMBIO_CIERRE_BULTO_HORAFIN_28092026.md (misma carpeta).
 
+-- FIX 30/09/2026 (tarjeta #3, punto 1): sin calificador de base (antes carlixplast.dbo):
+-- el SQL corre en la base a la que este conectado Node-RED. Calificado solo servia en
+-- produccion y en pruebas cerraba bultos de la base equivocada. Al pegar en Node-RED sigue
+-- igual (ahi la base es la de produccion).
+
 UPDATE b
       SET b.estado   = 'Cerrado',
           b.HoraFin  = GETDATE(),          -- antes: @HoraPLC
           b.Golpes   = agg.GolpesTotal,
           b.Potencia = agg.PotenciaPromedio
-      FROM carlixplast.dbo.SEL_Bultos b
+      FROM SEL_Bultos b
       CROSS APPLY (
           SELECT
               ISNULL(AVG(pe.Golpes), 0)               AS GolpesTotal,
               CAST(AVG(pe.Potencia) AS DECIMAL(10,3))  AS PotenciaPromedio
-          FROM carlixplast.dbo.SEL_PesajeElemento pe
+          FROM SEL_PesajeElemento pe
           WHERE pe.id_bulto = b.id
       ) agg
       WHERE b.id_maquina = @MiMaquina

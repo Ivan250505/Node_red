@@ -177,17 +177,39 @@ function conectarNodeRed() {
 // -- solo un error de conexion real (Node-RED caido) se reporta como fallo al boton.
 const NODERED_HTTP_URL = process.env.NODERED_HTTP_URL || 'http://localhost:1880';
 
-// Simulador de PLC: sus enlaces estan ESCONDIDOS por defecto (a pedido del usuario, 15/09/2026).
-// Era un apoyo para probar sin PLC conectado y no tiene por que estar a la vista en planta.
-//
-// Se esconde con una bandera y no borrando el codigo porque la herramienta sigue sirviendo: para
-// volver a verla basta poner SIMULADOR_PLC_VISIBLE=1 en el .env y reiniciar, sin tocar nada.
-//
-// OJO: esto solo controla que se VEAN los enlaces. Las rutas /admin/simulador-plc siguen
-// existiendo y siguen protegidas por requireAdmin, asi que un administrador que escriba la URL a
-// mano puede seguir entrando. Si se quiere cerrar del todo, hay que guardar tambien las rutas con
-// esta misma bandera.
-const SIMULADOR_PLC_VISIBLE = process.env.SIMULADOR_PLC_VISIBLE === '1';
+// Simulador de PLC — tarjeta #2 (30/09/2026): botones que hacen lo mismo que el PLC para
+// probar sin maquina conectada. Solo existen con BD de PRUEBAS (DB_DATABASE con "prueba",
+// ej. carlixplastPrueba): con produccion ni se muestran los enlaces ni responden las rutas.
+// Reemplaza el viejo flag SIMULADOR_PLC_VISIBLE del .env (15/09/2026), que se retira.
+const ES_PRUEBAS = /prueba/i.test(process.env.DB_DATABASE || '');
+
+// SQL canonico de triggers/node_red/: el simulador ejecuta LITERALMENTE los mismos archivos
+// que se pegan en los nodos de Node-RED (no una copia a mano en este JS), para que probar
+// aca sea probar lo mismo que corre en planta. Se cargan una vez al arrancar, solo en pruebas.
+const fs = require('fs');
+const path = require('path');
+function cargarSqlSimulador(nombre) {
+  return fs.readFileSync(path.join(__dirname, 'sql', 'triggers', 'node_red', nombre), 'utf8');
+}
+let SQL_SIM_PESAJE = null, SQL_SIM_CIERRE = null, SQL_SIM_RESIDUO = null;
+if (ES_PRUEBAS) {
+  try {
+    SQL_SIM_PESAJE = cargarSqlSimulador('01_pesaje_paquete.sql');
+    // 02 trae el prefijo carlixplast.dbo (BD de produccion): en pruebas debe correr contra
+    // ESTA base, asi que se quita el calificador y corre sin prefijo.
+    SQL_SIM_CIERRE = cargarSqlSimulador('02_cierre_bulto.sql').replace(/carlixplast\.dbo\./gi, '');
+    // 03 trae DECLARE de ejemplo para sus 3 parametros (@IdBulto/@TipoResiduo/
+    // @Cantidad): se quitan, los pone el endpoint. @GeneradoPor NO se toca: es
+    // variable interna que el propio SQL calcula en el PASO 1b.
+    SQL_SIM_RESIDUO = cargarSqlSimulador('03_residuo_insertar.sql')
+      .replace(/DECLARE\s+@IdBulto\s+INT\s*=\s*[^;]+;/i, '')
+      .replace(/DECLARE\s+@TipoResiduo\s+INT\s*=\s*[^;]+;/i, '')
+      .replace(/DECLARE\s+@Cantidad\s+[^;]+;/i, '');
+    console.log('Simulador PLC activo (BD de pruebas): SQL canonico 01/02/03 cargado.');
+  } catch (err) {
+    console.error('Simulador PLC: no se pudo cargar el SQL canonico:', err.message);
+  }
+}
 
 // Bitacora de turno: su isla esta ESCONDIDA por defecto (a pedido del usuario, 15/09/2026), con el
 // mismo criterio que el simulador de PLC. Para volver a mostrarla: BITACORA_VISIBLE=1 en el .env.
@@ -1044,7 +1066,7 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
         <div class="header-info">
           <div class="sub">Máquinas con producción activa en este momento</div>
           ${esAdmin ? `<a class="volver" href="/admin/tablet-fija">📌 Tablet fija a máquina</a>` : ''}
-          ${esAdmin && SIMULADOR_PLC_VISIBLE ? `<a class="volver" href="/admin/simulador-plc">🧪 Simulador de PLC</a>` : ''}
+          ${esAdmin && ES_PRUEBAS ? `<a class="volver" href="/admin/simulador-plc">🧪 Simulador de PLC</a>` : ''}
         </div>
         ${bloqueUsuarioHeader(usuario)}
       </div>
@@ -5002,11 +5024,9 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
           <h1>Pedido ${orden.NumeroPedido || '—'} ${badgeEstadoOrden(orden.Estado)}</h1>
           <div class="sub">${orden.Elemento}</div>
           <a class="volver" href="/selladora/${maquinaCodigo}">‹ ${orden.MaquinaNombre}</a>
-          ${/* Acceso directo al Simulador de PLC desde esta misma pantalla (13/09/2026). Nacio
-               marcado como TEMPORAL "hasta terminar de probar"; el 15/09/2026 el usuario pidio
-               esconder el apartado, asi que ahora depende de SIMULADOR_PLC_VISIBLE igual que el
-               de la pantalla de Selladoras. */ ''}
-          ${esAdmin && SIMULADOR_PLC_VISIBLE ? `<a class="volver" href="/admin/simulador-plc?maquina=${maquinaCodigo}">🧪 Simulador de PLC</a>` : ''}
+          ${/* Acceso directo al Simulador de PLC desde esta misma pantalla (13/09/2026).
+               Tarjeta #2 (30/09/2026): visible solo con BD de pruebas (ES_PRUEBAS). */ ''}
+          ${esAdmin && ES_PRUEBAS ? `<a class="volver" href="/admin/simulador-plc?maquina=${maquinaCodigo}">🧪 Simulador de PLC</a>` : ''}
         </div>
         ${avanceCard}
         ${bloqueUsuarioHeader(usuario)}
@@ -6182,20 +6202,41 @@ app.post('/admin/tablet-fija/quitar', requireLogin, requireAdmin, async (req, re
 });
 
 // ============================================================================================
-// SIMULADOR DE PLC (13/09/2026, a pedido del usuario -- "no tengo el PLC, necesito botones que
-// hagan lo mismo para poder probar"). Restringido a administrador (requireAdmin), igual que
-// tablet-fija. Hace A MANO exactamente lo que en producción dispara la máquina/Node-RED sola:
-//   - "Simular paquete pesado": lo que hace Node-RED cada vez que la báscula pesa un paquete --
-//     INSERT en SEL_PesajeElemento sobre el bulto Activo/Temporal más reciente de la máquina
-//     (mismo criterio que el script SQL que ya venía probando el usuario a mano).
-//   - "Simular cierre de bulto": lo que hace trg_SEL_Bultos_CierreBulto al cerrar un bulto --
-//     UPDATE SEL_Bultos SET estado='Cerrado' (el trigger real se encarga de generar la entrada de
-//     inventario, PRDProduccion, etc. -- este botón solo dispara ESE UPDATE, no lo duplica).
-// NO reemplaza nada de producción -- es una herramienta de prueba que evita tener que correr SQL a
-// mano cada vez, para cuando no hay PLC conectado.
+// SIMULADOR DE PLC — tarjeta #2 (30/09/2026, "botones que simulan el PLC").
+// Solo con BD de pruebas (ES_PRUEBAS) + administrador (requireAdmin). Cada boton ejecuta el
+// MISMO SQL canonico de sql/triggers/node_red/ que corre en Node-RED con el PLC real:
+//   - "Simular paquete pesado" -> 01_pesaje_paquete.sql (INSERT en SEL_PesajeElemento sobre el
+//     bulto Activo/Temporal mas reciente; number_paqu, SerialHijo y UnidadesPaquete los pone el SQL).
+//   - "Simular cierre de bulto" -> 02_cierre_bulto.sql (UPDATE estado='Cerrado'; los triggers
+//     reales generan entrada de inventario, PRDProduccion, etc. — este boton no los duplica).
+//   - "Simular residuo" -> 03_residuo_insertar.sql (crea la hija retal/troquelado/no conforme
+//     igual que en planta, con su entrada a inventario y Tipo 35).
+// Cada accion deja rastro en SISMovimientos (Tipo SIMULADOR_PLC), segun reglas de las tarjetas.
 // ============================================================================================
 
-function renderSimuladorPLC(usuario, maquinas, maquinaSel, error, mensaje) {
+// Rastro de las acciones del simulador (reglas de tarjetas: rastro en SISMovimientos).
+// Solo inserta si la tabla existe; nunca tumba la accion simulada si el rastro falla.
+async function trazaSimulador(p, usuario, subtipo, motivo, resumen) {
+  try {
+    await p.request()
+      .input('subtipo', subtipo).input('motivo', motivo).input('resumen', resumen)
+      .query(`IF OBJECT_ID('dbo.SISMovimientos', 'U') IS NOT NULL
+        INSERT INTO SISMovimientos (Tipo, Subtipo, FechaHora, Usuario, Origen, Motivo, Resumen)
+        VALUES ('SIMULADOR_PLC', @subtipo, GETDATE(), NULL, 'SIMULADOR_PLC', @motivo, @resumen)`);
+  } catch (err) {
+    console.error('trazaSimulador:', err.message);
+  }
+}
+
+// Guarda: con produccion estas rutas no existen (404), aunque se sea admin y se escriba la URL.
+function exigirSimulador(req, res, next) {
+  if (!ES_PRUEBAS || !SQL_SIM_PESAJE || !SQL_SIM_CIERRE || !SQL_SIM_RESIDUO) {
+    return res.status(404).send('Simulador de PLC no disponible (solo BD de pruebas).');
+  }
+  return next();
+}
+
+function renderSimuladorPLC(usuario, maquinas, maquinaSel, bultosPadre, error, mensaje) {
   const opciones = maquinas.map(m =>
     `<option value="${m.Codigo}" ${String(maquinaSel) === String(m.Codigo) ? 'selected' : ''}>${m.Nombre}</option>`
   ).join('');
@@ -6220,7 +6261,7 @@ function renderSimuladorPLC(usuario, maquinas, maquinaSel, error, mensaje) {
       </div>
       <a class="volver" href="/">‹ Selladoras</a>
       <h1>🧪 Simulador de PLC</h1>
-      <div class="sub">Solo para pruebas sin PLC conectado -- hace a mano lo que la máquina dispara sola.</div>
+      <div class="sub">Solo BD de pruebas — ejecuta el mismo SQL canónico de Node-RED (01/02/03). Todo deja rastro en SISMovimientos.</div>
     </div>
   </header>
   <main>
@@ -6235,16 +6276,14 @@ function renderSimuladorPLC(usuario, maquinas, maquinaSel, error, mensaje) {
     </div>
 
     <div class="ejecucion-box">
-      <div class="label" style="margin-bottom:6px;">1) Simular paquete pesado</div>
-      <p style="margin:0 0 14px;color:var(--texto-suave);">Agrega un paquete al bulto Activo/Temporal más reciente de la máquina elegida -- mismo efecto que un pesaje real de báscula.</p>
+      <div class="label" style="margin-bottom:6px;">1) Simular paquete pesado (01_pesaje_paquete.sql)</div>
+      <p style="margin:0 0 14px;color:var(--texto-suave);">Agrega un paquete al bulto Activo/Temporal más reciente de la máquina elegida — number_paqu, SerialHijo y UnidadesPaquete los pone el SQL, igual que un pesaje real.</p>
       <form method="post" action="/admin/simulador-plc/paquete" onsubmit="return copiarMaquina(this)">
         <input type="hidden" name="maquina" value="">
-        <label for="peso">Peso (Kg)</label>
+        <label for="peso">Peso (misma unidad que manda el PLC)</label>
         <input type="number" step="0.001" min="0" name="peso" id="peso" value="18" required>
         <label for="potencia" style="margin-top:10px;">Potencia</label>
         <input type="number" step="0.001" name="potencia" id="potencia" value="10">
-        <label for="temperatura" style="margin-top:10px;">Temperatura</label>
-        <input type="number" step="0.001" name="temperatura" id="temperatura" value="10">
         <label for="golpes" style="margin-top:10px;">Golpes (vacío = NULL)</label>
         <input type="number" step="1" min="0" name="golpes" id="golpes">
         <button type="submit" style="margin-top:14px;">Simular paquete pesado</button>
@@ -6252,11 +6291,34 @@ function renderSimuladorPLC(usuario, maquinas, maquinaSel, error, mensaje) {
     </div>
 
     <div class="ejecucion-box">
-      <div class="label" style="margin-bottom:6px;">2) Simular cierre de bulto</div>
-      <p style="margin:0 0 14px;color:var(--texto-suave);">Cierra el bulto Activo/Temporal más reciente de la máquina elegida (Golpes/Potencia = promedio de sus paquetes) -- dispara el mismo trigger que un cierre real.</p>
+      <div class="label" style="margin-bottom:6px;">2) Simular cierre de bulto (02_cierre_bulto.sql)</div>
+      <p style="margin:0 0 14px;color:var(--texto-suave);">Cierra los bultos Activo/Temporal de la máquina (Golpes/Potencia = promedio de sus paquetes) — dispara los mismos triggers que un cierre real.</p>
       <form method="post" action="/admin/simulador-plc/cerrar-bulto" onsubmit="return copiarMaquina(this)">
         <input type="hidden" name="maquina" value="">
         <button type="submit" style="background:#c0392b;">Simular cierre de bulto</button>
+      </form>
+    </div>
+
+    <div class="ejecucion-box">
+      <div class="label" style="margin-bottom:6px;">3) Simular residuo (03_residuo_insertar.sql)</div>
+      <p style="margin:0 0 14px;color:var(--texto-suave);">Crea la hija retal/troquelado/no conforme del bulto ELEGIDO, con su entrada a inventario — igual que en planta (allá es el bulto activo en pantalla).</p>
+      <form method="post" action="/admin/simulador-plc/residuo" onsubmit="return copiarMaquina(this)">
+        <input type="hidden" name="maquina" value="">
+        <label for="idBulto">Bulto padre</label>
+        <select name="idBulto" id="idBulto" required>
+          ${bultosPadre.length > 0
+            ? bultosPadre.map(b => `<option value="${b.id}">#${b.id} — ${b.estado} — ref ${b.refsalida} — ${b.number_paqu} paq.</option>`).join('')
+            : `<option value="">Elige una máquina arriba primero</option>`}
+        </select>
+        <label for="tipoResiduo" style="margin-top:10px;">Tipo</label>
+        <select name="tipoResiduo" id="tipoResiduo">
+          <option value="1">1 — Retal</option>
+          <option value="3">3 — Troquelado</option>
+          <option value="4">4 — No conforme</option>
+        </select>
+        <label for="cantidad" style="margin-top:10px;">Cantidad (Kg)</label>
+        <input type="number" step="0.0001" min="0" name="cantidad" id="cantidad" value="0.5" required>
+        <button type="submit" style="margin-top:14px;background:#8e44ad;">Simular residuo</button>
       </form>
     </div>
   </main>
@@ -6285,24 +6347,31 @@ async function cargarMaquinasSimulador() {
   return maquinas.recordset;
 }
 
-app.get('/admin/simulador-plc', requireLogin, requireAdmin, async (req, res) => {
+app.get('/admin/simulador-plc', requireLogin, requireAdmin, exigirSimulador, async (req, res) => {
   try {
     const maquinas = await cargarMaquinasSimulador();
-    res.send(renderSimuladorPLC(req.session.usuario.nombre, maquinas, req.query.maquina || '', req.query.error || null, req.query.ok || null));
+    const maquinaSel = req.query.maquina || '';
+    let bultosPadre = [];
+    if (maquinaSel) {
+      const p = await getPool();
+      const dt = await p.request().input('maquina', Number(maquinaSel)).query(`
+        SELECT TOP 8 id, estado, refsalida, number_paqu FROM SEL_Bultos
+        WHERE id_maquina = @maquina ORDER BY id DESC
+      `);
+      bultosPadre = dt.recordset;
+    }
+    res.send(renderSimuladorPLC(req.session.usuario.nombre, maquinas, maquinaSel, bultosPadre, req.query.error || null, req.query.ok || null));
   } catch (err) {
-    res.send(renderSimuladorPLC(req.session.usuario.nombre, [], '', err.message, null));
+    res.send(renderSimuladorPLC(req.session.usuario.nombre, [], '', [], err.message, null));
   }
 });
 
-// Mismo criterio que el script SQL que ya venía probando el usuario a mano: toma el bulto
-// Activo/Temporal MÁS RECIENTE (MAX id) de la máquina, le sube number_paqu en 1, e inserta el
-// paquete. Se hace con UPDLOCK/ROWLOCK + en una transacción para no pisarse con un pesaje real
-// del PLC si llegara a estar corriendo al mismo tiempo.
-app.post('/admin/simulador-plc/paquete', requireLogin, requireAdmin, async (req, res) => {
+// 01_pesaje_paquete.sql tal cual (parametros @maquina/@peso/@golpes/@potencia). El SELECT final
+// del script devuelve SerialHijo y se muestra en la confirmacion.
+app.post('/admin/simulador-plc/paquete', requireLogin, requireAdmin, exigirSimulador, async (req, res) => {
   const maquina = Number(req.body.maquina);
   const peso = Number(req.body.peso);
   const potencia = req.body.potencia !== '' ? Number(req.body.potencia) : null;
-  const temperatura = req.body.temperatura !== '' ? Number(req.body.temperatura) : null;
   const golpes = req.body.golpes !== '' ? Number(req.body.golpes) : null;
 
   if (!maquina) return res.redirect('/admin/simulador-plc?error=' + encodeURIComponent('Falta la máquina.'));
@@ -6310,73 +6379,75 @@ app.post('/admin/simulador-plc/paquete', requireLogin, requireAdmin, async (req,
 
   try {
     const p = await getPool();
-    const tx = new sql.Transaction(p);
-    await tx.begin();
-    try {
-      const dtBulto = await tx.request().input('maquina', maquina).query(`
-        SELECT TOP 1 b.id, b.number_paqu
-        FROM SEL_Bultos b WITH (UPDLOCK, ROWLOCK)
-        WHERE b.id_maquina = @maquina AND b.estado IN ('Activo', 'Temporal')
-        ORDER BY b.id DESC
-      `);
-      if (dtBulto.recordset.length === 0) {
-        await tx.rollback();
-        return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent('No hay bulto Activo/Temporal para esta máquina.'));
-      }
-      const idBulto = dtBulto.recordset[0].id;
-      const nuevoConsecutivo = dtBulto.recordset[0].number_paqu + 1;
-
-      await tx.request().input('idBulto', idBulto).input('consec', nuevoConsecutivo).query(
-        `UPDATE SEL_Bultos SET number_paqu = @consec WHERE id = @idBulto`
-      );
-      await tx.request()
-        .input('peso', peso).input('idBulto', idBulto).input('consec', nuevoConsecutivo)
-        .input('potencia', potencia).input('temperatura', temperatura).input('golpes', golpes)
-        .query(`
-          INSERT INTO SEL_PesajeElemento (PesoPaqueGr, id_bulto, ConsecutivoPaquete, FechaHora, Potencia, Temperatura, Golpes)
-          VALUES (@peso, @idBulto, @consec, GETDATE(), @potencia, @temperatura, @golpes)
-        `);
-      await tx.commit();
-      res.redirect('/admin/simulador-plc?maquina=' + maquina + '&ok=' + encodeURIComponent('Paquete #' + nuevoConsecutivo + ' agregado al bulto ' + idBulto + '.'));
-    } catch (errTx) {
-      await tx.rollback();
-      throw errTx;
-    }
+    const dt = await p.request()
+      .input('maquina', maquina).input('peso', peso)
+      .input('golpes', golpes).input('potencia', potencia)
+      .query(SQL_SIM_PESAJE);
+    const fila = dt.recordset && dt.recordset[0];
+    const resumen = fila
+      ? `Paquete #${fila.number_paqu} (serial ${fila.SerialHijo}) en bulto ${fila.SerialPadre || ''}.`
+      : 'Paquete registrado.';
+    await trazaSimulador(p, req.session.usuario, 'PESAJE',
+      `${req.session.usuario.nombre} maq=${maquina} peso=${peso}`, resumen);
+    res.redirect('/admin/simulador-plc?maquina=' + maquina + '&ok=' + encodeURIComponent(resumen));
   } catch (err) {
     res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent(err.message));
   }
 });
 
-// Mismo criterio que el segundo script SQL del usuario: cierra el bulto Activo/Temporal más
-// reciente de la máquina, con Golpes/Potencia = promedio de sus propios paquetes. El resto
-// (INVExistencias, PRDProduccion, apertura del siguiente Temporal) lo hace SOLO
-// trg_SEL_Bultos_GenerarEntradaInventario/trg_SEL_Bultos_CierreBulto al reaccionar a este UPDATE --
-// este endpoint no los duplica.
-app.post('/admin/simulador-plc/cerrar-bulto', requireLogin, requireAdmin, async (req, res) => {
+// 02_cierre_bulto.sql tal cual (parametro @MiMaquina). Cierra TODOS los Activo/Temporal de la
+// maquina, igual que el nodo automatico y el boton de la tableta. El resto (PRDProduccion,
+// existencias, Tipo 35, siguiente Temporal) lo hacen SOLO los triggers al reaccionar.
+app.post('/admin/simulador-plc/cerrar-bulto', requireLogin, requireAdmin, exigirSimulador, async (req, res) => {
   const maquina = Number(req.body.maquina);
   if (!maquina) return res.redirect('/admin/simulador-plc?error=' + encodeURIComponent('Falta la máquina.'));
 
   try {
     const p = await getPool();
-    const dtBulto = await p.request().input('maquina', maquina).query(`
-      SELECT TOP 1 id FROM SEL_Bultos WHERE id_maquina = @maquina AND estado IN ('Activo', 'Temporal') ORDER BY id DESC
+    await p.request().input('MiMaquina', maquina).query(SQL_SIM_CIERRE);
+    const resumen = `Cierre ejecutado en máquina ${maquina} (verifique bultos en la cola).`;
+    await trazaSimulador(p, req.session.usuario, 'CIERRE',
+      `${req.session.usuario.nombre} maq=${maquina}`, resumen);
+    res.redirect('/admin/simulador-plc?maquina=' + maquina + '&ok=' + encodeURIComponent(resumen));
+  } catch (err) {
+    res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent(err.message));
+  }
+});
+
+// 03_residuo_insertar.sql tal cual (parametros @IdBulto/@TipoResiduo/@Cantidad; @GeneradoPor y
+// operario los resuelve el propio SQL con el operario activo de la maquina). El bulto padre lo
+// ELIGE el operario en el formulario (en planta es el bulto activo en pantalla) — no se adivina
+// por fecha, que en un grupo cae en el hermano EnEspera. El SELECT final devuelve SerialHijo
+// y MovimientoTipo35 y se muestra en la confirmacion.
+app.post('/admin/simulador-plc/residuo', requireLogin, requireAdmin, exigirSimulador, async (req, res) => {
+  const maquina = Number(req.body.maquina);
+  const idBulto = Number(req.body.idBulto);
+  const tipoResiduo = Number(req.body.tipoResiduo);
+  const cantidad = Number(req.body.cantidad);
+
+  if (!maquina) return res.redirect('/admin/simulador-plc?error=' + encodeURIComponent('Falta la máquina.'));
+  if (!idBulto) return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent('Elija el bulto padre.'));
+  if (![1, 3, 4].includes(tipoResiduo)) return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent('Tipo de residuo inválido (1=Retal, 3=Troquelado, 4=No Conforme).'));
+  if (!(cantidad > 0)) return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent('Ingrese una cantidad válida mayor que cero.'));
+
+  try {
+    const p = await getPool();
+    const dtBulto = await p.request().input('idBulto', idBulto).input('maquina', maquina).query(`
+      SELECT id FROM SEL_Bultos WHERE id = @idBulto AND id_maquina = @maquina
     `);
     if (dtBulto.recordset.length === 0) {
-      return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent('No hay bulto Activo/Temporal para esta máquina.'));
+      return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent('Ese bulto no es de esta máquina.'));
     }
-    const idBulto = dtBulto.recordset[0].id;
-
-    await p.request().input('idBulto', idBulto).query(`
-      UPDATE b
-      SET b.estado = 'Cerrado', b.HoraFin = GETDATE(), b.Golpes = agg.GolpesProm, b.Potencia = agg.PotenciaProm
-      FROM SEL_Bultos b
-      CROSS APPLY (
-        SELECT ISNULL(AVG(pe.Golpes), 0) AS GolpesProm, CAST(AVG(pe.Potencia) AS DECIMAL(10,3)) AS PotenciaProm
-        FROM SEL_PesajeElemento pe WHERE pe.id_bulto = b.id
-      ) agg
-      WHERE b.id = @idBulto
-    `);
-    res.redirect('/admin/simulador-plc?maquina=' + maquina + '&ok=' + encodeURIComponent('Bulto ' + idBulto + ' cerrado.'));
+    const dt = await p.request()
+      .input('IdBulto', idBulto).input('TipoResiduo', tipoResiduo).input('Cantidad', cantidad)
+      .query(SQL_SIM_RESIDUO);
+    const fila = dt.recordset && dt.recordset[0];
+    const resumen = fila
+      ? `Residuo tipo ${tipoResiduo} de ${cantidad} Kg en bulto ${idBulto}: hijo ${fila.SerialHijo} (Tipo 35 ${fila.MovimientoTipo35}).`
+      : `Residuo registrado en bulto ${idBulto}.`;
+    await trazaSimulador(p, req.session.usuario, 'RESIDUO',
+      `${req.session.usuario.nombre} maq=${maquina} bulto=${idBulto} tipo=${tipoResiduo} cant=${cantidad}`, resumen);
+    res.redirect('/admin/simulador-plc?maquina=' + maquina + '&ok=' + encodeURIComponent(resumen));
   } catch (err) {
     res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent(err.message));
   }
