@@ -631,9 +631,16 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
   const dtBultos = await db.request().input('idOrden', idOrden).query(`
     SELECT b.id, b.serialPadre, b.num_bulto, b.refsalida, b.CantidadTotal, b.NumeroPedido,
       b.agno, b.mes, b.dia, b.HoraInicio, b.HoraFin, ISNULL(b.number_paqu,0) AS NumPaqu,
-      b.id_maquina, ej.Operario, ISNULL(ej.BolsasxGolpe,0) AS BolsasxGolpe
+      b.id_maquina, ej.Operario, ISNULL(ej.BolsasxGolpe,0) AS BolsasxGolpe,
+      ISNULL(pv.Validado, 0) AS Validado, pv.Cantidad AS CantidadValidada
     FROM SEL_Bultos b
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+    -- FIX 30/09/2026 (a pedido del usuario): los bultos se validan uno a uno a medida que salen
+    -- (frmValidacionSelladora), ANTES de que el operario dé Finalizar. Este Finalizar recalculaba
+    -- PRDProduccion con el peso del PLC y pisaba lo validado (Cantidad/Unidades/TipoPedido/Cliente...),
+    -- dejando PRDProduccion descuadrado contra INVExistencias (pedidos 11731 y 11940). Ahora Finalizar
+    -- no reescribe ningún bulto existente; Validado/Cantidad solo se leen para el peso de un rollo que falte.
+    OUTER APPLY (SELECT TOP 1 p.Validado, p.Cantidad FROM PRDProduccion p WHERE p.Detalle = b.serialPadre) pv
     WHERE ej.IdOrden = @idOrden AND b.estado = 'Cerrado'
     ORDER BY b.id ASC
   `);
@@ -653,8 +660,6 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
     ORDER BY b.id ASC
   `);
   const anclaBulto = dtPrimero.recordset.length > 0 ? dtPrimero.recordset[0] : null;
-
-  const TIPO_PEDIDO_AR = 4;
 
   let nUltimoElemento = 0, nUltimoAgno = 0, tUltimoLote = '', nUltimaLinea = 0;
 
@@ -704,20 +709,15 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
     const dtYaExiste = await db.request().input('serial', tSerial).query(`SELECT 1 AS X FROM PRDProduccion WHERE Detalle = @serial`);
     const nDuracion = dateDiffMinutos(fHoraIni, fHoraFin);
 
-    if (dtYaExiste.recordset.length > 0) {
-      await db.request()
-        .input('cantidad', nCantidad).input('duracion', nDuracion).input('unidades', nUnidades)
-        .input('cliente', nCodCliente > 0 ? nCodCliente : null).input('destino', nCodDestino > 0 ? nCodDestino : null)
-        .input('tipoPedido', TIPO_PEDIDO_AR).input('horaFin', fHoraFin || null).input('serial', tSerial)
-        .query(`
-          UPDATE PRDProduccion SET
-            Cantidad = @cantidad, Duracion = @duracion, Unidades = @unidades,
-            ClienteProduccion = @cliente, Destino = @destino, TipoPedido = @tipoPedido,
-            HoraFinal = @horaFin, FechaModificado = GETDATE()
-          WHERE Detalle = @serial
-        `);
-    } else {
+    // FIX 30/09/2026 (a pedido del usuario): Finalizar YA NO recalcula PRDProduccion de los bultos que
+    // ya tienen su fila. Antes hacía UPDATE de Cantidad/Unidades/Duracion/HoraFinal/Cliente/Destino y
+    // TipoPedido fijo en 4 con el peso del PLC, y pisaba lo que el digitador ya había validado bulto a
+    // bulto (pedidos 11731 y 11940: PRDProduccion quedó descuadrado contra INVExistencias). Esos datos
+    // ya los deja trg_SEL_Bultos_CierreBulto al cerrar cada bulto, y la Validación los corrige. Aquí
+    // solo se crea la fila si por algún motivo falta (respaldo), sin tocar las existentes.
+    if (dtYaExiste.recordset.length === 0) {
       const nTurno = await resolverTurnoPorHora(db, nMaquina, fHoraTurno);
+      const nTipoPedido = await resolverTipoPedido(db, nElemento, nCodCliente);
       // FIX 23/09/2026: LoteOriginal/FechaOriginal apuntan al ancla del proceso, salvo en la propia
       // fila ancla (queda NULL, esa fila ES el original) -- ver comentario de anclaBulto arriba.
       const esAncla = !anclaBulto || anclaBulto.id === dr.id;
@@ -727,7 +727,7 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
         .input('cantidad', nCantidad).input('unidades', nUnidades).input('serial', tSerial)
         .input('cliente', nCodCliente > 0 ? nCodCliente : null).input('destino', nCodDestino > 0 ? nCodDestino : null)
         .input('generadoPor', generadoPor).input('horaIni', fHoraIni || null).input('horaFin', fHoraFin || null)
-        .input('bolsas', nBolsasxGolpe).input('tipoPedido', TIPO_PEDIDO_AR)
+        .input('bolsas', nBolsasxGolpe).input('tipoPedido', nTipoPedido)
         .input('numeroPedido', tNumeroPedidoBulto || null)
         .input('loteOriginal', esAncla ? null : String(anclaBulto.mes).padStart(2, '0') + String(anclaBulto.dia).padStart(2, '0'))
         .input('fechaOriginal', sql.Date, esAncla ? null : new Date(anclaBulto.agno, anclaBulto.mes - 1, anclaBulto.dia))
@@ -793,6 +793,8 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
       INNER JOIN SEL_Bultos b ON b.serialPadre = p.Detalle
       INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
       WHERE ej.IdOrden = @idOrden AND b.estado = 'Cerrado'
+        -- FIX 30/09/2026: solo se completa la OT donde falta; no se reasigna la que ya tiene el bulto.
+        AND p.OrdenProduccion IS NULL
     `);
     // FIX 15/09/2026 (Fase 1, a pedido del usuario): registra HoraFinReal en cada Finalizar.
     // A PROPOSITO no se toca Estado aqui -- cuando la OT es compartida por un grupo Sellado en
@@ -833,7 +835,10 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
     const nLin = dr.num_bulto;
     const tLot = String(dr.mes).padStart(2, '0') + String(dr.dia).padStart(2, '0');
     const fFec = new Date(dr.agno, dr.mes - 1, dr.dia);
-    const nCant = dr.CantidadTotal != null ? Number(dr.CantidadTotal) : 0;
+    // FIX 30/09/2026: bulto validado -> el peso del rollo es el validado (PRDProduccion.Cantidad), no el del PLC.
+    const nCant = Number(dr.Validado) === 1 && dr.CantidadValidada != null
+      ? Number(dr.CantidadValidada)
+      : (dr.CantidadTotal != null ? Number(dr.CantidadTotal) : 0);
 
     const dtExiste = await db.request()
       .input('idCtrl', nIdCtrl).input('elem', nElem).input('fecha', fFec).input('linea', nLin).input('lote', tLot)
@@ -852,20 +857,11 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
           SELECT @idCtrl, @elem, @fecha, @linea, @lote, ISNULL(MAX(NumeroSecuencial), 0) + 1, @cant, 0, 0, @operario, @bolsas, @generadoPor, GETDATE()
           FROM PRDExtrusionRollos WHERE IdExtrusionControl = @idCtrl
         `);
-    } else {
-      await db.request()
-        .input('idCtrl', nIdCtrl).input('elem', nElem).input('fecha', fFec).input('linea', nLin).input('lote', tLot).input('cant', nCant)
-        .query(`UPDATE PRDExtrusionRollos SET PesoBrutoKg = @cant WHERE IdExtrusionControl = @idCtrl AND Elemento = @elem AND Fecha = @fecha AND Linea = @linea AND Lote = @lote`);
     }
+    // FIX 30/09/2026: si el rollo ya existe no se le vuelve a escribir el peso (antes UPDATE con el
+    // peso del PLC). Tampoco se pone Retal/Torta = 0 en el último bulto (lo hacía siempre, con 0 fijo
+    // desde finalizarOrden): los residuos los registra el digitador y Finalizar no debe borrarlos.
   }
-
-  await db.request()
-    .input('retal', retalManual).input('torta', tortaManual)
-    .input('elemento', nUltimoElemento).input('year', nUltimoAgno).input('lote', tUltimoLote).input('linea', nUltimaLinea)
-    .query(`
-      UPDATE PRDProduccion SET Retal = @retal, Torta = @torta
-      WHERE Elemento = @elemento AND Year(Fecha) = @year AND Lote = @lote AND Linea = @linea
-    `);
 
   // CAMBIO 31/08/2026 (bug real encontrado -- Finalizar desde la tablet calculaba Merma y cerraba
   // PRDExtrusionControl, cuando ya no debe hacerlo): esta funcion es el puerto de
