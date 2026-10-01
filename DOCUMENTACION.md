@@ -337,3 +337,18 @@ Detalles que conviene saber antes de tocarlo:
 - Si algún día esto tiene que ser multiusuario de verdad (que Programación le mande un mensaje a un
   operario concreto), el cambio es sustituir `leerNotificaciones`/`guardarNotificaciones` por un par
   de endpoints contra una tabla — el resto del panel no se entera.
+
+## 14. Simulador de PLC (tarjeta #2, 30/09/2026)
+
+`/admin/simulador-plc`: botones que ejecutan el SQL canónico de `sql/triggers/node_red/`
+(01 pesar, 02 cerrar, 03 residuo) para probar sin PLC. Solo existe con BD de pruebas
+(`ES_PRUEBAS`, `DB_DATABASE` con "prueba") + admin; con producción las rutas devuelven 404.
+Cada acción deja rastro `SIMULADOR_PLC/*` en `SISMovimientos`. Notas:
+
+- El SQL se carga **una sola vez al arrancar**: si se edita un `.sql` de `node_red/`,
+  hay que reiniciar el Node para que el simulador use la versión nueva.
+- El botón de cierre ejecuta el 02 tal cual: cierra TODOS los Activo/Temporal de la
+  máquina (igual que el PLC real). Si se pulsa sin paquetes, deja un Cerrado vacío y abre
+  otro Temporal — limpiar con "Eliminar bulto vacío" de la tableta.
+- El flag viejo `SIMULADOR_PLC_VISIBLE` se retiró: con BD de producción el simulador ya
+  no aparece aunque el `.env` lo tenga.
