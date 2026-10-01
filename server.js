@@ -5146,6 +5146,13 @@ function accionesBultoVacio(b, pesajes) {
     botones.push(`<button type="button" class="btn-accion" style="background:#b46200;"
       onclick="corregirConteoBulto(${JSON.stringify(b.id)}, ${JSON.stringify(numPaqu)}, ${JSON.stringify(ultimoPaquete)})">↺ Corregir conteo (dice ${numPaqu}, ${pesajes.length === 0 ? 'no tiene paquetes' : 'último #' + ultimoPaquete})</button>`);
   }
+  // 01/10/2026 (regla 1, reabrir): solo supervisor, solo el ÚLTIMO bulto cerrado de la orden en curso
+  // y solo si el bulto abierto que le sigue no tiene paquetes (PuedeReabrir ya trae todo eso, ver
+  // obtenerBultosYPesajes). El SP sp_SEL_ReabrirBulto vuelve a revisarlo todo.
+  if (Number(b.PuedeReabrir) === 1) {
+    botones.push(`<button type="button" class="btn-accion" style="background:#2c6fbb;"
+      onclick="reabrirBulto(${JSON.stringify(b.id)}, ${jsString(b.serialPadre).replace(/"/g, '&quot;')})">↩ Reabrir bulto</button>`);
+  }
   return botones.length ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">${botones.join('')}</div>` : '';
 }
 
@@ -5170,6 +5177,29 @@ function scriptBultosVacios() {
         }).then(function(x) { return x.json(); }).then(function(data) {
           if (!data.ok) { Swal.fire({ icon: 'error', title: 'No se pudo eliminar', text: data.error || '', confirmButtonColor: '#71bf44' }); return; }
           Swal.fire({ icon: 'success', title: 'Bulto eliminado', confirmButtonColor: '#71bf44' }).then(function() { location.reload(); });
+        }).catch(function(e) { Swal.fire({ icon: 'error', title: 'Error', text: String(e), confirmButtonColor: '#71bf44' }); });
+      });
+    }
+
+    function reabrirBulto(idBulto, serial) {
+      Swal.fire({
+        icon: 'warning',
+        title: '¿Reabrir el bulto ' + serial + '?',
+        text: 'Se elimina el bulto abierto vacío que le sigue y este vuelve a recibir paquetes. Su inventario queda en 0 hasta que se cierre de nuevo.',
+        showCancelButton: true,
+        confirmButtonText: 'Sí, reabrir',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#2c6fbb',
+        cancelButtonColor: '#7f8c8d'
+      }).then(function(r) {
+        if (!r.isConfirmed) return;
+        Swal.fire({ title: 'Reabriendo…', allowOutsideClick: false, didOpen: function() { Swal.showLoading(); } });
+        fetch('/api/selladora/bulto/reabrir', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idBulto: idBulto })
+        }).then(function(x) { return x.json(); }).then(function(data) {
+          if (!data.ok) { Swal.fire({ icon: 'error', title: 'No se pudo reabrir', text: data.error || '', confirmButtonColor: '#71bf44' }); return; }
+          Swal.fire({ icon: 'success', title: 'Bulto reabierto', confirmButtonColor: '#71bf44' }).then(function() { location.reload(); });
         }).catch(function(e) { Swal.fire({ icon: 'error', title: 'Error', text: String(e), confirmButtonColor: '#71bf44' }); });
       });
     }
@@ -7360,11 +7390,11 @@ function renderBultosGrupo(idGrupo, numeroPedido, maquinaCodigo, datosPorReferen
 
 // Bultos/pesajes/residuos de CADA referencia del grupo, ya con el color que le toca a cada una
 // (mismo indice que las tarjetas de la pagina del pedido, ver colorReferenciaGrupo).
-async function obtenerBultosGrupo(p, miembros) {
+async function obtenerBultosGrupo(p, miembros, esSup = false) {
   const datos = [];
   for (let i = 0; i < miembros.length; i++) {
     const m = miembros[i];
-    const { bultos, pesajesPorBulto, residuosPorBulto } = await obtenerBultosYPesajes(p, m.IdOrden);
+    const { bultos, pesajesPorBulto, residuosPorBulto } = await obtenerBultosYPesajes(p, m.IdOrden, esSup);
     datos.push({
       idOrden: m.IdOrden, referencia: m.Referencia, nombre: m.Nombre || '', color: colorReferenciaGrupo(i),
       bultos, pesajesPorBulto, residuosPorBulto
@@ -7471,7 +7501,7 @@ app.get('/selladora/:codigo/grupo/:idGrupo/bultos', requireLogin, async (req, re
     if (miembros.length === 0) {
       return res.status(404).send(renderErrorSimple('Grupo no encontrado.', `/selladora/${codigo}`));
     }
-    const datosPorReferencia = await obtenerBultosGrupo(p, miembros);
+    const datosPorReferencia = await obtenerBultosGrupo(p, miembros, esSupervisor(req.session.usuario));
     res.send(renderBultosGrupo(idGrupo, miembros[0].NumeroPedido, codigo, datosPorReferencia, req.session.usuario.nombre));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}/grupo/${idGrupo}`));
@@ -7485,7 +7515,7 @@ app.get('/selladora/:codigo/grupo/:idGrupo/bultos/fragmento', requireLogin, asyn
   try {
     const p = await getPool();
     const miembros = await obtenerMiembrosGrupoSellado(p, idGrupo);
-    const datosPorReferencia = await obtenerBultosGrupo(p, miembros);
+    const datosPorReferencia = await obtenerBultosGrupo(p, miembros, esSupervisor(req.session.usuario));
     res.send(renderTarjetasBultosGrupo(datosPorReferencia));
   } catch (err) {
     res.status(500).send('Error: ' + err.message);
@@ -7643,7 +7673,7 @@ const OFFSET_RESIDUO_POR_TIPO = { 1000: 'Retal', 2000: 'Refilado', 3000: 'Troque
 // compartida entre la pagina completa de /bultos y su /bultos/fragmento (el polling de
 // scriptActualizarBultos pide solo el fragmento, para no reconstruir cabecera/estilos en cada
 // actualizacion).
-async function obtenerBultosYPesajes(p, idOrden) {
+async function obtenerBultosYPesajes(p, idOrden, esSup = false) {
   // FIX 08/09/2026 (traslado de paquetes entre bultos, ver sp_SEL_TrasladarPaquete): un bulto que
   // queda sin ningun paquete tras un traslado se marca 'Anulado' (nunca se borra, queda de
   // auditoria) -- se excluye aca para que no aparezca como una tarjeta vacia mas en la pagina.
@@ -7657,13 +7687,22 @@ async function obtenerBultosYPesajes(p, idOrden) {
            CASE WHEN b.id = (SELECT MIN(b2.id) FROM SEL_Bultos b2
                              INNER JOIN SEL_EjecucionOrden e2 ON e2.IdEjecucion = b2.id_ejecucion
                              WHERE e2.IdOrden = @idOrden) THEN 1 ELSE 0 END AS EsAncla,
-           ISNULL((SELECT TOP 1 CAST(pv.Validado AS INT) FROM PRDProduccion pv WHERE pv.Detalle = b.serialPadre), 0) AS Validado
+           ISNULL((SELECT TOP 1 CAST(pv.Validado AS INT) FROM PRDProduccion pv WHERE pv.Detalle = b.serialPadre), 0) AS Validado,
+           -- 01/10/2026: botón "Reabrir" -- último cerrado de una ejecución Activa y el abierto siguiente sin paquetes.
+           CASE WHEN b.estado = 'Cerrado' AND ej.Estado = 'Activa'
+                 AND NOT EXISTS (SELECT 1 FROM SEL_Bultos bc WHERE bc.id_ejecucion = b.id_ejecucion AND bc.id > b.id AND bc.estado = 'Cerrado')
+                 AND NOT EXISTS (SELECT 1 FROM SEL_Bultos ba INNER JOIN SEL_PesajeElemento pa ON pa.id_bulto = ba.id
+                                 WHERE ba.id_ejecucion = b.id_ejecucion AND ba.id > b.id AND ba.estado IN ('Temporal', 'Activo'))
+                THEN 1 ELSE 0 END AS ReabribleSql
     FROM SEL_Bultos b
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
     WHERE ej.IdOrden = @idOrden AND b.estado <> 'Anulado'
     ORDER BY b.id ASC -- FIX 23/09/2026: num_bulto se reinicia por dia, el orden real es por id
   `);
-  const bultos = bultosResult.recordset.map((b, idx) => ({ ...b, numRelativo: idx + 1 }));
+  const bultos = bultosResult.recordset.map((b, idx) => ({
+    ...b, numRelativo: idx + 1,
+    PuedeReabrir: esSup && Number(b.ReabribleSql) === 1 && Number(b.Validado) !== 1 ? 1 : 0
+  }));
 
   let pesajesPorBulto = new Map();
   let residuosPorBulto = new Map();
@@ -7794,7 +7833,7 @@ app.get('/selladora/:codigo/orden/:idOrden/bultos', requireLogin, async (req, re
     }
     const orden = ordenResult.recordset[0];
 
-    const { bultos, pesajesPorBulto, residuosPorBulto } = await obtenerBultosYPesajes(p, idOrden);
+    const { bultos, pesajesPorBulto, residuosPorBulto } = await obtenerBultosYPesajes(p, idOrden, esSupervisor(req.session.usuario));
 
     res.send(renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, req.session.usuario.nombre, codigo));
   } catch (err) {
@@ -7809,7 +7848,7 @@ app.get('/selladora/:codigo/orden/:idOrden/bultos/fragmento', requireLogin, asyn
   const { idOrden } = req.params;
   try {
     const p = await getPool();
-    const { bultos, pesajesPorBulto, residuosPorBulto } = await obtenerBultosYPesajes(p, idOrden);
+    const { bultos, pesajesPorBulto, residuosPorBulto } = await obtenerBultosYPesajes(p, idOrden, esSupervisor(req.session.usuario));
     res.send(renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto));
   } catch (err) {
     res.status(500).send('Error: ' + err.message);
@@ -7832,6 +7871,7 @@ app.post('/api/selladora/paquete/trasladar', requireLogin, async (req, res) => {
     const result = await p.request()
       .input('idPaquete', idPaquete)
       .input('idBultoDestino', idBultoDestino)
+      .input('Usuario', req.session.usuario ? req.session.usuario.codigo : null)
       .execute('sp_SEL_TrasladarPaquete');
     const fila = result.recordset && result.recordset[0];
     if (!fila) {
@@ -7846,6 +7886,26 @@ app.post('/api/selladora/paquete/trasladar', requireLogin, async (req, res) => {
       pesoGr: Number(fila.PesoGr),
       idBultoOrigen: fila.IdBultoOrigen
     });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// 01/10/2026 (regla 1 de CASOS_USO_HORAS_BULTO_Y_TRASLADOS_01102026.md): reabrir un bulto cerrado por
+// error. Solo supervisor. Todo el trabajo y las validaciones (último cerrado, orden en curso, bulto
+// siguiente sin paquetes, sin validar/residuos/remisión) viven en dbo.sp_SEL_ReabrirBulto.
+app.post('/api/selladora/bulto/reabrir', requireLogin, async (req, res) => {
+  const idBulto = Number(req.body && req.body.idBulto);
+  if (!Number.isFinite(idBulto) || idBulto <= 0) return res.json({ ok: false, error: 'Falta el bulto.' });
+  if (!esSupervisor(req.session.usuario)) return res.json({ ok: false, error: 'Solo un supervisor puede reabrir un bulto.' });
+  try {
+    const p = await getPool();
+    const result = await p.request()
+      .input('IdBulto', idBulto)
+      .input('Usuario', req.session.usuario.codigo)
+      .execute('sp_SEL_ReabrirBulto');
+    const fila = result.recordset && result.recordset[0];
+    res.json({ ok: true, serial: fila ? fila.Serial : null, idBultoEliminado: fila ? fila.IdBultoEliminado : null });
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
