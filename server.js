@@ -8055,7 +8055,8 @@ app.post('/api/selladora/paquete/repesar', requireLogin, async (req, res) => {
     const p = await getPool();
     const dtPaquete = await p.request().input('idPaquete', idPaquete).query(`
       SELECT TOP 1 pe.id_paquete, pe.id_bulto, pe.ConsecutivoPaquete, pe.PesoPaqueGr,
-             b.estado AS EstadoBulto, b.serialPadre, b.CantidadTotal, ord.Estado AS EstadoOrden
+             b.estado AS EstadoBulto, b.serialPadre, b.CantidadTotal, ord.Estado AS EstadoOrden,
+             ISNULL((SELECT TOP 1 CAST(pv.Validado AS INT) FROM PRDProduccion pv WHERE pv.Detalle = b.serialPadre), 0) AS Validado
       FROM SEL_PesajeElemento pe
       LEFT JOIN SEL_Bultos b ON b.id = pe.id_bulto
       LEFT JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
@@ -8067,6 +8068,15 @@ app.post('/api/selladora/paquete/repesar', requireLogin, async (req, res) => {
     }
     const paq = dtPaquete.recordset[0];
     const pesoAnterior = Number(paq.PesoPaqueGr);
+
+    // 01/10/2026 (a pedido del usuario): con el bulto ya VALIDADO, repesar recalculaba PRDProduccion
+    // con la suma de la gramera y pisaba el peso validado de la báscula (y su prorrateo) -- se bloquea.
+    if (Number(paq.Validado) === 1) {
+      return res.json({
+        ok: false,
+        error: 'Este bulto ya fue validado por el digitador con el peso de la báscula. No se puede volver a pesar un paquete suyo.'
+      });
+    }
 
     // Tope: 'Finalizada' es el estado que deja "Cerrar Definitivo" del escritorio -- ahi ya se
     // calculo la Merma del proceso (frmValidacionSelladora.vb) a partir de estos mismos pesos.
@@ -8182,7 +8192,8 @@ app.post('/api/selladora/paquete/modificar-cantidad', requireLogin, async (req, 
     const p = await getPool();
     const dtPaquete = await p.request().input('idPaquete', idPaquete).query(`
       SELECT TOP 1 pe.id_paquete, pe.id_bulto, pe.ConsecutivoPaquete, ISNULL(pe.UnidadesPaquete, 100) AS UnidadesPaquete,
-             b.estado AS EstadoBulto, b.serialPadre, b.CantidadTotal, ord.Estado AS EstadoOrden
+             b.estado AS EstadoBulto, b.serialPadre, b.CantidadTotal, ord.Estado AS EstadoOrden,
+             ISNULL((SELECT TOP 1 CAST(pv.Validado AS INT) FROM PRDProduccion pv WHERE pv.Detalle = b.serialPadre), 0) AS Validado
       FROM SEL_PesajeElemento pe
       LEFT JOIN SEL_Bultos b ON b.id = pe.id_bulto
       LEFT JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
@@ -8194,6 +8205,16 @@ app.post('/api/selladora/paquete/modificar-cantidad', requireLogin, async (req, 
     }
     const paq = dtPaquete.recordset[0];
     const unidadesAnterior = Number(paq.UnidadesPaquete);
+
+    // 01/10/2026 (a pedido del usuario): con el bulto ya VALIDADO el digitador repartió el peso de la
+    // báscula por las unidades de cada paquete (prorrateo, frmValidacionSelladora). Cambiar las unidades
+    // después descuadraría ese reparto y la producción -- se bloquea.
+    if (Number(paq.Validado) === 1) {
+      return res.json({
+        ok: false,
+        error: 'Este bulto ya fue validado por el digitador (peso de báscula repartido por las unidades de cada paquete). No se pueden cambiar las bolsas de sus paquetes.'
+      });
+    }
 
     // Mismo tope que "Volver a pesar" -- ver esa nota arriba (merma ya calculada por el digitador).
     if (paq.EstadoOrden === 'Finalizada') {
