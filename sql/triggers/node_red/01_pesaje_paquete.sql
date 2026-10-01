@@ -69,10 +69,13 @@ VALUES (@peso, @IdBulto, @NuevoConsecutivo, GETDATE(), @golpes, @potencia, @Deta
 
 -- SELECT final -- igual que antes, con UnidadesPaquete agregado por si el PLC/Node-RED lo quiere
 -- mostrar o loguear.
+-- 01/10/2026: SerialHijo se lee de SEL_PesajeElemento (no de @Resultado): si el primer paquete llegó
+-- después del umbral, trg_SEL_PesajeElemento_ActualizarBulto re-estampó el bulto y su serial, y
+-- @Resultado trae el serial de antes del trigger.
 SELECT
     b.SerialPadre,
     r.ConsecutivoPaquete AS number_paqu,
-    r.Detalle AS SerialHijo,
+    pe.Detalle AS SerialHijo,
     i.referencia,
     b.numeroPedido,
     r.PesoPaqueGr AS PesoPesaje,
@@ -81,5 +84,6 @@ SELECT
     r.Potencia,
     r.UnidadesPaquete
 FROM @Resultado r
+INNER JOIN SEL_PesajeElemento AS pe ON pe.id_paquete = r.id_paquete
 INNER JOIN SEL_Bultos AS b ON b.id = r.id_bulto
 INNER JOIN invelementos AS i ON i.codigo = b.refsalida;
