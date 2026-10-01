@@ -195,9 +195,10 @@ let SQL_SIM_PESAJE = null, SQL_SIM_CIERRE = null, SQL_SIM_RESIDUO = null;
 if (ES_PRUEBAS) {
   try {
     SQL_SIM_PESAJE = cargarSqlSimulador('01_pesaje_paquete.sql');
-    // 02 trae el prefijo carlixplast.dbo (BD de produccion): en pruebas debe correr contra
-    // ESTA base, asi que se quita el calificador y corre sin prefijo.
-    SQL_SIM_CIERRE = cargarSqlSimulador('02_cierre_bulto.sql').replace(/carlixplast\.dbo\./gi, '');
+    // 02 sin calificador de base (revisión Iván 01/10/2026): corre contra la base de ESTA
+    // conexión. Antes de pegar el 02 en el nodo de Node-RED de producción, confirmar con
+    // Carlos que esa conexión apunta a carlixplast (si no, cerrarían bultos en otra base).
+    SQL_SIM_CIERRE = cargarSqlSimulador('02_cierre_bulto.sql');
     // 03 trae DECLARE de ejemplo para sus 3 parametros (@IdBulto/@TipoResiduo/
     // @Cantidad): se quitan, los pone el endpoint. @GeneradoPor NO se toca: es
     // variable interna que el propio SQL calcula en el PASO 1b.
@@ -6216,6 +6217,9 @@ app.post('/admin/tablet-fija/quitar', requireLogin, requireAdmin, async (req, re
 
 // Rastro de las acciones del simulador (reglas de tarjetas: rastro en SISMovimientos).
 // Solo inserta si la tabla existe; nunca tumba la accion simulada si el rastro falla.
+// Usuario NULL a propósito (revisión Iván 01/10/2026): SISMovimientos.Usuario es INT y el
+// codigo de sesión es varchar ('ADMIN') — Number('ADMIN') es NaN y el resto del Node guarda
+// NULL por el mismo camino (corregirTurnoOT, CAMBIO_OT, PAUSA). El usuario va en Motivo.
 async function trazaSimulador(p, usuario, subtipo, motivo, resumen) {
   try {
     await p.request()

@@ -12,7 +12,7 @@ Si el archivo trae un `DECLARE` de un parámetro, se quita al pegarlo. Pedido de
 | Archivo | Nodo de Node-RED | Cuándo corre | Parámetros | Versión |
 |---|---|---|---|---|
 | `01_pesaje_paquete.sql` | Pesaje de paquete | Cada paquete que pesa la báscula | `@maquina`, `@peso`, `@golpes`, `@potencia` | 21/09/2026 (unidades por paquete de la referencia, Cat. 18) |
-| `02_cierre_bulto.sql` | Cierre de bulto (**dos nodos**: automático y botón "📦 Cierre bulto") | Al completar los paquetes del bulto y con el botón de la tableta (`/api/comando` → `cierre_bulto`) | `@MiMaquina` | **28/09/2026: `HoraFin = GETDATE()`** (antes `@HoraPLC`); Golpes/Potencia = promedio de paquetes |
+| `02_cierre_bulto.sql` | Cierre de bulto (**dos nodos**: automático y botón "📦 Cierre bulto") | Al completar los paquetes del bulto y con el botón de la tableta (`/api/comando` → `cierre_bulto`) | `@MiMaquina` | **28/09/2026: `HoraFin = GETDATE()`** (antes `@HoraPLC`); Golpes/Potencia = promedio de paquetes. **30/09: sin `carlixplast.dbo.`** — corre contra la BD de la conexión. **Antes de pegarlo en producción, confirmar con Carlos que esa conexión apunta a `carlixplast`**: con otra BD por defecto cerraría bultos ajenos (revisión Iván 01/10/2026) |
 | `03_residuo_insertar.sql` | Insertar residuo | Retal / Troquelado / No conforme **con cantidad** | `@IdBulto`, `@TipoResiduo`, `@Cantidad` | 30/09/2026 (GeneradoPor y operario desde el operario activo de la máquina; antes 0) |
 | `04_residuo_marcar_pendiente.sql` | Marcar residuo pendiente | Retal / Troquelado / No conforme **sin cantidad** (la confirma el digitador) | `@maquina`, `@tipoResiduo` | 01/09/2026 |
 | `CAMBIO_CIERRE_BULTO_HORAFIN_28092026.md` | — | Instrucciones para Carlos del cambio del 28/09 en el cierre | — | 28/09/2026 |
