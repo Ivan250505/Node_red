@@ -5315,6 +5315,8 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto, opcione
         <div><span class="label">Potencia (W)</span><span class="valor">${b.Potencia ?? '—'}</span></div>
         <div><span class="label">Hora final</span><span class="valor">${b.HoraFin ?? '—'}</span></div>
         <div><span class="label">Golpes x minuto</span><span class="valor">${b.Golpes ?? '—'}</span></div>
+        <div><span class="label">Tiempo productivo (h)</span><span class="valor">${b.HorasProductivas != null ? Number(b.HorasProductivas).toFixed(2) : '—'}</span></div>
+        <div><span class="label">Consumo potencia (kWh)</span><span class="valor">${b.ConsumoKWh != null ? Number(b.ConsumoKWh).toFixed(3) : '—'}</span></div>
         <div class="full"><span class="label">Serial</span><span class="valor serial">${b.serialPadre ?? '—'}</span></div>
       </div>
       <details class="pesajes-box" data-bulto="${b.id}">
@@ -7693,9 +7695,32 @@ async function obtenerBultosYPesajes(p, idOrden, esSup = false) {
                  AND NOT EXISTS (SELECT 1 FROM SEL_Bultos bc WHERE bc.id_ejecucion = b.id_ejecucion AND bc.id > b.id AND bc.estado = 'Cerrado')
                  AND NOT EXISTS (SELECT 1 FROM SEL_Bultos ba INNER JOIN SEL_PesajeElemento pa ON pa.id_bulto = ba.id
                                  WHERE ba.id_ejecucion = b.id_ejecucion AND ba.id > b.id AND ba.estado IN ('Temporal', 'Activo'))
-                THEN 1 ELSE 0 END AS ReabribleSql
+                THEN 1 ELSE 0 END AS ReabribleSql,
+           -- 01/10/2026: consumo de potencia del bulto = tiempo productivo (h) x potencia promedio de sus
+           -- paquetes. Tiempo productivo = HoraInicio..HoraFin (el bulto abierto, hasta ahora) menos los
+           -- tiempos muertos de la MÁQUINA que se cruzan con ese rango (misma regla de la planilla: por
+           -- máquina, sin importar la OT). Potencia en W -> /1000 = kWh.
+           tp.HorasProductivas,
+           CASE WHEN pp.PotenciaProm IS NULL OR tp.HorasProductivas IS NULL THEN NULL
+                ELSE tp.HorasProductivas * pp.PotenciaProm / 1000.0 END AS ConsumoKWh
     FROM SEL_Bultos b
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+    OUTER APPLY (SELECT AVG(CAST(pe.Potencia AS FLOAT)) AS PotenciaProm
+                 FROM SEL_PesajeElemento pe WHERE pe.id_bulto = b.id) pp
+    OUTER APPLY (SELECT ISNULL(SUM(DATEDIFF(SECOND,
+                           CASE WHEN tm.HoraInicio > b.HoraInicio THEN tm.HoraInicio ELSE b.HoraInicio END,
+                           CASE WHEN ISNULL(tm.HoraFin, GETDATE()) < ISNULL(b.HoraFin, GETDATE())
+                                THEN ISNULL(tm.HoraFin, GETDATE()) ELSE ISNULL(b.HoraFin, GETDATE()) END)), 0) AS SegMuertos
+                 FROM SEL_TiempoMuerto tm
+                 INNER JOIN SEL_EjecucionOrden ejm ON ejm.IdEjecucion = tm.id_ejecucion
+                 INNER JOIN SEL_OrdenProduccion om ON om.IdOrden = ejm.IdOrden
+                 WHERE om.Maquina = b.id_maquina
+                   AND tm.HoraInicio < ISNULL(b.HoraFin, GETDATE())
+                   AND ISNULL(tm.HoraFin, GETDATE()) > b.HoraInicio) tmb
+    OUTER APPLY (SELECT CASE WHEN b.HoraInicio IS NULL THEN NULL
+                             ELSE CASE WHEN DATEDIFF(SECOND, b.HoraInicio, ISNULL(b.HoraFin, GETDATE())) - tmb.SegMuertos > 0
+                                       THEN (DATEDIFF(SECOND, b.HoraInicio, ISNULL(b.HoraFin, GETDATE())) - tmb.SegMuertos) / 3600.0
+                                       ELSE 0 END END AS HorasProductivas) tp
     WHERE ej.IdOrden = @idOrden AND b.estado <> 'Anulado'
     ORDER BY b.id ASC -- FIX 23/09/2026: num_bulto se reinicia por dia, el orden real es por id
   `);
