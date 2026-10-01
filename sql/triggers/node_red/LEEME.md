@@ -11,11 +11,30 @@ Si el archivo trae un `DECLARE` de un parámetro, se quita al pegarlo. Pedido de
 
 | Archivo | Nodo de Node-RED | Cuándo corre | Parámetros | Versión |
 |---|---|---|---|---|
-| `01_pesaje_paquete.sql` | Pesaje de paquete | Cada paquete que pesa la báscula | `@maquina`, `@peso`, `@golpes`, `@potencia` | 21/09/2026 (unidades por paquete de la referencia, Cat. 18) |
+| `01_pesaje_paquete.sql` | Pesaje de paquete | Cada paquete que pesa la báscula | `@maquina`, `@peso`, `@golpes`, `@potencia` | **01/10/2026: límite de 99 paquetes (columnas `Resultado`/`Mensaje`, ver abajo)** y serial leído después del umbral. 21/09: unidades por paquete (Cat. 18) |
 | `02_cierre_bulto.sql` | Cierre de bulto (**dos nodos**: automático y botón "📦 Cierre bulto") | Al completar los paquetes del bulto y con el botón de la tableta (`/api/comando` → `cierre_bulto`) | `@MiMaquina` | **28/09/2026: `HoraFin = GETDATE()`** (antes `@HoraPLC`); Golpes/Potencia = promedio de paquetes. **30/09: sin `carlixplast.dbo.`** — corre contra la BD de la conexión. **Antes de pegarlo en producción, confirmar con Carlos que esa conexión apunta a `carlixplast`**: con otra BD por defecto cerraría bultos ajenos (revisión Iván 01/10/2026) |
 | `03_residuo_insertar.sql` | Insertar residuo | Retal / Troquelado / No conforme **con cantidad** | `@IdBulto`, `@TipoResiduo`, `@Cantidad` | 30/09/2026 (GeneradoPor y operario desde el operario activo de la máquina; antes 0) |
 | `04_residuo_marcar_pendiente.sql` | Marcar residuo pendiente | Retal / Troquelado / No conforme **sin cantidad** (la confirma el digitador) | `@maquina`, `@tipoResiduo` | 01/09/2026 |
 | `CAMBIO_CIERRE_BULTO_HORAFIN_28092026.md` | — | Instrucciones para Carlos del cambio del 28/09 en el cierre | — | 28/09/2026 |
+
+## Límite de 99 paquetes (01/10/2026) — cambio para Carlos en el nodo de pesaje
+
+El consecutivo del paquete va en las posiciones 5-6 del serial: el máximo es **99**. Con el paquete
+100 el serial salía dañado (`20260*0930...`). Ahora `01_pesaje_paquete.sql` devuelve dos columnas
+más al final: `Resultado` y `Mensaje`.
+
+- `Resultado = 'OK'`: todo igual que antes (imprimir la etiqueta con `SerialHijo`).
+- `Resultado = 'LIMITE_PAQUETES'`: el paquete **no se guardó** y `SerialHijo` viene NULL.
+  1. **No imprimir** la etiqueta.
+  2. Avisar al Node con un nodo *http request*:
+     `POST http://localhost:<puerto del Node>/api/selladora/aviso-pesaje`, JSON:
+     `{ "maquina": @maquina, "resultado": msg.Resultado, "mensaje": msg.Mensaje, "peso": @peso, "serialPadre": msg.SerialPadre }`.
+     Desde el mismo servidor no pide clave. Desde otro equipo: header `x-aviso-token` con el valor de
+     `AVISO_PESAJE_TOKEN` del `.env` del Node.
+  3. La tableta de esa máquina muestra la alerta en pocos segundos. El operario cierra el bulto y
+     vuelve a pesar el paquete.
+
+El endpoint es genérico (`resultado`/`mensaje` libres): sirve para otros avisos del pesaje más adelante.
 
 ## ¿Y "abrir bulto"?
 

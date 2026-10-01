@@ -1081,6 +1081,7 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(null)}</script>
+  <script>${scriptAvisoPesaje(null)}</script>
   ${error ? `<script>Swal.fire({ icon: 'error', title: 'Error', text: ${jsString(error)}, confirmButtonColor: '#71bf44' });</script>` : ''}
 </body>
 </html>`;
@@ -1762,6 +1763,46 @@ function scriptAvisoSuspension(maquinaCodigo) {
         } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
       }
 
+      revisar();
+      setInterval(revisar, 5000);
+    })();
+  `;
+}
+
+// Aviso del pesaje (01/10/2026): Node-RED avisa por POST /api/selladora/aviso-pesaje cuando un
+// paquete no se pudo registrar (hoy: LIMITE_PAQUETES, el bulto llegó al paquete #99). La tableta de
+// esa máquina sondea cada 5 s y muestra una alerta que el operario tiene que aceptar; al aceptarla
+// se borra para todas las tabletas de la máquina. Sin máquina (Dashboard) no sondea.
+function scriptAvisoPesaje(maquinaCodigo) {
+  if (!maquinaCodigo) return '';
+  return `
+    (function() {
+      var MAQUINA = ${jsString(maquinaCodigo)};
+      var mostrando = false;
+      function revisar() {
+        if (mostrando) return;
+        fetch('/api/selladora/' + encodeURIComponent(MAQUINA) + '/aviso-pesaje')
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (!data || !data.ok || !data.aviso || mostrando) return;
+            var a = data.aviso;
+            mostrando = true;
+            Swal.fire({
+              icon: 'warning',
+              title: a.resultado === 'LIMITE_PAQUETES' ? 'Límite de paquetes del bulto' : 'Aviso del pesaje',
+              text: (a.mensaje || '') + (a.peso != null ? ' (Peso no registrado: ' + a.peso + ' g)' : ''),
+              allowOutsideClick: false,
+              confirmButtonText: 'Entendido',
+              confirmButtonColor: '#c0392b'
+            }).then(function() {
+              fetch('/api/selladora/' + encodeURIComponent(MAQUINA) + '/aviso-pesaje/visto', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: a.id })
+              }).catch(function() {}).then(function() { mostrando = false; });
+            });
+          })
+          .catch(function() {});
+      }
       revisar();
       setInterval(revisar, 5000);
     })();
@@ -4574,6 +4615,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
@@ -4666,6 +4708,7 @@ function renderTabletFija(usuario, maquinas, maquinaActual, error) {
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(null)}</script>
+  <script>${scriptAvisoPesaje(null)}</script>
   ${error ? `<script>Swal.fire({ icon: 'error', title: 'Error', text: ${jsString(error)}, confirmButtonColor: '#71bf44' });</script>` : ''}
 </body>
 </html>`;
@@ -5084,6 +5127,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
   <script>${scriptProtocoloArranque(maquinaCodigo)}</script>
@@ -5865,6 +5909,7 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, usu
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptReimprimir(orden.IdOrden, maquinaCodigo)}</script>
   <script>${scriptTraslado(orden.IdOrden, maquinaCodigo)}</script>
   <script>${scriptBultosVacios()}</script>
@@ -6503,6 +6548,15 @@ app.post('/admin/simulador-plc/paquete', requireLogin, requireAdmin, exigirSimul
       .input('golpes', golpes).input('potencia', potencia)
       .query(SQL_SIM_PESAJE);
     const fila = dt.recordset && dt.recordset[0];
+    // 01/10/2026: igual que Node-RED -- con Resultado distinto de 'OK' no hay etiqueta y se avisa
+    // a la tableta de la máquina (mismo aviso que manda POST /api/selladora/aviso-pesaje).
+    if (fila && fila.Resultado && fila.Resultado !== 'OK') {
+      avisosPesaje.set(String(maquina), {
+        id: siguienteIdAvisoPesaje++, resultado: fila.Resultado, mensaje: fila.Mensaje || '',
+        peso, serialPadre: fila.SerialPadre || null, fecha: new Date().toISOString()
+      });
+      return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent(fila.Resultado + ': ' + (fila.Mensaje || '')));
+    }
     const resumen = fila
       ? `Paquete #${fila.number_paqu} (serial ${fila.SerialHijo}) en bulto ${fila.SerialPadre || ''}.`
       : 'Paquete registrado.';
@@ -7272,6 +7326,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptAjusteConsumo()}</script>
@@ -7377,6 +7432,7 @@ function renderBultosGrupo(idGrupo, numeroPedido, maquinaCodigo, datosPorReferen
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <!-- El idOrden que reciben estos dos es solo el de respaldo: cada tarjeta de bulto y cada
        seccion de traslado traen el IdOrden de SU referencia, y ese es el que se usa. -->
   <script>${scriptReimprimir(datosPorReferencia[0] ? datosPorReferencia[0].idOrden : 0, maquinaCodigo)}</script>
@@ -7937,6 +7993,52 @@ app.post('/api/selladora/bulto/reabrir', requireLogin, async (req, res) => {
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
+});
+
+// Avisos del pesaje (01/10/2026). Los manda Node-RED cuando 01_pesaje_paquete.sql devuelve un
+// Resultado distinto de 'OK' (hoy LIMITE_PAQUETES: el bulto llegó al paquete #99 y el paquete NO se
+// guardó). Se guardan en memoria, uno por máquina (el último manda): es una alerta para el operario,
+// no un registro -- si el Node se reinicia se pierde, y el siguiente pesaje rechazado la vuelve a mandar.
+// Sin sesión (lo llama Node-RED): solo desde el mismo servidor, o con el header x-aviso-token igual a
+// AVISO_PESAJE_TOKEN del .env.
+const avisosPesaje = new Map();
+let siguienteIdAvisoPesaje = 1;
+
+function esLlamadaLocal(req) {
+  const ip = (req.socket && req.socket.remoteAddress) || '';
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+
+app.post('/api/selladora/aviso-pesaje', (req, res) => {
+  const token = process.env.AVISO_PESAJE_TOKEN;
+  if (!esLlamadaLocal(req) && !(token && req.get('x-aviso-token') === token)) {
+    return res.status(403).json({ ok: false, error: 'No autorizado.' });
+  }
+  const b = req.body || {};
+  const maquina = String(b.maquina == null ? '' : b.maquina).trim();
+  if (!maquina) return res.status(400).json({ ok: false, error: 'Falta la máquina.' });
+  const aviso = {
+    id: siguienteIdAvisoPesaje++,
+    resultado: String(b.resultado || 'AVISO'),
+    mensaje: String(b.mensaje || ''),
+    peso: b.peso != null && b.peso !== '' && Number.isFinite(Number(b.peso)) ? Number(b.peso) : null,
+    serialPadre: b.serialPadre ? String(b.serialPadre) : null,
+    fecha: new Date().toISOString()
+  };
+  avisosPesaje.set(maquina, aviso);
+  console.log('Aviso de pesaje maq=%s %s: %s', maquina, aviso.resultado, aviso.mensaje);
+  res.json({ ok: true, id: aviso.id });
+});
+
+app.get('/api/selladora/:codigo/aviso-pesaje', requireLogin, (req, res) => {
+  res.json({ ok: true, aviso: avisosPesaje.get(String(req.params.codigo)) || null });
+});
+
+app.post('/api/selladora/:codigo/aviso-pesaje/visto', requireLogin, (req, res) => {
+  const codigo = String(req.params.codigo);
+  const a = avisosPesaje.get(codigo);
+  if (a && Number(req.body && req.body.id) === a.id) avisosPesaje.delete(codigo);
+  res.json({ ok: true });
 });
 
 // 30/09/2026 (a pedido del usuario): eliminar un bulto que quedó VACÍO por un error del operario
