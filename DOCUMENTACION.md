@@ -338,13 +338,18 @@ Detalles que conviene saber antes de tocarlo:
   operario concreto), el cambio es sustituir `leerNotificaciones`/`guardarNotificaciones` por un par
   de endpoints contra una tabla — el resto del panel no se entera.
 
-## 14. Simulador de PLC (tarjeta #2, 30/09/2026)
+## 14. Simulador de PLC (tarjeta #2, 30/09/2026; sprint 2: botones en la orden)
 
 `/admin/simulador-plc`: botones que ejecutan el SQL canónico de `sql/triggers/node_red/`
-(01 pesar, 02 cerrar, 03 residuo) para probar sin PLC. Solo existe con BD de pruebas
-(`ES_PRUEBAS`, `DB_DATABASE` con "prueba") + admin; con producción las rutas devuelven 404.
-Cada acción deja rastro `SIMULADOR_PLC/*` en `SISMovimientos`. Notas:
+(01 pesar, 02 cerrar, 03 residuo con cantidad, 04 residuo pendiente sin cantidad) para probar
+sin PLC. Solo existe con BD de pruebas (`ES_PRUEBAS`, `DB_DATABASE` con "prueba") + admin;
+con producción las rutas devuelven 404. Cada acción deja rastro `SIMULADOR_PLC/*` en
+`SISMovimientos` con `Usuario` = `generadoPor` de la sesión (Tercero numérico; el código
+`ADMIN` es texto y no cabe en esa columna INT) y el login en `Motivo`. Notas:
 
+- Sprint 2: cada tarjeta de referencia Activa (página de orden y de grupo) trae su bloque
+  compacto con los 4 botones, sobre los bultos de ESA referencia, y vuelve a la misma página.
+  La cola se actualiza sola por sondeo.
 - El SQL se carga **una sola vez al arrancar**: si se edita un `.sql` de `node_red/`,
   hay que reiniciar el Node para que el simulador use la versión nueva.
 - El botón de cierre ejecuta el 02 tal cual: cierra TODOS los Activo/Temporal de la

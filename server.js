@@ -191,7 +191,7 @@ const path = require('path');
 function cargarSqlSimulador(nombre) {
   return fs.readFileSync(path.join(__dirname, 'sql', 'triggers', 'node_red', nombre), 'utf8');
 }
-let SQL_SIM_PESAJE = null, SQL_SIM_CIERRE = null, SQL_SIM_RESIDUO = null;
+let SQL_SIM_PESAJE = null, SQL_SIM_CIERRE = null, SQL_SIM_RESIDUO = null, SQL_SIM_PENDIENTE = null;
 if (ES_PRUEBAS) {
   try {
     SQL_SIM_PESAJE = cargarSqlSimulador('01_pesaje_paquete.sql');
@@ -206,7 +206,9 @@ if (ES_PRUEBAS) {
       .replace(/DECLARE\s+@IdBulto\s+INT\s*=\s*[^;]+;/i, '')
       .replace(/DECLARE\s+@TipoResiduo\s+INT\s*=\s*[^;]+;/i, '')
       .replace(/DECLARE\s+@Cantidad\s+[^;]+;/i, '');
-    console.log('Simulador PLC activo (BD de pruebas): SQL canonico 01/02/03 cargado.');
+    // 04 no trae DECLARE de ejemplo: @maquina/@tipoResiduo los pone el endpoint.
+    SQL_SIM_PENDIENTE = cargarSqlSimulador('04_residuo_marcar_pendiente.sql');
+    console.log('Simulador PLC activo (BD de pruebas): SQL canonico 01/02/03/04 cargado.');
   } catch (err) {
     console.error('Simulador PLC: no se pudo cargar el SQL canonico:', err.message);
   }
@@ -4852,7 +4854,7 @@ function seccionOrdenTrabajo(otInfo, esSup) {
     </script>` : ''}`;
 }
 
-function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, ordenProduccion, esSup, otInfo) {
+function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, ordenProduccion, esSup, otInfo, simBloque = '') {
   // Sellado en paralelo (ver DISENO_SELLADO_PARALELO_08092026.md): si esta orden comparte máquina
   // con otras (mismo rollo, hasta 3 referencias de salida distintas), grupoSellado trae TODAS las
   // referencias del grupo (incluida esta misma) -- solo se usa para saber si hay que ocultar
@@ -5056,6 +5058,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     </div>
     ${pesoBox}
     ${imprimirYAccionesBox}
+    ${simBloque}
     <div class="islas-fila">
       <div class="isla isla-con-boton">
         <div class="isla-texto">
@@ -6300,16 +6303,19 @@ app.post('/admin/tablet-fija/quitar', requireLogin, requireAdmin, async (req, re
 
 // Rastro de las acciones del simulador (reglas de tarjetas: rastro en SISMovimientos).
 // Solo inserta si la tabla existe; nunca tumba la accion simulada si el rastro falla.
-// Usuario NULL a propósito (revisión Iván 01/10/2026): SISMovimientos.Usuario es INT y el
-// codigo de sesión es varchar ('ADMIN') — Number('ADMIN') es NaN y el resto del Node guarda
-// NULL por el mismo camino (corregirTurnoOT, CAMBIO_OT, PAUSA). El usuario va en Motivo.
+// Usuario numérico de sesión para el rastro (revisión sprint 2): SISMovimientos.Usuario
+// es INT y el codigo de sesión es varchar ('ADMIN') — Number('ADMIN') es NaN y el resto del
+// Node guarda NULL por el mismo camino. Se usa session.usuario.generadoPor (SISUsuarios.Tercero,
+// int, el mismo que el escritorio guarda como usuario en Producción/Inventario); si no hay,
+// NULL. El codigo/login sigue yendo en Motivo.
 async function trazaSimulador(p, usuario, subtipo, motivo, resumen) {
+  const nUsuario = usuario && Number.isInteger(Number(usuario.generadoPor)) ? Number(usuario.generadoPor) : null;
   try {
     await p.request()
-      .input('subtipo', subtipo).input('motivo', motivo).input('resumen', resumen)
+      .input('usuario', nUsuario).input('subtipo', subtipo).input('motivo', motivo).input('resumen', resumen)
       .query(`IF OBJECT_ID('dbo.SISMovimientos', 'U') IS NOT NULL
         INSERT INTO SISMovimientos (Tipo, Subtipo, FechaHora, Usuario, Origen, Motivo, Resumen)
-        VALUES ('SIMULADOR_PLC', @subtipo, GETDATE(), NULL, 'SIMULADOR_PLC', @motivo, @resumen)`);
+        VALUES ('SIMULADOR_PLC', @subtipo, GETDATE(), @usuario, 'SIMULADOR_PLC', @motivo, @resumen)`);
   } catch (err) {
     console.error('trazaSimulador:', err.message);
   }
@@ -6317,10 +6323,22 @@ async function trazaSimulador(p, usuario, subtipo, motivo, resumen) {
 
 // Guarda: con produccion estas rutas no existen (404), aunque se sea admin y se escriba la URL.
 function exigirSimulador(req, res, next) {
-  if (!ES_PRUEBAS || !SQL_SIM_PESAJE || !SQL_SIM_CIERRE || !SQL_SIM_RESIDUO) {
+  if (!ES_PRUEBAS || !SQL_SIM_PESAJE || !SQL_SIM_CIERRE || !SQL_SIM_RESIDUO || !SQL_SIM_PENDIENTE) {
     return res.status(404).send('Simulador de PLC no disponible (solo BD de pruebas).');
   }
   return next();
+}
+
+// Los botones del simulador viven en su página Y dentro de las tarjetas de orden/grupo
+// (sprint 2): al terminar vuelven a la página que los llamó (`volver`, solo rutas relativas
+// internas). Sin volver, caen a la página del simulador como antes.
+function redirSimulador(req, res, maquina, tipo, texto) {
+  const v = req.body && req.body.volver;
+  if (typeof v === 'string' && v.startsWith('/') && !v.startsWith('//')) {
+    const sep = v.includes('?') ? '&' : '?';
+    return res.redirect(v + sep + tipo + '=' + encodeURIComponent(texto));
+  }
+  return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&' + tipo + '=' + encodeURIComponent(texto));
 }
 
 function renderSimuladorPLC(usuario, maquinas, maquinaSel, bultosPadre, error, mensaje) {
@@ -6382,7 +6400,7 @@ function renderSimuladorPLC(usuario, maquinas, maquinaSel, bultosPadre, error, m
       <p style="margin:0 0 14px;color:var(--texto-suave);">Cierra los bultos Activo/Temporal de la máquina (Golpes/Potencia = promedio de sus paquetes) — dispara los mismos triggers que un cierre real.</p>
       <form method="post" action="/admin/simulador-plc/cerrar-bulto" onsubmit="return copiarMaquina(this)">
         <input type="hidden" name="maquina" value="">
-        <button type="submit" style="background:#c0392b;">Simular cierre de bulto</button>
+        <button type="submit" style="background:#c0392b;color:#fff;">Simular cierre de bulto</button>
       </form>
     </div>
 
@@ -6405,7 +6423,22 @@ function renderSimuladorPLC(usuario, maquinas, maquinaSel, bultosPadre, error, m
         </select>
         <label for="cantidad" style="margin-top:10px;">Cantidad (Kg)</label>
         <input type="number" step="0.0001" min="0" name="cantidad" id="cantidad" value="0.5" required>
-        <button type="submit" style="margin-top:14px;background:#8e44ad;">Simular residuo</button>
+        <button type="submit" style="margin-top:14px;background:#8e44ad;color:#fff;">Simular residuo</button>
+      </form>
+    </div>
+
+    <div class="ejecucion-box">
+      <div class="label" style="margin-bottom:6px;">4) Simular residuo pendiente (04_residuo_marcar_pendiente.sql)</div>
+      <p style="margin:0 0 14px;color:var(--texto-suave);">Marca la hija con Cantidad=0 sobre el bulto Activo/Temporal de la máquina — el valor lo confirma después el digitador. Sin cantidad.</p>
+      <form method="post" action="/admin/simulador-plc/residuo-pendiente" onsubmit="return copiarMaquina(this)">
+        <input type="hidden" name="maquina" value="">
+        <label for="tipoResiduoPend">Tipo</label>
+        <select name="tipoResiduo" id="tipoResiduoPend">
+          <option value="1">1 — Retal</option>
+          <option value="3">3 — Troquelado</option>
+          <option value="4">4 — No conforme</option>
+        </select>
+        <button type="submit" style="margin-top:14px;background:#64748b;color:#fff;">Simular residuo pendiente</button>
       </form>
     </div>
   </main>
@@ -6462,7 +6495,7 @@ app.post('/admin/simulador-plc/paquete', requireLogin, requireAdmin, exigirSimul
   const golpes = req.body.golpes !== '' ? Number(req.body.golpes) : null;
 
   if (!maquina) return res.redirect('/admin/simulador-plc?error=' + encodeURIComponent('Falta la máquina.'));
-  if (!peso || peso <= 0) return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent('Ingrese un peso válido.'));
+  if (!peso || peso <= 0) return redirSimulador(req, res, maquina, 'error', 'Ingrese un peso válido.');
 
   try {
     const p = await getPool();
@@ -6476,9 +6509,9 @@ app.post('/admin/simulador-plc/paquete', requireLogin, requireAdmin, exigirSimul
       : 'Paquete registrado.';
     await trazaSimulador(p, req.session.usuario, 'PESAJE',
       `${req.session.usuario.nombre} maq=${maquina} peso=${peso}`, resumen);
-    res.redirect('/admin/simulador-plc?maquina=' + maquina + '&ok=' + encodeURIComponent(resumen));
+    return redirSimulador(req, res, maquina, 'ok', resumen);
   } catch (err) {
-    res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent(err.message));
+    return redirSimulador(req, res, maquina, 'error', err.message);
   }
 });
 
@@ -6495,9 +6528,9 @@ app.post('/admin/simulador-plc/cerrar-bulto', requireLogin, requireAdmin, exigir
     const resumen = `Cierre ejecutado en máquina ${maquina} (verifique bultos en la cola).`;
     await trazaSimulador(p, req.session.usuario, 'CIERRE',
       `${req.session.usuario.nombre} maq=${maquina}`, resumen);
-    res.redirect('/admin/simulador-plc?maquina=' + maquina + '&ok=' + encodeURIComponent(resumen));
+    return redirSimulador(req, res, maquina, 'ok', resumen);
   } catch (err) {
-    res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent(err.message));
+    return redirSimulador(req, res, maquina, 'error', err.message);
   }
 });
 
@@ -6513,9 +6546,9 @@ app.post('/admin/simulador-plc/residuo', requireLogin, requireAdmin, exigirSimul
   const cantidad = Number(req.body.cantidad);
 
   if (!maquina) return res.redirect('/admin/simulador-plc?error=' + encodeURIComponent('Falta la máquina.'));
-  if (!idBulto) return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent('Elija el bulto padre.'));
-  if (![1, 3, 4].includes(tipoResiduo)) return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent('Tipo de residuo inválido (1=Retal, 3=Troquelado, 4=No Conforme).'));
-  if (!(cantidad > 0)) return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent('Ingrese una cantidad válida mayor que cero.'));
+  if (!idBulto) return redirSimulador(req, res, maquina, 'error', 'Elija el bulto padre.');
+  if (![1, 3, 4].includes(tipoResiduo)) return redirSimulador(req, res, maquina, 'error', 'Tipo de residuo inválido (1=Retal, 3=Troquelado, 4=No Conforme).');
+  if (!(cantidad > 0)) return redirSimulador(req, res, maquina, 'error', 'Ingrese una cantidad válida mayor que cero.');
 
   try {
     const p = await getPool();
@@ -6523,7 +6556,7 @@ app.post('/admin/simulador-plc/residuo', requireLogin, requireAdmin, exigirSimul
       SELECT id FROM SEL_Bultos WHERE id = @idBulto AND id_maquina = @maquina
     `);
     if (dtBulto.recordset.length === 0) {
-      return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent('Ese bulto no es de esta máquina.'));
+      return redirSimulador(req, res, maquina, 'error', 'Ese bulto no es de esta máquina.');
     }
     const dt = await p.request()
       .input('IdBulto', idBulto).input('TipoResiduo', tipoResiduo).input('Cantidad', cantidad)
@@ -6534,9 +6567,36 @@ app.post('/admin/simulador-plc/residuo', requireLogin, requireAdmin, exigirSimul
       : `Residuo registrado en bulto ${idBulto}.`;
     await trazaSimulador(p, req.session.usuario, 'RESIDUO',
       `${req.session.usuario.nombre} maq=${maquina} bulto=${idBulto} tipo=${tipoResiduo} cant=${cantidad}`, resumen);
-    res.redirect('/admin/simulador-plc?maquina=' + maquina + '&ok=' + encodeURIComponent(resumen));
+    return redirSimulador(req, res, maquina, 'ok', resumen);
   } catch (err) {
-    res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent(err.message));
+    return redirSimulador(req, res, maquina, 'error', err.message);
+  }
+});
+
+// 04_residuo_marcar_pendiente.sql tal cual (parametros @maquina/@tipoResiduo, sin cantidad:
+// el digitador confirma el valor en Registro de Residuos). Resuelve solo el bulto
+// Activo/Temporal de la maquina, igual que en planta. El SELECT final devuelve SerialHijo.
+app.post('/admin/simulador-plc/residuo-pendiente', requireLogin, requireAdmin, exigirSimulador, async (req, res) => {
+  const maquina = Number(req.body.maquina);
+  const tipoResiduo = Number(req.body.tipoResiduo);
+
+  if (!maquina) return res.redirect('/admin/simulador-plc?error=' + encodeURIComponent('Falta la máquina.'));
+  if (![1, 3, 4].includes(tipoResiduo)) return redirSimulador(req, res, maquina, 'error', 'Tipo de residuo inválido (1=Retal, 3=Troquelado, 4=No Conforme).');
+
+  try {
+    const p = await getPool();
+    const dt = await p.request()
+      .input('maquina', maquina).input('tipoResiduo', tipoResiduo)
+      .query(SQL_SIM_PENDIENTE);
+    const fila = dt.recordset && dt.recordset[0];
+    const resumen = fila
+      ? `Residuo pendiente tipo ${tipoResiduo}: hijo ${fila.SerialHijo} (línea ${fila.LineaHijo}, Cantidad=0 hasta que el digitador confirme).`
+      : 'Residuo pendiente registrado.';
+    await trazaSimulador(p, req.session.usuario, 'RESIDUO_PENDIENTE',
+      `${req.session.usuario.nombre} maq=${maquina} tipo=${tipoResiduo}`, resumen);
+    return redirSimulador(req, res, maquina, 'ok', resumen);
+  } catch (err) {
+    return redirSimulador(req, res, maquina, 'error', err.message);
   }
 });
 
@@ -6989,7 +7049,7 @@ function calcularAvanceTotalGrupo(miembros) {
 // del usuario): peso de bascula, paquetes del bulto actual y peso acumulado DE ESA REFERENCIA,
 // Imprimir etiqueta, Cierre bulto y sus Especificaciones. Los botones de operar solo salen si la
 // orden de esa referencia esta Activa.
-function renderTarjetaReferenciaGrupo(m, indice) {
+function renderTarjetaReferenciaGrupo(m, indice, simHtml = '') {
   const color = colorReferenciaGrupo(indice);
   const refJs = jsString(m.Referencia).replace(/"/g, '&quot;');
   const activa = m.Estado === 'Activa';
@@ -7057,6 +7117,7 @@ function renderTarjetaReferenciaGrupo(m, indice) {
       <div class="ref-card-cuerpo">
         ${statsAvance}
         ${bloqueOperar}
+        ${simHtml}
         <details class="ref-especificaciones">
           <summary>Especificaciones</summary>
           <div class="ejecucion-grid">${filasEspecificaciones(m)}</div>
@@ -7077,7 +7138,7 @@ function renderTarjetaReferenciaGrupo(m, indice) {
 //   - Una tarjeta interactiva por referencia (ver renderTarjetaReferenciaGrupo).
 // "Ver bultos" lleva a la pagina de bultos del GRUPO (/grupo/:idGrupo/bultos), con el filtro por
 // referencia -- no a la de una sola orden.
-function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquinaCodigo, miembros, usuario, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, ordenProduccion, esSup, otInfo) {
+function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquinaCodigo, miembros, usuario, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, ordenProduccion, esSup, otInfo, simPorOrden = {}) {
   // "Activo ahora" es el que esta recibiendo paquetes en este momento (su bulto esta Activo o
   // Temporal). Si ninguno lo esta (grupo recien creado, nadie ha dado Iniciar) no se ofrece
   // "+ Rollo": el rollo se registra siempre contra la referencia activa.
@@ -7141,7 +7202,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
       : ''
   ].join('');
 
-  const tarjetasReferencia = miembros.map((m, i) => renderTarjetaReferenciaGrupo(m, i)).join('');
+  const tarjetasReferencia = miembros.map((m, i) => renderTarjetaReferenciaGrupo(m, i, simPorOrden[m.IdOrden] || '')).join('');
 
   // Tarjeta de avance TOTAL del pedido en el encabezado -- los mismos ids que usa la pagina de una
   // sola referencia (avance-porcentaje/relleno/producido/programado), porque quien la refresca cada
@@ -7452,12 +7513,92 @@ app.get('/selladora/:codigo/grupo/:idGrupo', requireLogin, async (req, res) => {
     const protocoloPendiente = miembroAncla ? await obtenerProtocoloPendiente(p, miembroAncla.IdOrden) : null;
 
     const textoOT = await textoOTConOperario(p, ordenProduccion, req.session.usuario.codigoOperarioPRD);
+    // Sprint 2 (simulador dentro de cada tarjeta, solo pruebas + admin): un bloque por miembro
+    // Activo, con los bultos de ESA referencia y vuelta a esta página.
+    let simPorOrden = {};
+    if (ES_PRUEBAS && req.session.usuario.codigo === ADMIN_CODIGO) {
+      const volverGrupo = `/selladora/${codigo}/grupo/${idGrupo}`;
+      for (const m of miembros) {
+        if (m.Estado !== 'Activa') continue;
+        try {
+          const bultos = await cargarBultosSimuladorOrden(p, m.IdOrden);
+          simPorOrden[m.IdOrden] = bloqueSimuladorReferencia(codigo, m.IdOrden, bultos, volverGrupo);
+        } catch (errSim) {
+          console.error('simPorOrden:', errSim.message);
+        }
+      }
+    }
     res.send(renderGrupoSelladoDetalle(idGrupo, miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, textoOT,
-      esSupervisor(req.session.usuario), await infoOTParaCorreccion(p, ordenProduccion)));
+      esSupervisor(req.session.usuario), await infoOTParaCorreccion(p, ordenProduccion), simPorOrden));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
 });
+
+// Bultos de UNA orden para el bloque mini del simulador (sprint 2): el desplegable del
+// residuo se acota a los bultos de esa referencia, no a los de toda la máquina.
+async function cargarBultosSimuladorOrden(p, idOrden) {
+  const dt = await p.request().input('idOrden', idOrden).query(`
+    SELECT TOP 8 b.id, b.estado, b.refsalida, b.number_paqu FROM SEL_Bultos b
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+    WHERE ej.IdOrden = @idOrden ORDER BY b.id DESC
+  `);
+  return dt.recordset;
+}
+
+// Bloque compacto del simulador dentro de la tarjeta de una referencia (página de orden o
+// de grupo, sprint 2): los mismos 4 endpoints de /admin/simulador-plc, con `volver` a esta
+// página. Solo se pinta con BD de pruebas + admin (lo decide quien lo llama). La cola se
+// actualiza sola por sondeo, así que no necesita mensajes propios.
+function bloqueSimuladorReferencia(maquinaCodigo, idOrden, bultos, volverUrl) {
+  const opciones = (bultos || []).map(b =>
+    `<option value="${b.id}">#${b.id} — ${b.estado} — ${b.number_paqu} paq.</option>`
+  ).join('') || `<option value="">Sin bultos todavía</option>`;
+  const tipos = `
+    <option value="1">1 — Retal</option>
+    <option value="3">3 — Troquelado</option>
+    <option value="4">4 — No conforme</option>`;
+  return `
+  <div class="ejecucion-box" style="margin-top:12px;">
+    <div class="label" style="margin-bottom:8px;">🧪 Simular PLC (solo pruebas)</div>
+    <div class="imprimir-acciones-grid">
+      <form method="post" action="/admin/simulador-plc/paquete">
+        <input type="hidden" name="maquina" value="${maquinaCodigo}">
+        <input type="hidden" name="volver" value="${volverUrl}">
+        <label>Peso</label>
+        <input type="number" step="0.001" min="0" name="peso" value="18" required>
+        <label style="margin-top:8px;">Golpes (vacío = NULL)</label>
+        <input type="number" step="1" min="0" name="golpes" placeholder="Golpes">
+        <label style="margin-top:8px;">Potencia</label>
+        <input type="number" step="0.001" name="potencia" value="10" placeholder="Potencia">
+        <button type="submit" style="margin-top:10px;">Pesar paquete</button>
+      </form>
+      <form method="post" action="/admin/simulador-plc/cerrar-bulto">
+        <input type="hidden" name="maquina" value="${maquinaCodigo}">
+        <input type="hidden" name="volver" value="${volverUrl}">
+        <button type="submit" class="btn-cierre-bulto" style="min-height:100%;color:#fff;">📦 Cierre bulto</button>
+      </form>
+    </div>
+    <form method="post" action="/admin/simulador-plc/residuo" style="margin-top:10px;">
+      <input type="hidden" name="maquina" value="${maquinaCodigo}">
+      <input type="hidden" name="volver" value="${volverUrl}">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <div style="flex:1 1 140px;"><label>Bulto</label><select name="idBulto">${opciones}</select></div>
+        <div style="flex:1 1 110px;"><label>Tipo</label><select name="tipoResiduo">${tipos}</select></div>
+        <div style="flex:1 1 90px;"><label>Kg</label><input type="number" step="0.0001" min="0" name="cantidad" value="0.5" required></div>
+      </div>
+      <button type="submit" style="margin-top:10px;background:#8e44ad;color:#fff;">Residuo con cantidad</button>
+    </form>
+    <form method="post" action="/admin/simulador-plc/residuo-pendiente" style="margin-top:10px;">
+      <input type="hidden" name="maquina" value="${maquinaCodigo}">
+      <input type="hidden" name="volver" value="${volverUrl}">
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
+        <div style="flex:1 1 110px;"><label>Tipo</label><select name="tipoResiduo">${tipos}</select></div>
+        <button type="submit" style="flex:1 1 140px;background:#64748b;color:#fff;">Residuo pendiente</button>
+      </div>
+    </form>
+  </div>`;
+}
 
 // Bultos de TODAS las referencias de un pedido agrupado, con filtro por referencia (a pedido del
 // usuario, 10/09/2026) -- es a donde lleva "Ver bultos" desde la pagina del pedido. La de una sola
@@ -7610,9 +7751,20 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
     const protocoloPendiente = await obtenerProtocoloPendiente(p, Number(idOrden));
 
     const esAdmin = req.session.usuario.codigo === ADMIN_CODIGO;
+    // Sprint 2 (simulador dentro de la orden, solo pruebas + admin): bloque con los bultos de
+    // ESTA orden y vuelta a esta página.
+    let simBloque = '';
+    if (ES_PRUEBAS && esAdmin && orden.Estado === 'Activa') {
+      try {
+        const bultos = await cargarBultosSimuladorOrden(p, Number(idOrden));
+        simBloque = bloqueSimuladorReferencia(codigo, Number(idOrden), bultos, `/selladora/${codigo}/orden/${idOrden}`);
+      } catch (errSim) {
+        console.error('simBloque:', errSim.message);
+      }
+    }
     const textoOT = await textoOTConOperario(p, ordenProduccion, req.session.usuario.codigoOperarioPRD);
     res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, textoOT,
-      esSupervisor(req.session.usuario), await infoOTParaCorreccion(p, ordenProduccion)));
+      esSupervisor(req.session.usuario), await infoOTParaCorreccion(p, ordenProduccion), simBloque));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
