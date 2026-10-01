@@ -7707,13 +7707,16 @@ async function obtenerBultosYPesajes(p, idOrden, esSup = false) {
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
     OUTER APPLY (SELECT AVG(CAST(pe.Potencia AS FLOAT)) AS PotenciaProm
                  FROM SEL_PesajeElemento pe WHERE pe.id_bulto = b.id) pp
-    OUTER APPLY (SELECT ISNULL(SUM(DATEDIFF(SECOND,
-                           CASE WHEN tm.HoraInicio > b.HoraInicio THEN tm.HoraInicio ELSE b.HoraInicio END,
-                           CASE WHEN ISNULL(tm.HoraFin, GETDATE()) < ISNULL(b.HoraFin, GETDATE())
-                                THEN ISNULL(tm.HoraFin, GETDATE()) ELSE ISNULL(b.HoraFin, GETDATE()) END)), 0) AS SegMuertos
+    -- El cruce se calcula por fila en un CROSS APPLY y se suma ov.Seg: SQL Server no deja meter
+    -- columnas de b (externa) y de tm juntas dentro del SUM.
+    OUTER APPLY (SELECT ISNULL(SUM(ov.Seg), 0) AS SegMuertos
                  FROM SEL_TiempoMuerto tm
                  INNER JOIN SEL_EjecucionOrden ejm ON ejm.IdEjecucion = tm.id_ejecucion
                  INNER JOIN SEL_OrdenProduccion om ON om.IdOrden = ejm.IdOrden
+                 CROSS APPLY (SELECT DATEDIFF(SECOND,
+                           CASE WHEN tm.HoraInicio > b.HoraInicio THEN tm.HoraInicio ELSE b.HoraInicio END,
+                           CASE WHEN ISNULL(tm.HoraFin, GETDATE()) < ISNULL(b.HoraFin, GETDATE())
+                                THEN ISNULL(tm.HoraFin, GETDATE()) ELSE ISNULL(b.HoraFin, GETDATE()) END) AS Seg) ov
                  WHERE om.Maquina = b.id_maquina
                    AND tm.HoraInicio < ISNULL(b.HoraFin, GETDATE())
                    AND ISNULL(tm.HoraFin, GETDATE()) > b.HoraInicio) tmb
