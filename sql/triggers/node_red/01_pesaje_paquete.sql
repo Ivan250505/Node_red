@@ -44,6 +44,33 @@ BEGIN
     RETURN;
 END
 
+-- LIMITE DE PAQUETES (01/10/2026): el consecutivo del paquete va en las posiciones 5-6 del serial
+-- (STUFF de abajo), así que el máximo es 99. Con el 100, CAST(100 AS VARCHAR(2)) da '*' y el serial
+-- salía dañado (20260*...). Ahora NO se guarda el paquete ni sube el contador: se devuelve la misma
+-- fila de siempre con Resultado = 'LIMITE_PAQUETES', SerialHijo NULL y el Mensaje para el operario.
+-- Node-RED: si Resultado <> 'OK' NO imprime la etiqueta y avisa al Node
+-- (POST /api/selladora/aviso-pesaje, ver LEEME.md de esta carpeta).
+IF @NuevoConsecutivo > 99
+BEGIN
+    SELECT
+        b.SerialPadre,
+        @NuevoConsecutivo - 1 AS number_paqu,
+        CAST(NULL AS VARCHAR(40)) AS SerialHijo,
+        i.referencia,
+        b.numeroPedido,
+        @peso      AS PesoPesaje,
+        GETDATE()  AS HoraPesaje,
+        @golpes    AS Golpes,
+        @potencia  AS Potencia,
+        CAST(NULL AS INT) AS UnidadesPaquete,
+        'LIMITE_PAQUETES' AS Resultado,
+        'El bulto ' + ISNULL(b.SerialPadre, '') + ' llegó al límite de 99 paquetes. Cierre el bulto y vuelva a pesar este paquete.' AS Mensaje
+    FROM SEL_Bultos AS b
+    INNER JOIN invelementos AS i ON i.codigo = b.refsalida
+    WHERE b.id = @IdBulto;
+    RETURN;
+END
+
 UPDATE SEL_Bultos
 SET number_paqu = @NuevoConsecutivo
 WHERE id = @IdBulto;
@@ -69,17 +96,23 @@ VALUES (@peso, @IdBulto, @NuevoConsecutivo, GETDATE(), @golpes, @potencia, @Deta
 
 -- SELECT final -- igual que antes, con UnidadesPaquete agregado por si el PLC/Node-RED lo quiere
 -- mostrar o loguear.
+-- 01/10/2026: SerialHijo se lee de SEL_PesajeElemento (no de @Resultado): si el primer paquete llegó
+-- después del umbral, trg_SEL_PesajeElemento_ActualizarBulto re-estampó el bulto y su serial, y
+-- @Resultado trae el serial de antes del trigger.
 SELECT
     b.SerialPadre,
     r.ConsecutivoPaquete AS number_paqu,
-    r.Detalle AS SerialHijo,
+    pe.Detalle AS SerialHijo,
     i.referencia,
     b.numeroPedido,
     r.PesoPaqueGr AS PesoPesaje,
     r.FechaHora   AS HoraPesaje,
     r.Golpes,
     r.Potencia,
-    r.UnidadesPaquete
+    r.UnidadesPaquete,
+    'OK' AS Resultado,                 -- 01/10/2026: ver LIMITE DE PAQUETES arriba
+    CAST(NULL AS VARCHAR(200)) AS Mensaje
 FROM @Resultado r
+INNER JOIN SEL_PesajeElemento AS pe ON pe.id_paquete = r.id_paquete
 INNER JOIN SEL_Bultos AS b ON b.id = r.id_bulto
 INNER JOIN invelementos AS i ON i.codigo = b.refsalida;

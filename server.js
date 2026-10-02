@@ -1083,6 +1083,7 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(null)}</script>
+  <script>${scriptAvisoPesaje(null)}</script>
   ${error ? `<script>Swal.fire({ icon: 'error', title: 'Error', text: ${jsString(error)}, confirmButtonColor: '#71bf44' });</script>` : ''}
 </body>
 </html>`;
@@ -1764,6 +1765,46 @@ function scriptAvisoSuspension(maquinaCodigo) {
         } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
       }
 
+      revisar();
+      setInterval(revisar, 5000);
+    })();
+  `;
+}
+
+// Aviso del pesaje (01/10/2026): Node-RED avisa por POST /api/selladora/aviso-pesaje cuando un
+// paquete no se pudo registrar (hoy: LIMITE_PAQUETES, el bulto llegó al paquete #99). La tableta de
+// esa máquina sondea cada 5 s y muestra una alerta que el operario tiene que aceptar; al aceptarla
+// se borra para todas las tabletas de la máquina. Sin máquina (Dashboard) no sondea.
+function scriptAvisoPesaje(maquinaCodigo) {
+  if (!maquinaCodigo) return '';
+  return `
+    (function() {
+      var MAQUINA = ${jsString(maquinaCodigo)};
+      var mostrando = false;
+      function revisar() {
+        if (mostrando) return;
+        fetch('/api/selladora/' + encodeURIComponent(MAQUINA) + '/aviso-pesaje')
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (!data || !data.ok || !data.aviso || mostrando) return;
+            var a = data.aviso;
+            mostrando = true;
+            Swal.fire({
+              icon: 'warning',
+              title: a.resultado === 'LIMITE_PAQUETES' ? 'Límite de paquetes del bulto' : 'Aviso del pesaje',
+              text: (a.mensaje || '') + (a.peso != null ? ' (Peso no registrado: ' + a.peso + ' g)' : ''),
+              allowOutsideClick: false,
+              confirmButtonText: 'Entendido',
+              confirmButtonColor: '#c0392b'
+            }).then(function() {
+              fetch('/api/selladora/' + encodeURIComponent(MAQUINA) + '/aviso-pesaje/visto', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: a.id })
+              }).catch(function() {}).then(function() { mostrando = false; });
+            });
+          })
+          .catch(function() {});
+      }
       revisar();
       setInterval(revisar, 5000);
     })();
@@ -4576,6 +4617,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
@@ -4668,6 +4710,7 @@ function renderTabletFija(usuario, maquinas, maquinaActual, error) {
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(null)}</script>
+  <script>${scriptAvisoPesaje(null)}</script>
   ${error ? `<script>Swal.fire({ icon: 'error', title: 'Error', text: ${jsString(error)}, confirmButtonColor: '#71bf44' });</script>` : ''}
 </body>
 </html>`;
@@ -5087,6 +5130,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
   <script>${scriptProtocoloArranque(maquinaCodigo)}</script>
@@ -5150,6 +5194,13 @@ function accionesBultoVacio(b, pesajes) {
     botones.push(`<button type="button" class="btn-accion" style="background:#b46200;"
       onclick="corregirConteoBulto(${JSON.stringify(b.id)}, ${JSON.stringify(numPaqu)}, ${JSON.stringify(ultimoPaquete)})">↺ Corregir conteo (dice ${numPaqu}, ${pesajes.length === 0 ? 'no tiene paquetes' : 'último #' + ultimoPaquete})</button>`);
   }
+  // 01/10/2026 (regla 1, reabrir): solo supervisor, solo el ÚLTIMO bulto cerrado de la orden en curso
+  // y solo si el bulto abierto que le sigue no tiene paquetes (PuedeReabrir ya trae todo eso, ver
+  // obtenerBultosYPesajes). El SP sp_SEL_ReabrirBulto vuelve a revisarlo todo.
+  if (Number(b.PuedeReabrir) === 1) {
+    botones.push(`<button type="button" class="btn-accion" style="background:#2c6fbb;"
+      onclick="reabrirBulto(${JSON.stringify(b.id)}, ${jsString(b.serialPadre).replace(/"/g, '&quot;')})">↩ Reabrir bulto</button>`);
+  }
   return botones.length ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">${botones.join('')}</div>` : '';
 }
 
@@ -5174,6 +5225,29 @@ function scriptBultosVacios() {
         }).then(function(x) { return x.json(); }).then(function(data) {
           if (!data.ok) { Swal.fire({ icon: 'error', title: 'No se pudo eliminar', text: data.error || '', confirmButtonColor: '#71bf44' }); return; }
           Swal.fire({ icon: 'success', title: 'Bulto eliminado', confirmButtonColor: '#71bf44' }).then(function() { location.reload(); });
+        }).catch(function(e) { Swal.fire({ icon: 'error', title: 'Error', text: String(e), confirmButtonColor: '#71bf44' }); });
+      });
+    }
+
+    function reabrirBulto(idBulto, serial) {
+      Swal.fire({
+        icon: 'warning',
+        title: '¿Reabrir el bulto ' + serial + '?',
+        text: 'Se elimina el bulto abierto vacío que le sigue y este vuelve a recibir paquetes. Su inventario queda en 0 hasta que se cierre de nuevo.',
+        showCancelButton: true,
+        confirmButtonText: 'Sí, reabrir',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#2c6fbb',
+        cancelButtonColor: '#7f8c8d'
+      }).then(function(r) {
+        if (!r.isConfirmed) return;
+        Swal.fire({ title: 'Reabriendo…', allowOutsideClick: false, didOpen: function() { Swal.showLoading(); } });
+        fetch('/api/selladora/bulto/reabrir', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idBulto: idBulto })
+        }).then(function(x) { return x.json(); }).then(function(data) {
+          if (!data.ok) { Swal.fire({ icon: 'error', title: 'No se pudo reabrir', text: data.error || '', confirmButtonColor: '#71bf44' }); return; }
+          Swal.fire({ icon: 'success', title: 'Bulto reabierto', confirmButtonColor: '#71bf44' }).then(function() { location.reload(); });
         }).catch(function(e) { Swal.fire({ icon: 'error', title: 'Error', text: String(e), confirmButtonColor: '#71bf44' }); });
       });
     }
@@ -5289,6 +5363,8 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto, opcione
         <div><span class="label">Potencia (W)</span><span class="valor">${b.Potencia ?? '—'}</span></div>
         <div><span class="label">Hora final</span><span class="valor">${b.HoraFin ?? '—'}</span></div>
         <div><span class="label">Golpes x minuto</span><span class="valor">${b.Golpes ?? '—'}</span></div>
+        <div><span class="label">Tiempo productivo (h)</span><span class="valor">${b.HorasProductivas != null ? Number(b.HorasProductivas).toFixed(2) : '—'}</span></div>
+        <div><span class="label">Consumo potencia (kWh)</span><span class="valor">${b.ConsumoKWh != null ? Number(b.ConsumoKWh).toFixed(3) : '—'}</span></div>
         <div class="full"><span class="label">Serial</span><span class="valor serial">${b.serialPadre ?? '—'}</span></div>
       </div>
       <details class="pesajes-box" data-bulto="${b.id}">
@@ -5837,6 +5913,7 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, usu
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptReimprimir(orden.IdOrden, maquinaCodigo)}</script>
   <script>${scriptTraslado(orden.IdOrden, maquinaCodigo)}</script>
   <script>${scriptBultosVacios()}</script>
@@ -6548,7 +6625,20 @@ app.post('/admin/simulador-plc/paquete', requireLogin, requireAdmin, exigirSimul
       .input('golpes', golpes).input('potencia', potencia)
       .query(SQL_SIM_PESAJE);
     const fila = dt.recordset && dt.recordset[0];
+<<<<<<< HEAD
     let resumen = fila
+=======
+    // 01/10/2026: igual que Node-RED -- con Resultado distinto de 'OK' no hay etiqueta y se avisa
+    // a la tableta de la máquina (mismo aviso que manda POST /api/selladora/aviso-pesaje).
+    if (fila && fila.Resultado && fila.Resultado !== 'OK') {
+      avisosPesaje.set(String(maquina), {
+        id: siguienteIdAvisoPesaje++, resultado: fila.Resultado, mensaje: fila.Mensaje || '',
+        peso, serialPadre: fila.SerialPadre || null, fecha: new Date().toISOString()
+      });
+      return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent(fila.Resultado + ': ' + (fila.Mensaje || '')));
+    }
+    const resumen = fila
+>>>>>>> 87bc167d5ce0684b171e1981257d04580c239a5f
       ? `Paquete #${fila.number_paqu} (serial ${fila.SerialHijo}) en bulto ${fila.SerialPadre || ''}.`
       : 'Paquete registrado.';
     if (alterno) resumen += ' (Alternó a esta referencia antes de pesar.)';
@@ -7350,6 +7440,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptAjusteConsumo()}</script>
@@ -7456,6 +7547,7 @@ function renderBultosGrupo(idGrupo, numeroPedido, maquinaCodigo, datosPorReferen
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <!-- El idOrden que reciben estos dos es solo el de respaldo: cada tarjeta de bulto y cada
        seccion de traslado traen el IdOrden de SU referencia, y ese es el que se usa. -->
   <script>${scriptReimprimir(datosPorReferencia[0] ? datosPorReferencia[0].idOrden : 0, maquinaCodigo)}</script>
@@ -7471,11 +7563,11 @@ function renderBultosGrupo(idGrupo, numeroPedido, maquinaCodigo, datosPorReferen
 
 // Bultos/pesajes/residuos de CADA referencia del grupo, ya con el color que le toca a cada una
 // (mismo indice que las tarjetas de la pagina del pedido, ver colorReferenciaGrupo).
-async function obtenerBultosGrupo(p, miembros) {
+async function obtenerBultosGrupo(p, miembros, esSup = false) {
   const datos = [];
   for (let i = 0; i < miembros.length; i++) {
     const m = miembros[i];
-    const { bultos, pesajesPorBulto, residuosPorBulto } = await obtenerBultosYPesajes(p, m.IdOrden);
+    const { bultos, pesajesPorBulto, residuosPorBulto } = await obtenerBultosYPesajes(p, m.IdOrden, esSup);
     datos.push({
       idOrden: m.IdOrden, referencia: m.Referencia, nombre: m.Nombre || '', color: colorReferenciaGrupo(i),
       bultos, pesajesPorBulto, residuosPorBulto
@@ -7665,7 +7757,7 @@ app.get('/selladora/:codigo/grupo/:idGrupo/bultos', requireLogin, async (req, re
     if (miembros.length === 0) {
       return res.status(404).send(renderErrorSimple('Grupo no encontrado.', `/selladora/${codigo}`));
     }
-    const datosPorReferencia = await obtenerBultosGrupo(p, miembros);
+    const datosPorReferencia = await obtenerBultosGrupo(p, miembros, esSupervisor(req.session.usuario));
     res.send(renderBultosGrupo(idGrupo, miembros[0].NumeroPedido, codigo, datosPorReferencia, req.session.usuario.nombre));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}/grupo/${idGrupo}`));
@@ -7679,7 +7771,7 @@ app.get('/selladora/:codigo/grupo/:idGrupo/bultos/fragmento', requireLogin, asyn
   try {
     const p = await getPool();
     const miembros = await obtenerMiembrosGrupoSellado(p, idGrupo);
-    const datosPorReferencia = await obtenerBultosGrupo(p, miembros);
+    const datosPorReferencia = await obtenerBultosGrupo(p, miembros, esSupervisor(req.session.usuario));
     res.send(renderTarjetasBultosGrupo(datosPorReferencia));
   } catch (err) {
     res.status(500).send('Error: ' + err.message);
@@ -7848,7 +7940,7 @@ const OFFSET_RESIDUO_POR_TIPO = { 1000: 'Retal', 2000: 'Refilado', 3000: 'Troque
 // compartida entre la pagina completa de /bultos y su /bultos/fragmento (el polling de
 // scriptActualizarBultos pide solo el fragmento, para no reconstruir cabecera/estilos en cada
 // actualizacion).
-async function obtenerBultosYPesajes(p, idOrden) {
+async function obtenerBultosYPesajes(p, idOrden, esSup = false) {
   // FIX 08/09/2026 (traslado de paquetes entre bultos, ver sp_SEL_TrasladarPaquete): un bulto que
   // queda sin ningun paquete tras un traslado se marca 'Anulado' (nunca se borra, queda de
   // auditoria) -- se excluye aca para que no aparezca como una tarjeta vacia mas en la pagina.
@@ -7862,13 +7954,48 @@ async function obtenerBultosYPesajes(p, idOrden) {
            CASE WHEN b.id = (SELECT MIN(b2.id) FROM SEL_Bultos b2
                              INNER JOIN SEL_EjecucionOrden e2 ON e2.IdEjecucion = b2.id_ejecucion
                              WHERE e2.IdOrden = @idOrden) THEN 1 ELSE 0 END AS EsAncla,
-           ISNULL((SELECT TOP 1 CAST(pv.Validado AS INT) FROM PRDProduccion pv WHERE pv.Detalle = b.serialPadre), 0) AS Validado
+           ISNULL((SELECT TOP 1 CAST(pv.Validado AS INT) FROM PRDProduccion pv WHERE pv.Detalle = b.serialPadre), 0) AS Validado,
+           -- 01/10/2026: botón "Reabrir" -- último cerrado de una ejecución Activa y el abierto siguiente sin paquetes.
+           CASE WHEN b.estado = 'Cerrado' AND ej.Estado = 'Activa'
+                 AND NOT EXISTS (SELECT 1 FROM SEL_Bultos bc WHERE bc.id_ejecucion = b.id_ejecucion AND bc.id > b.id AND bc.estado = 'Cerrado')
+                 AND NOT EXISTS (SELECT 1 FROM SEL_Bultos ba INNER JOIN SEL_PesajeElemento pa ON pa.id_bulto = ba.id
+                                 WHERE ba.id_ejecucion = b.id_ejecucion AND ba.id > b.id AND ba.estado IN ('Temporal', 'Activo'))
+                THEN 1 ELSE 0 END AS ReabribleSql,
+           -- 01/10/2026: consumo de potencia del bulto = tiempo productivo (h) x potencia promedio de sus
+           -- paquetes. Tiempo productivo = HoraInicio..HoraFin (el bulto abierto, hasta ahora) menos los
+           -- tiempos muertos de la MÁQUINA que se cruzan con ese rango (misma regla de la planilla: por
+           -- máquina, sin importar la OT). Potencia en W -> /1000 = kWh.
+           tp.HorasProductivas,
+           CASE WHEN pp.PotenciaProm IS NULL OR tp.HorasProductivas IS NULL THEN NULL
+                ELSE tp.HorasProductivas * pp.PotenciaProm / 1000.0 END AS ConsumoKWh
     FROM SEL_Bultos b
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+    OUTER APPLY (SELECT AVG(CAST(pe.Potencia AS FLOAT)) AS PotenciaProm
+                 FROM SEL_PesajeElemento pe WHERE pe.id_bulto = b.id) pp
+    -- El cruce se calcula por fila en un CROSS APPLY y se suma ov.Seg: SQL Server no deja meter
+    -- columnas de b (externa) y de tm juntas dentro del SUM.
+    OUTER APPLY (SELECT ISNULL(SUM(ov.Seg), 0) AS SegMuertos
+                 FROM SEL_TiempoMuerto tm
+                 INNER JOIN SEL_EjecucionOrden ejm ON ejm.IdEjecucion = tm.id_ejecucion
+                 INNER JOIN SEL_OrdenProduccion om ON om.IdOrden = ejm.IdOrden
+                 CROSS APPLY (SELECT DATEDIFF(SECOND,
+                           CASE WHEN tm.HoraInicio > b.HoraInicio THEN tm.HoraInicio ELSE b.HoraInicio END,
+                           CASE WHEN ISNULL(tm.HoraFin, GETDATE()) < ISNULL(b.HoraFin, GETDATE())
+                                THEN ISNULL(tm.HoraFin, GETDATE()) ELSE ISNULL(b.HoraFin, GETDATE()) END) AS Seg) ov
+                 WHERE om.Maquina = b.id_maquina
+                   AND tm.HoraInicio < ISNULL(b.HoraFin, GETDATE())
+                   AND ISNULL(tm.HoraFin, GETDATE()) > b.HoraInicio) tmb
+    OUTER APPLY (SELECT CASE WHEN b.HoraInicio IS NULL THEN NULL
+                             ELSE CASE WHEN DATEDIFF(SECOND, b.HoraInicio, ISNULL(b.HoraFin, GETDATE())) - tmb.SegMuertos > 0
+                                       THEN (DATEDIFF(SECOND, b.HoraInicio, ISNULL(b.HoraFin, GETDATE())) - tmb.SegMuertos) / 3600.0
+                                       ELSE 0 END END AS HorasProductivas) tp
     WHERE ej.IdOrden = @idOrden AND b.estado <> 'Anulado'
     ORDER BY b.id ASC -- FIX 23/09/2026: num_bulto se reinicia por dia, el orden real es por id
   `);
-  const bultos = bultosResult.recordset.map((b, idx) => ({ ...b, numRelativo: idx + 1 }));
+  const bultos = bultosResult.recordset.map((b, idx) => ({
+    ...b, numRelativo: idx + 1,
+    PuedeReabrir: esSup && Number(b.ReabribleSql) === 1 && Number(b.Validado) !== 1 ? 1 : 0
+  }));
 
   let pesajesPorBulto = new Map();
   let residuosPorBulto = new Map();
@@ -7999,7 +8126,7 @@ app.get('/selladora/:codigo/orden/:idOrden/bultos', requireLogin, async (req, re
     }
     const orden = ordenResult.recordset[0];
 
-    const { bultos, pesajesPorBulto, residuosPorBulto } = await obtenerBultosYPesajes(p, idOrden);
+    const { bultos, pesajesPorBulto, residuosPorBulto } = await obtenerBultosYPesajes(p, idOrden, esSupervisor(req.session.usuario));
 
     res.send(renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, req.session.usuario.nombre, codigo));
   } catch (err) {
@@ -8014,7 +8141,7 @@ app.get('/selladora/:codigo/orden/:idOrden/bultos/fragmento', requireLogin, asyn
   const { idOrden } = req.params;
   try {
     const p = await getPool();
-    const { bultos, pesajesPorBulto, residuosPorBulto } = await obtenerBultosYPesajes(p, idOrden);
+    const { bultos, pesajesPorBulto, residuosPorBulto } = await obtenerBultosYPesajes(p, idOrden, esSupervisor(req.session.usuario));
     res.send(renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto));
   } catch (err) {
     res.status(500).send('Error: ' + err.message);
@@ -8037,6 +8164,7 @@ app.post('/api/selladora/paquete/trasladar', requireLogin, async (req, res) => {
     const result = await p.request()
       .input('idPaquete', idPaquete)
       .input('idBultoDestino', idBultoDestino)
+      .input('Usuario', req.session.usuario ? req.session.usuario.codigo : null)
       .execute('sp_SEL_TrasladarPaquete');
     const fila = result.recordset && result.recordset[0];
     if (!fila) {
@@ -8054,6 +8182,72 @@ app.post('/api/selladora/paquete/trasladar', requireLogin, async (req, res) => {
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
+});
+
+// 01/10/2026 (regla 1 de CASOS_USO_HORAS_BULTO_Y_TRASLADOS_01102026.md): reabrir un bulto cerrado por
+// error. Solo supervisor. Todo el trabajo y las validaciones (último cerrado, orden en curso, bulto
+// siguiente sin paquetes, sin validar/residuos/remisión) viven en dbo.sp_SEL_ReabrirBulto.
+app.post('/api/selladora/bulto/reabrir', requireLogin, async (req, res) => {
+  const idBulto = Number(req.body && req.body.idBulto);
+  if (!Number.isFinite(idBulto) || idBulto <= 0) return res.json({ ok: false, error: 'Falta el bulto.' });
+  if (!esSupervisor(req.session.usuario)) return res.json({ ok: false, error: 'Solo un supervisor puede reabrir un bulto.' });
+  try {
+    const p = await getPool();
+    const result = await p.request()
+      .input('IdBulto', idBulto)
+      .input('Usuario', req.session.usuario.codigo)
+      .execute('sp_SEL_ReabrirBulto');
+    const fila = result.recordset && result.recordset[0];
+    res.json({ ok: true, serial: fila ? fila.Serial : null, idBultoEliminado: fila ? fila.IdBultoEliminado : null });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// Avisos del pesaje (01/10/2026). Los manda Node-RED cuando 01_pesaje_paquete.sql devuelve un
+// Resultado distinto de 'OK' (hoy LIMITE_PAQUETES: el bulto llegó al paquete #99 y el paquete NO se
+// guardó). Se guardan en memoria, uno por máquina (el último manda): es una alerta para el operario,
+// no un registro -- si el Node se reinicia se pierde, y el siguiente pesaje rechazado la vuelve a mandar.
+// Sin sesión (lo llama Node-RED): solo desde el mismo servidor, o con el header x-aviso-token igual a
+// AVISO_PESAJE_TOKEN del .env.
+const avisosPesaje = new Map();
+let siguienteIdAvisoPesaje = 1;
+
+function esLlamadaLocal(req) {
+  const ip = (req.socket && req.socket.remoteAddress) || '';
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+
+app.post('/api/selladora/aviso-pesaje', (req, res) => {
+  const token = process.env.AVISO_PESAJE_TOKEN;
+  if (!esLlamadaLocal(req) && !(token && req.get('x-aviso-token') === token)) {
+    return res.status(403).json({ ok: false, error: 'No autorizado.' });
+  }
+  const b = req.body || {};
+  const maquina = String(b.maquina == null ? '' : b.maquina).trim();
+  if (!maquina) return res.status(400).json({ ok: false, error: 'Falta la máquina.' });
+  const aviso = {
+    id: siguienteIdAvisoPesaje++,
+    resultado: String(b.resultado || 'AVISO'),
+    mensaje: String(b.mensaje || ''),
+    peso: b.peso != null && b.peso !== '' && Number.isFinite(Number(b.peso)) ? Number(b.peso) : null,
+    serialPadre: b.serialPadre ? String(b.serialPadre) : null,
+    fecha: new Date().toISOString()
+  };
+  avisosPesaje.set(maquina, aviso);
+  console.log('Aviso de pesaje maq=%s %s: %s', maquina, aviso.resultado, aviso.mensaje);
+  res.json({ ok: true, id: aviso.id });
+});
+
+app.get('/api/selladora/:codigo/aviso-pesaje', requireLogin, (req, res) => {
+  res.json({ ok: true, aviso: avisosPesaje.get(String(req.params.codigo)) || null });
+});
+
+app.post('/api/selladora/:codigo/aviso-pesaje/visto', requireLogin, (req, res) => {
+  const codigo = String(req.params.codigo);
+  const a = avisosPesaje.get(codigo);
+  if (a && Number(req.body && req.body.id) === a.id) avisosPesaje.delete(codigo);
+  res.json({ ok: true });
 });
 
 // 30/09/2026 (a pedido del usuario): eliminar un bulto que quedó VACÍO por un error del operario
