@@ -6625,20 +6625,17 @@ app.post('/admin/simulador-plc/paquete', requireLogin, requireAdmin, exigirSimul
       .input('golpes', golpes).input('potencia', potencia)
       .query(SQL_SIM_PESAJE);
     const fila = dt.recordset && dt.recordset[0];
-<<<<<<< HEAD
-    let resumen = fila
-=======
     // 01/10/2026: igual que Node-RED -- con Resultado distinto de 'OK' no hay etiqueta y se avisa
     // a la tableta de la máquina (mismo aviso que manda POST /api/selladora/aviso-pesaje).
+    // Vuelve a la página que llamó (tarjeta de la orden/grupo o página del simulador).
     if (fila && fila.Resultado && fila.Resultado !== 'OK') {
       avisosPesaje.set(String(maquina), {
         id: siguienteIdAvisoPesaje++, resultado: fila.Resultado, mensaje: fila.Mensaje || '',
         peso, serialPadre: fila.SerialPadre || null, fecha: new Date().toISOString()
       });
-      return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&error=' + encodeURIComponent(fila.Resultado + ': ' + (fila.Mensaje || '')));
+      return redirSimulador(req, res, maquina, 'error', fila.Resultado + ': ' + (fila.Mensaje || ''));
     }
-    const resumen = fila
->>>>>>> 87bc167d5ce0684b171e1981257d04580c239a5f
+    let resumen = fila
       ? `Paquete #${fila.number_paqu} (serial ${fila.SerialHijo}) en bulto ${fila.SerialPadre || ''}.`
       : 'Paquete registrado.';
     if (alterno) resumen += ' (Alternó a esta referencia antes de pesar.)';
