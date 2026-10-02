@@ -47,6 +47,14 @@
 --      todavia no existe, queda NULL y se completa al cerrar el bulto. Tambien se guarda en
 --      SEL_Bultos.IdBitacora (antes solo el primer bulto la tenia ahi).
 --
+-- ACTUALIZADO 06/10/2026 (matriz tarjeta #9, misma ref en 2 pedidos): el INSERT de abajo
+-- es por conjunto (un UPDATE puede cerrar varios bultos a la vez, ej. Finalizar cierra los
+-- EnEspera con paquetes de todas las referencias). El MAX+1 se calculaba igual para cada
+-- fila y dos bultos de la misma referencia/día quedaban con el MISMO num_bulto/serial
+-- (UQ_SEL_Bultos_SerialArmado). Ahora es base MAX + ROW_NUMBER() por (día, referencia).
+-- Con una sola fila es idéntico a antes.
+-- PENDIENTE de aplicar en cada base con CREATE OR ALTER (no deja transacción abierta).
+--
 -- ACTUALIZADO 28/09/2026 (a pedido del usuario) -- PENDIENTE de aplicar:
 --   6) Hora final protegida. Casos reales: 35967 L6 (25/09), 36788 L6 (26/09), 22421 L2 (27/09) con
 --      HoraFin = HoraInicio y Duracion 0 (Node-RED mandaba un @HoraPLC viejo, el del cierre anterior),
@@ -200,16 +208,16 @@ BEGIN
     SELECT
         fn.agno, fn.mes, fn.dia,
         0,
-        sig.NuevoNumBulto,
+        base.BaseMaxima + ROW_NUMBER() OVER (PARTITION BY fn.agno, fn.mes, fn.dia, i.refsalida ORDER BY i.id) AS NuevoNumBultoCalc,
         i.refsalida,
         'Temporal',
         CAST(fn.agno AS varchar(4))
             + RIGHT('000000' + CAST(fn.mes*100 + fn.dia AS varchar(6)), 6)
-            + RIGHT('0000'   + CAST(sig.NuevoNumBulto AS varchar(4)), 4)
+            + RIGHT('0000'   + CAST(base.BaseMaxima + ROW_NUMBER() OVER (PARTITION BY fn.agno, fn.mes, fn.dia, i.refsalida ORDER BY i.id) AS varchar(4)), 4)
             + RIGHT('00000'  + CAST(i.refsalida AS varchar(5)), 5)      AS serialArmado_calc,
         CAST(fn.agno AS varchar(4))
             + RIGHT('000000' + CAST(fn.mes*100 + fn.dia AS varchar(6)), 6)
-            + RIGHT('0000'   + CAST(sig.NuevoNumBulto AS varchar(4)), 4)
+            + RIGHT('0000'   + CAST(base.BaseMaxima + ROW_NUMBER() OVER (PARTITION BY fn.agno, fn.mes, fn.dia, i.refsalida ORDER BY i.id) AS varchar(4)), 4)
             + RIGHT('00000'  + CAST(i.refsalida AS varchar(5)), 5)      AS serialPadre_calc,
         i.id_maquina, i.id_ejecucion,
         fn.HoraApertura,
@@ -229,7 +237,9 @@ BEGIN
                DAY(h.HoraApertura)   AS dia
     ) fn
     CROSS APPLY (
-        SELECT ISNULL(MAX(x.Linea), 0) + 1 AS NuevoNumBulto
+        -- FIX 06/10/2026 (matriz #9): base sin +1; el +N lo pone ROW_NUMBER() en el SELECT,
+        -- para que N bultos cerrados en el mismo statement no repitan número/serial.
+        SELECT ISNULL(MAX(x.Linea), 0) AS BaseMaxima
         FROM (
             SELECT Linea FROM PRDProduccion
             WHERE Year(Fecha) = fn.agno
@@ -240,7 +250,7 @@ BEGIN
             SELECT num_bulto FROM SEL_Bultos
             WHERE agno = fn.agno AND mes = fn.mes AND dia = fn.dia AND refsalida = i.refsalida
         ) x
-    ) sig
+    ) base
     WHERE i.estado = 'Cerrado' AND d.estado <> 'Cerrado';
 
     -- Reserva la fila PRDProduccion (Cantidad=0) de cada bulto recien insertado arriba,
