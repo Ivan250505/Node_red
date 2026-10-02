@@ -5102,6 +5102,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     reanudarProtocoloArranque(${JSON.stringify(protocoloPendiente)}, false);
   </script>` : ''}
   ${avanceCard ? `<script>${scriptAvanceProduccion(orden.IdOrden, maquinaCodigo)}</script>` : ''}
+  ${scriptMensajeVolver()}
 </body>
 </html>`;
 }
@@ -6341,6 +6342,48 @@ function redirSimulador(req, res, maquina, tipo, texto) {
   return res.redirect('/admin/simulador-plc?maquina=' + maquina + '&' + tipo + '=' + encodeURIComponent(texto));
 }
 
+// Opción completa (revisión sprint 2, aclaración 02/10): los botones del simulador dentro de
+// la tarjeta de una referencia alternan primero a esa referencia (igual que "Imprimir etiqueta"
+// y "Cierre bulto" en la tableta: alternarSilencioso → POST alternar-referencia) y luego pesan
+// o cierran. Si pesan en la B, la B queda Activa con el paquete y la A pasa a EnEspera.
+// Sin idOrden (página del simulador) conserva el comportamiento por máquina de siempre.
+// Devuelve true si alternó, null si ya estaba activa. No arranca referencias sin ejecución.
+async function alternarParaSimulador(p, req, idOrden, maquina) {
+  if (!idOrden) return null;
+  const dtOrd = await p.request().input('idOrden', idOrden).query(
+    `SELECT Maquina FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+  if (dtOrd.recordset.length === 0) throw new Error('Orden no encontrada.');
+  if (Number(dtOrd.recordset[0].Maquina) !== Number(maquina)) throw new Error('Esa orden no es de esta máquina.');
+  const dtAct = await p.request().input('maquina', maquina).query(`
+    SELECT TOP 1 ej.IdOrden FROM SEL_Bultos b
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+    WHERE b.id_maquina = @maquina AND b.estado IN ('Activo', 'Temporal') ORDER BY b.id DESC`);
+  if (dtAct.recordset.length > 0 && Number(dtAct.recordset[0].IdOrden) === Number(idOrden)) return null;
+  const dtEj = await p.request().input('idOrden', idOrden).query(
+    `SELECT TOP 1 IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden AND Estado = 'Activa'`);
+  if (dtEj.recordset.length === 0) throw new Error('Esta referencia no tiene ejecución en curso: primero debe estar activa en la máquina.');
+  const usuario = req.session.usuario;
+  if (!usuario.codigoOperarioPRD) throw new Error('Su usuario no tiene un operario de planta configurado.');
+  const dtBolsas = await p.request().input('maquina', maquina).query(`
+    SELECT TOP 1 ej.BolsasxGolpe FROM SEL_EjecucionOrden ej
+    INNER JOIN SEL_OrdenProduccion ord ON ord.IdOrden = ej.IdOrden
+    WHERE ord.Maquina = @maquina AND ej.Estado = 'Activa'
+    ORDER BY ej.IdEjecucion DESC`);
+  await alternarReferenciaGrupo(p, {
+    idOrdenDestino: idOrden,
+    codOperario: usuario.codigoOperarioPRD,
+    bolsasXGolpe: dtBolsas.recordset.length > 0 ? dtBolsas.recordset[0].BolsasxGolpe : 0,
+    generadoPor: usuario.generadoPor
+  });
+  return true;
+}
+
+// Al volver a la página de la orden o del grupo tras un botón del simulador, muestra el
+// mensaje ok/error que trae la URL y lo limpia para no repetirlo al recargar.
+function scriptMensajeVolver() {
+  return `<script>(function(){try{var q=new URLSearchParams(window.location.search);var ok=q.get('ok'),err=q.get('error');if(ok||err){Swal.fire({icon:err?'error':'success',title:err?'Error':'Listo',text:ok||err,confirmButtonColor:'#71bf44'});q.delete('ok');q.delete('error');var u=window.location.pathname+(q.toString()?'?'+q.toString():'');window.history.replaceState({},'',u);}}catch(e){}})();</script>`;
+}
+
 function renderSimuladorPLC(usuario, maquinas, maquinaSel, bultosPadre, error, mensaje) {
   const opciones = maquinas.map(m =>
     `<option value="${m.Codigo}" ${String(maquinaSel) === String(m.Codigo) ? 'selected' : ''}>${m.Nombre}</option>`
@@ -6499,14 +6542,16 @@ app.post('/admin/simulador-plc/paquete', requireLogin, requireAdmin, exigirSimul
 
   try {
     const p = await getPool();
+    const alterno = await alternarParaSimulador(p, req, Number(req.body.idOrden) || null, maquina);
     const dt = await p.request()
       .input('maquina', maquina).input('peso', peso)
       .input('golpes', golpes).input('potencia', potencia)
       .query(SQL_SIM_PESAJE);
     const fila = dt.recordset && dt.recordset[0];
-    const resumen = fila
+    let resumen = fila
       ? `Paquete #${fila.number_paqu} (serial ${fila.SerialHijo}) en bulto ${fila.SerialPadre || ''}.`
       : 'Paquete registrado.';
+    if (alterno) resumen += ' (Alternó a esta referencia antes de pesar.)';
     await trazaSimulador(p, req.session.usuario, 'PESAJE',
       `${req.session.usuario.nombre} maq=${maquina} peso=${peso}`, resumen);
     return redirSimulador(req, res, maquina, 'ok', resumen);
@@ -6524,8 +6569,10 @@ app.post('/admin/simulador-plc/cerrar-bulto', requireLogin, requireAdmin, exigir
 
   try {
     const p = await getPool();
+    const alterno = await alternarParaSimulador(p, req, Number(req.body.idOrden) || null, maquina);
     await p.request().input('MiMaquina', maquina).query(SQL_SIM_CIERRE);
-    const resumen = `Cierre ejecutado en máquina ${maquina} (verifique bultos en la cola).`;
+    let resumen = `Cierre ejecutado en máquina ${maquina} (verifique bultos en la cola).`;
+    if (alterno) resumen += ' (Alternó a esta referencia antes de cerrar.)';
     await trazaSimulador(p, req.session.usuario, 'CIERRE',
       `${req.session.usuario.nombre} maq=${maquina}`, resumen);
     return redirSimulador(req, res, maquina, 'ok', resumen);
@@ -6585,13 +6632,15 @@ app.post('/admin/simulador-plc/residuo-pendiente', requireLogin, requireAdmin, e
 
   try {
     const p = await getPool();
+    const alterno = await alternarParaSimulador(p, req, Number(req.body.idOrden) || null, maquina);
     const dt = await p.request()
       .input('maquina', maquina).input('tipoResiduo', tipoResiduo)
       .query(SQL_SIM_PENDIENTE);
     const fila = dt.recordset && dt.recordset[0];
-    const resumen = fila
+    let resumen = fila
       ? `Residuo pendiente tipo ${tipoResiduo}: hijo ${fila.SerialHijo} (línea ${fila.LineaHijo}, Cantidad=0 hasta que el digitador confirme).`
       : 'Residuo pendiente registrado.';
+    if (alterno) resumen += ' (Alternó a esta referencia antes de marcar.)';
     await trazaSimulador(p, req.session.usuario, 'RESIDUO_PENDIENTE',
       `${req.session.usuario.nombre} maq=${maquina} tipo=${tipoResiduo}`, resumen);
     return redirSimulador(req, res, maquina, 'ok', resumen);
@@ -7330,6 +7379,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
     // que en la pagina de una referencia suelta.
     reanudarProtocoloArranque(${JSON.stringify(protocoloPendiente)}, false);
   </script>` : ''}
+  ${scriptMensajeVolver()}
 </body>
 </html>`;
 }
@@ -7564,6 +7614,7 @@ function bloqueSimuladorReferencia(maquinaCodigo, idOrden, bultos, volverUrl) {
     <div class="imprimir-acciones-grid">
       <form method="post" action="/admin/simulador-plc/paquete">
         <input type="hidden" name="maquina" value="${maquinaCodigo}">
+        <input type="hidden" name="idOrden" value="${idOrden}">
         <input type="hidden" name="volver" value="${volverUrl}">
         <label>Peso</label>
         <input type="number" step="0.001" min="0" name="peso" value="18" required>
@@ -7575,6 +7626,7 @@ function bloqueSimuladorReferencia(maquinaCodigo, idOrden, bultos, volverUrl) {
       </form>
       <form method="post" action="/admin/simulador-plc/cerrar-bulto">
         <input type="hidden" name="maquina" value="${maquinaCodigo}">
+        <input type="hidden" name="idOrden" value="${idOrden}">
         <input type="hidden" name="volver" value="${volverUrl}">
         <button type="submit" class="btn-cierre-bulto" style="min-height:100%;color:#fff;">📦 Cierre bulto</button>
       </form>
@@ -7591,6 +7643,7 @@ function bloqueSimuladorReferencia(maquinaCodigo, idOrden, bultos, volverUrl) {
     </form>
     <form method="post" action="/admin/simulador-plc/residuo-pendiente" style="margin-top:10px;">
       <input type="hidden" name="maquina" value="${maquinaCodigo}">
+      <input type="hidden" name="idOrden" value="${idOrden}">
       <input type="hidden" name="volver" value="${volverUrl}">
       <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;">
         <div style="flex:1 1 110px;"><label>Tipo</label><select name="tipoResiduo">${tipos}</select></div>

@@ -348,8 +348,12 @@ con producción las rutas devuelven 404. Cada acción deja rastro `SIMULADOR_PLC
 `ADMIN` es texto y no cabe en esa columna INT) y el login en `Motivo`. Notas:
 
 - Sprint 2: cada tarjeta de referencia Activa (página de orden y de grupo) trae su bloque
-  compacto con los 4 botones, sobre los bultos de ESA referencia, y vuelve a la misma página.
-  La cola se actualiza sola por sondeo.
+  compacto con los 4 botones, sobre los bultos de ESA referencia, y vuelve a la misma página
+  mostrando el mensaje ok/error. La cola se actualiza sola por sondeo.
+- Sprint 2 (aclaración 02/10): pesar/cerrar/pendiente desde la tarjeta de una referencia
+  **alternan primero a esa referencia** (igual que la tableta) y luego ejecutan: si pesan en
+  la B, la B queda Activa con el paquete y la A pasa a EnEspera. No arranca referencias sin
+  ejecución en curso.
 - El SQL se carga **una sola vez al arrancar**: si se edita un `.sql` de `node_red/`,
   hay que reiniciar el Node para que el simulador use la versión nueva.
 - El botón de cierre ejecuta el 02 tal cual: cierra TODOS los Activo/Temporal de la
