@@ -216,6 +216,21 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
   const nLineaAnclaParaOP = anclaGrupo
     ? await obtenerLineaOriginalControlSellado(tx, anclaGrupo.IdOrden, 0)
     : nLineaOriginal;
+  // Tarjeta #9 (06/10/2026, bug 2 OT): reutilizar la OT que ya tenga el ancla en vez de
+  // recalcularla. obtenerLineaOriginalControlSellado(ancla, 0) devuelve 0 antes de insertar
+  // el primer bulto del ancla y 1 después (el 209 ya existe al crear el 210) — por eso salían
+  // T01 (ancla 0) y T02 (ancla 1). El primero que llega la crea; los demás la reutilizan,
+  // sin importar el orden. Misma transacción: ve lo propio no confirmado.
+  let tOrdenProduccionAncla = null;
+  if (anclaGrupo) {
+    const dtOTAncla = await tx.request().input('idOrden', anclaGrupo.IdOrden).query(`
+      SELECT TOP 1 pp.OrdenProduccion FROM SEL_Bultos b
+      INNER JOIN PRDProduccion pp ON pp.Detalle = b.serialPadre
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+      WHERE ej.IdOrden = @idOrden AND pp.OrdenProduccion IS NOT NULL
+      ORDER BY b.id DESC`);
+    if (dtOTAncla.recordset.length > 0) tOrdenProduccionAncla = dtOTAncla.recordset[0].OrdenProduccion;
+  }
   const nCodDestinoBulto = await resolverDestinoOrden(tx, idOrden, tNumeroPedido);
   // FIX 22/09/2026: se mueve la resolucion del turno para ACA (antes corria mas abajo, despues del
   // INSERT en SEL_Bultos) porque el nuevo formato de serial de OT la necesita para construirse --
@@ -224,7 +239,7 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
   if (nTurnoBulto <= 0) {
     throw new Error('No se encontró un turno activo configurado para esta máquina a esta hora en TURHorariosMaquinas.\nTurno es un campo obligatorio en PRDProduccion -- corrija la configuración de turnos antes de continuar.');
   }
-  const tOrdenProduccion = await obtenerOCrearOrdenProduccion(tx, {
+  const tOrdenProduccion = tOrdenProduccionAncla || await obtenerOCrearOrdenProduccion(tx, {
     elemento: nElementoParaOP, fecha: fFechaSolo, lineaAncla: nLineaAnclaParaOP, lote: tLote,
     codigoDestino: nCodDestinoBulto, maquina: nMaquina, turno: nTurnoBulto, generadoPor, idEjecucion
   });
@@ -527,11 +542,21 @@ async function materializarInicioOrden(pool, { idOrden, idEjecucion, codOperario
     const dtHermanos = await tx.request().input('idOrden', idOrden).query(`
       SELECT ord2.IdOrden
       FROM SEL_OrdenProduccion ord1
-      INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Linea = ord1.Linea
-      INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl1.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
-        AND g.Numero = ord1.NumeroPedido
-      INNER JOIN PRDGrupoEtapasCompartidasLineas gl2 ON gl2.IdGrupo = g.IdGrupo
-      INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gl2.Linea AND ord2.NumeroPedido = g.Numero
+      INNER JOIN PRDGrupoEtapasCompartidas g ON g.CategoriaMaquina = 'SELLADORA'
+        AND (EXISTS (SELECT 1 FROM PRDGrupoEtapasCompartidasLineas gl
+                    WHERE gl.IdGrupo = g.IdGrupo AND gl.Linea = ord1.Linea AND g.Numero = ord1.NumeroPedido)
+          OR EXISTS (SELECT 1 FROM PRDGrupoEtapasPedidosExtra pe
+                    WHERE pe.IdGrupo = g.IdGrupo AND pe.Numero = ord1.NumeroPedido AND pe.Linea = ord1.Linea))
+      INNER JOIN (
+        SELECT gl2.Linea AS Linea, g2.Numero AS Numero, gl2.IdGrupo AS IdGrupo
+        FROM PRDGrupoEtapasCompartidasLineas gl2
+        INNER JOIN PRDGrupoEtapasCompartidas g2 ON g2.IdGrupo = gl2.IdGrupo
+        UNION
+        SELECT pe2.Linea AS Linea, pe2.Numero AS Numero, pe2.IdGrupo AS IdGrupo
+        FROM PRDGrupoEtapasPedidosExtra pe2
+      ) gm ON gm.IdGrupo = g.IdGrupo
+      INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gm.Linea AND ord2.NumeroPedido = gm.Numero
+        AND ord2.Maquina = ord1.Maquina
       WHERE ord1.IdOrden = @idOrden AND ord2.IdOrden <> @idOrden AND ord2.Estado = 'Pendiente'
     `);
     for (const filaHermano of dtHermanos.recordset) {

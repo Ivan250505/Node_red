@@ -1158,10 +1158,11 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
              <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
            </form>`;
       }
+      const pedidosFusion = [...new Set(miembros.map(m => (m.NumeroPedido || '').trim()).filter(Boolean))];
       return `
         <div class="orden-cola">
           <div class="orden-info">
-            <div class="orden-pedido">🔗 Pedido ${ancla.NumeroPedido || '—'} ${badgeEstadoOrden(ancla.Estado)}</div>
+            <div class="orden-pedido">🔗 Pedido ${pedidosFusion.join(' · ') || ancla.NumeroPedido || '—'} ${badgeEstadoOrden(ancla.Estado)}</div>
             <div class="orden-elemento">${referencias}</div>
             <div class="orden-elemento" style="color:var(--texto-suave);">Un solo proceso -- ${miembros.length} referencias de salida</div>
             ${ancla.OrdenProduccion ? `<div class="orden-elemento" style="color:var(--texto-suave);">OP: ${ancla.OrdenProduccion}</div>` : ''}
@@ -6208,16 +6209,22 @@ async function obtenerColaOrdenes(p, codigo) {
            (SELECT TOP 1 pp.OrdenProduccion FROM SEL_Bultos b
             INNER JOIN PRDProduccion pp ON pp.Detalle = b.serialPadre
             WHERE b.id_ejecucion = ej.IdEjecucion AND pp.OrdenProduccion IS NOT NULL) AS OrdenProduccion,
-           (SELECT TOP 1 g.IdGrupo FROM PRDGrupoEtapasCompartidasLineas gl
-            INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
-            -- FIX 09/09/2026 (bug real: Pedido 11085 se coló en el grupo del Pedido 11408 porque
-            -- ambos usan el mismo Elemento de salida en fechas distintas) -- Línea por sí sola
-            -- TAMPOCO alcanza: dos pedidos DISTINTOS pueden compartir el mismo número de línea, así
-            -- que se sigue exigiendo también el MISMO pedido (g.Numero es el Numero del pedido para
-            -- el que se armó ese grupo, ver crear_grupoetapascompartidas.sql). NULL = NULL nunca es
-            -- verdadero en SQL, así que una orden sin ord.Linea guardada (creada antes de este
-            -- cambio) simplemente no matchea nada -- no hace falta filtro aparte.
-            WHERE gl.Linea = ord.Linea AND g.Numero = ord.NumeroPedido) AS IdGrupoSellado
+            (SELECT TOP 1 g.IdGrupo FROM PRDGrupoEtapasCompartidasLineas gl
+             INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
+             -- FIX 09/09/2026 (bug real: Pedido 11085 se coló en el grupo del Pedido 11408 porque
+             -- ambos usan el mismo Elemento de salida en fechas distintas) -- Línea por sí sola
+             -- TAMPOCO alcanza: dos pedidos DISTINTOS pueden compartir el mismo número de línea, así
+             -- que se sigue exigiendo también el MISMO pedido (g.Numero es el Numero del pedido para
+             -- el que se armó ese grupo, ver crear_grupoetapascompartidas.sql). NULL = NULL nunca es
+             -- verdadero en SQL, así que una orden sin ord.Linea guardada (creada antes de este
+             -- cambio) simplemente no matchea nada -- no hace falta filtro aparte.
+             -- Tarjeta #9 (06/10/2026): el grupo puede traer miembros de otros pedidos
+             -- (PRDGrupoEtapasPedidosExtra, estructura #7) -- segunda pata del OR. Sin filas extra,
+             -- idéntico a antes.
+             WHERE (gl.Linea = ord.Linea AND g.Numero = ord.NumeroPedido)
+                OR EXISTS (SELECT 1 FROM PRDGrupoEtapasPedidosExtra pe
+                           WHERE pe.IdGrupo = g.IdGrupo AND pe.Numero = ord.NumeroPedido AND pe.Linea = ord.Linea)
+            ) AS IdGrupoSellado
     FROM SEL_OrdenProduccion ord
     INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
     LEFT JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
@@ -6754,7 +6761,10 @@ app.post('/admin/simulador-plc/residuo-pendiente', requireLogin, requireAdmin, e
 // el que se armó ESE grupo puntual), la expansión "todos los miembros de este IdGrupo" termina
 // trayendo órdenes de OTRO pedido que nunca tuvo nada que ver -- eso bloqueaba Finalizar (contaba
 // un bulto Activo ajeno) y corrompía la página de grupo/alternar. Todas las consultas de aquí para
-// abajo que expanden un IdGrupo a sus miembros reales exigen `ord.NumeroPedido = g.Numero`.
+// abajo que expanden un IdGrupo a sus miembros reales exigen (pedido, línea) por miembro:
+// `ord.NumeroPedido = g.Numero` para filas de Lineas, u `ord.NumeroPedido+Línea` en
+// PRDGrupoEtapasPedidosExtra (tarjeta #9, estructura #7). La protección anti-colados del
+// 11085/11408 se mantiene: línea sola sigue sin alcanzar.
 // FIX 13/09/2026 (bug real, mismo patrón ya corregido en frmLiberacionProduccion.vb para pedido
 // 11243 -- REVIERTE el criterio del 08/09/2026: la llave real es ord.Elemento): esa razón resultó
 // ser la misma causa raíz del bug -- dos LÍNEAS DISTINTAS del mismo pedido pueden vender la misma
@@ -6766,7 +6776,9 @@ async function obtenerIdGrupoSelladoDeOrden(p, idOrden) {
     FROM SEL_OrdenProduccion ord
     INNER JOIN PRDGrupoEtapasCompartidasLineas gl ON gl.Linea = ord.Linea
     INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
-      AND g.Numero = ord.NumeroPedido
+      AND (g.Numero = ord.NumeroPedido
+        OR EXISTS (SELECT 1 FROM PRDGrupoEtapasPedidosExtra pe
+                   WHERE pe.IdGrupo = g.IdGrupo AND pe.Numero = ord.NumeroPedido AND pe.Linea = ord.Linea))
     WHERE ord.IdOrden = @idOrden
   `);
   return dtGrupo.recordset.length > 0 ? dtGrupo.recordset[0].IdGrupo : null;
@@ -6789,21 +6801,37 @@ async function obtenerMiembrosGrupoSellado(p, idGrupo) {
            CASE WHEN er12.Valor IS NOT NULL THEN 1 ELSE 0 END AS TieneImpresion,
            ti.Descripcion AS TipoImpresionDescripcion,
            ${COLUMNAS_MEDIDAS_BOLSA},
-           (SELECT TOP 1 b.estado FROM SEL_Bultos b
-            INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
-            WHERE ej.IdOrden = ord.IdOrden ORDER BY b.id DESC) AS EstadoBultoActual
-    FROM PRDGrupoEtapasCompartidasLineas gl
-    INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl.IdGrupo
+            (SELECT TOP 1 b.estado FROM SEL_Bultos b
+             INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+             WHERE ej.IdOrden = ord.IdOrden ORDER BY b.id DESC) AS EstadoBultoActual,
+            -- Tarjeta #9 (06/10/2026): cantidad programada del miembro (una tarjeta por miembro,
+            -- aunque repitan referencia entre pedidos). Del extra si viene de otro pedido, si no
+            -- de la línea del pedido.
+            ISNULL(pe.Cantidad, vme.Cantidad) AS CantidadProgramada
+    FROM (
+      SELECT gl.IdGrupo, gl.Linea AS Linea, g.Numero AS Numero
+      FROM PRDGrupoEtapasCompartidasLineas gl
+      INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl.IdGrupo
+      WHERE gl.IdGrupo = @idGrupo
+      UNION
+      SELECT pe.IdGrupo, pe.Linea AS Linea, pe.Numero AS Numero
+      FROM PRDGrupoEtapasPedidosExtra pe
+      WHERE pe.IdGrupo = @idGrupo
+    ) gm
+    INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gm.IdGrupo
     -- FIX 13/09/2026 (mismo patrón que obtenerIdGrupoSelladoDeOrden -- ver comentario arriba):
-    -- Línea, no Elemento, para no confundir dos líneas distintas del mismo pedido que vendan la
-    -- misma referencia.
-    INNER JOIN SEL_OrdenProduccion ord ON ord.Linea = gl.Linea AND ord.NumeroPedido = g.Numero
+    -- Línea + pedido, no Elemento, para no confundir dos líneas distintas del mismo pedido que
+    -- vendan la misma referencia.
+    INNER JOIN SEL_OrdenProduccion ord ON ord.Linea = gm.Linea AND ord.NumeroPedido = gm.Numero
+    LEFT JOIN PRDGrupoEtapasPedidosExtra pe ON pe.IdGrupo = gm.IdGrupo AND pe.Numero = gm.Numero AND pe.Linea = gm.Linea
+    LEFT JOIN VENMovimientosElementos vme ON vme.SubEmpresa = g.SubEmpresa AND vme.Tipo = g.Tipo
+      AND vme.Fecha = g.Fecha AND vme.Numero = gm.Numero AND vme.Linea = gm.Linea
     INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
     INNER JOIN PRDMaquinas maq ON maq.Codigo = ord.Maquina
     LEFT JOIN INVElementosReferencia er12 ON er12.Elemento = ord.Elemento AND er12.Categoria = 12
     LEFT JOIN INVElementosReferencia er13 ON er13.Elemento = ord.Elemento AND er13.Categoria = 13
     LEFT JOIN INVReferencia ti ON ti.Categoria = 13 AND ti.Codigo = er13.Valor${JOINS_MEDIDAS_BOLSA}
-    WHERE gl.IdGrupo = @idGrupo
+    WHERE gm.IdGrupo = @idGrupo
     ORDER BY ord.IdOrden
   `);
   return dtMiembros.recordset;
@@ -7244,6 +7272,7 @@ function renderTarjetaReferenciaGrupo(m, indice, simHtml = '') {
           <div class="ref-card-id">
             <div class="ref-card-codigo">${m.Referencia}</div>
             <div class="ref-card-nombre">${m.Nombre || ''}</div>
+            <div class="ref-card-nombre">Pedido ${m.NumeroPedido || '—'}${m.CantidadProgramada != null ? ' · ' + Number(m.CantidadProgramada).toLocaleString('es-CO') + ' prog.' : ''}</div>
           </div>
           ${avanceHeader}
           <span class="ref-card-chevron">▶</span>
@@ -7666,7 +7695,9 @@ app.get('/selladora/:codigo/grupo/:idGrupo', requireLogin, async (req, res) => {
         }
       }
     }
-    res.send(renderGrupoSelladoDetalle(idGrupo, miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, textoOT,
+    // Tarjeta #9: encabezado con TODOS los pedidos del grupo ("Pedido 11285 · 11286").
+    const pedidosGrupo = [...new Set(miembros.map(m => (m.NumeroPedido || '').trim()).filter(Boolean))];
+    res.send(renderGrupoSelladoDetalle(idGrupo, pedidosGrupo.join(' · ') || miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, textoOT,
       esSupervisor(req.session.usuario), await infoOTParaCorreccion(p, ordenProduccion), simPorOrden));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
