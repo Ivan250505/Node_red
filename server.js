@@ -5363,7 +5363,6 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto, opcione
         <div><span class="label">Potencia (W)</span><span class="valor">${b.Potencia ?? '—'}</span></div>
         <div><span class="label">Hora final</span><span class="valor">${b.HoraFin ?? '—'}</span></div>
         <div><span class="label">Golpes x minuto</span><span class="valor">${b.Golpes ?? '—'}</span></div>
-        <div><span class="label">Tiempo productivo (h)</span><span class="valor">${b.HorasProductivas != null ? Number(b.HorasProductivas).toFixed(2) : '—'}</span></div>
         <div><span class="label">Consumo potencia (kWh)</span><span class="valor">${b.ConsumoKWh != null ? Number(b.ConsumoKWh).toFixed(3) : '—'}</span></div>
         <div class="full"><span class="label">Serial</span><span class="valor serial">${b.serialPadre ?? '—'}</span></div>
       </div>
