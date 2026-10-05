@@ -5393,29 +5393,34 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto, opcione
 // dbo.sp_SEL_TrasladarPaquete (ver crear_sp_trasladar_paquete.sql), este bloque solo arma el
 // formulario -- scriptTraslado() hace el fetch y dispara la reimpresión.
 // `opciones` (10/09/2026, mismo criterio que renderTarjetasBultos): en un pedido con varias
-// referencias de salida hay UNA seccion de traslado por referencia -- un paquete solo puede
-// moverse entre bultos de SU MISMA referencia (son elementos distintos: mover un paquete de la
-// 7002 a un bulto de la 7015 seria un error de datos, no un traslado). Por eso la pagina de grupo
-// renderiza varias secciones y el filtro por referencia las muestra/esconde junto con sus bultos.
-function renderSeccionTraslado(bultos, pesajesPorBulto, opciones) {
+// referencias de salida hay UNA seccion de traslado por referencia. Tarjeta #10: el destino
+// (`destinoExtra`) trae bultos de TODAS las referencias del grupo (misma OT); el SP valida.
+function renderSeccionTraslado(bultos, pesajesPorBulto, opciones, destinoExtra = '') {
   const modoGrupo = !!(opciones && opciones.referencia);
-  if (bultos.length < 2) return ''; // hace falta al menos un bulto origen y uno destino
+  // Tarjeta #10: en grupo el destino puede venir de otra referencia (destinoExtra), así que
+  // la sección sale aunque esta referencia tenga un solo bulto. Sin nada que mover ni a
+  // dónde mover, no se pinta.
+  if (bultos.length === 0) return '';
+  if (bultos.length < 2 && !destinoExtra) return ''; // hace falta un origen y un destino
 
   const opcionesPaquete = [];
   bultos.forEach(b => {
     const pesajes = pesajesPorBulto.get(b.id) || [];
     pesajes.forEach(pe => {
       opcionesPaquete.push(
-        `<option value="${pe.id_paquete}">Bulto ${b.numRelativo} — Paquete ${pe.ConsecutivoPaquete} (${Number(pe.PesoPaqueGr)} kg)</option>`
+        `<option value="${pe.id_paquete}" data-bulto="${b.id}">Bulto ${b.numRelativo} — Paquete ${pe.ConsecutivoPaquete} (${Number(pe.PesoPaqueGr)} kg)</option>`
       );
     });
   });
   if (opcionesPaquete.length === 0) return ''; // sin paquetes pesados todavía, nada que trasladar
 
   const opcionesBulto = bultos.map(b => `<option value="${b.id}">Bulto ${b.numRelativo}</option>`).join('');
+  // Tarjeta #10: en grupo el destino es la lista etiquetada por referencia (incluye los propios
+  // con su estado, sin duplicar el "Bulto N" pelado que confundía con el de la otra referencia).
+  const opcionesDestino = destinoExtra ? destinoExtra : opcionesBulto;
 
   return `
-  <div class="card seccion-traslado"${modoGrupo ? ` data-ref="${opciones.referencia}" data-orden="${opciones.idOrden}" style="--color-ref:${opciones.color};"` : ''}>
+  <div class="card seccion-traslado" data-orden="${opciones && opciones.idOrden ? opciones.idOrden : ''}"${modoGrupo ? ` data-ref="${opciones.referencia}" style="--color-ref:${opciones.color};"` : ''}>
     <div class="card-top"><span class="bulto-num">🔀 Trasladar paquete entre bultos${modoGrupo ? ` — ${opciones.referencia}` : ''}</span></div>
     ${modoGrupo ? `<div class="bulto-ref"><div class="bulto-ref-subrayado"></div><div class="bulto-ref-nombre">${opciones.nombreReferencia || ''}</div></div>` : ''}
     <div class="traslado-campo">
@@ -5429,10 +5434,11 @@ function renderSeccionTraslado(bultos, pesajesPorBulto, opciones) {
       <label>Bulto destino</label>
       <select class="sel-bulto-destino">
         <option value="">Seleccione…</option>
-        ${opcionesBulto}
+        ${opcionesDestino}
       </select>
     </div>
     <button type="button" class="btn-accion btn-traslado" onclick="confirmarTraslado(this)">🔀 Trasladar</button>
+    <button type="button" class="btn-accion btn-traslado" style="margin-top:8px;background:#8e44ad;" onclick="confirmarTrasladoBulto(this)">📦 Trasladar bulto completo</button>
   </div>`;
 }
 
@@ -5751,6 +5757,55 @@ function scriptTraslado(idOrden, maquinaCodigo) {
           });
       });
     }
+    // Tarjeta #10: mueve TODOS los paquetes del bulto del paquete seleccionado al bulto
+    // destino (o crea el Temporal en la orden de la sección si no se elige destino).
+    // El SP mueve en orden con la misma regla y deja el origen eliminado/Temporal en 0.
+    function confirmarTrasladoBulto(boton) {
+      var seccion = boton ? boton.closest('.seccion-traslado') : document;
+      var selOrigen = seccion.querySelector('.sel-paquete-origen');
+      var selDestino = seccion.querySelector('.sel-bulto-destino');
+      var idOrdenSeccion = (seccion.dataset && seccion.dataset.orden) ? Number(seccion.dataset.orden) : null;
+      var optSel = selOrigen.options[selOrigen.selectedIndex];
+      var idBultoOrigen = optSel && optSel.dataset ? Number(optSel.dataset.bulto) : null;
+      var idBultoDestino = selDestino.value ? Number(selDestino.value) : null;
+      if (!idBultoOrigen) {
+        Swal.fire({ icon: 'warning', title: 'Seleccione primero un paquete del bulto a mover.', confirmButtonColor: '#71bf44' });
+        return;
+      }
+      var textoBulto = selDestino.value ? selDestino.options[selDestino.selectedIndex].text : 'un bulto Temporal nuevo';
+      Swal.fire({
+        icon: 'warning',
+        title: '¿Trasladar TODO el bulto a ' + textoBulto + '?',
+        text: 'Se mueven todos sus paquetes en orden. El origen queda eliminado (si estaba cerrado) o Temporal en 0.',
+        showCancelButton: true,
+        confirmButtonText: 'Sí, trasladar todo',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#71bf44',
+        cancelButtonColor: '#c0392b'
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        Swal.fire({ title: 'Trasladando…', allowOutsideClick: false, didOpen: function() { Swal.showLoading(); } });
+        fetch('/api/selladora/bulto/trasladar', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idBultoOrigen: idBultoOrigen, idBultoDestino: idBultoDestino, idOrdenDestino: idOrdenSeccion })
+        })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (!data.ok) {
+              Swal.fire({ icon: 'error', title: 'No se pudo trasladar', text: data.error || '', confirmButtonColor: '#71bf44' });
+              return;
+            }
+            Swal.fire({
+              icon: 'success', title: 'Bulto trasladado', text: data.movidos + ' paquete(s) movidos.',
+              confirmButtonColor: '#71bf44'
+            }).then(function() { location.reload(); });
+          })
+          .catch(function(err) {
+            Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo trasladar: ' + err.message, confirmButtonColor: '#71bf44' });
+          });
+      });
+    }
   `;
 }
 
@@ -5906,7 +5961,7 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, usu
   </header>
   <main>
     <div id="contenedor-bultos">${renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto)}</div>
-    ${renderSeccionTraslado(bultos, pesajesPorBulto)}
+    ${renderSeccionTraslado(bultos, pesajesPorBulto, { idOrden: orden.IdOrden })}
   </main>
   <script src="/sweetalert2.min.js"></script>
   <script>${scriptNotificaciones(maquinaCodigo)}</script>
@@ -7503,12 +7558,16 @@ function renderBultosGrupo(idGrupo, numeroPedido, maquinaCodigo, datosPorReferen
       <select id="filtro-referencia" class="filtro-refs-select">${opcionesFiltro}</select>
       <span class="filtro-refs-conteo" id="filtro-referencia-conteo">${totalBultos} bulto(s)</span>`;
 
-  // Una seccion de traslado por referencia: un paquete solo puede moverse entre bultos de su misma
-  // referencia. Van fuera de #contenedor-bultos (igual que en la pagina de una orden) para que el
-  // sondeo de cada 4s no borre un desplegable a medio llenar.
+  // Una seccion de traslado por referencia: el paquete origen sale de sus bultos, pero el
+  // destino puede ser CUALQUIER bulto del grupo (tarjeta #10, misma OT): van etiquetados por
+  // referencia; el SP valida. Van fuera de #contenedor-bultos (igual que en la pagina de una
+  // orden) para que el sondeo de cada 4s no borre un desplegable a medio llenar.
+  const todosBultosDestino = datosPorReferencia.map(d =>
+    (d.bultos || []).map(b => `<option value="${b.id}">${d.referencia} — Bulto ${b.numRelativo} (${b.estado || '?'})</option>`).join('')
+  ).join('');
   const traslados = datosPorReferencia.map(d => renderSeccionTraslado(d.bultos, d.pesajesPorBulto, {
     referencia: d.referencia, nombreReferencia: d.nombre, color: d.color, idOrden: d.idOrden
-  })).join('');
+  }, todosBultosDestino)).join('');
 
   return `<!DOCTYPE html>
 <html lang="es">
@@ -8145,6 +8204,35 @@ app.get('/selladora/:codigo/orden/:idOrden/bultos/fragmento', requireLogin, asyn
   }
 });
 
+// Traslado de un bulto COMPLETO a otro de la misma OT (tarjeta #10,
+// dbo.sp_SEL_TrasladarBulto). Toda la lógica transaccional vive en el SP -- este endpoint
+// solo valida la sesión, lo llama y devuelve el conteo movido. Si el destino no existe y viene
+// idOrdenDestino, el SP crea el Temporal vacío.
+app.post('/api/selladora/bulto/trasladar', requireLogin, async (req, res) => {
+  const { idBultoOrigen, idBultoDestino, idOrdenDestino } = req.body;
+  if (!idBultoOrigen) {
+    return res.json({ ok: false, error: 'Falta el bulto origen.' });
+  }
+  try {
+    const p = await getPool();
+    const result = await p.request()
+      .input('IdBultoOrigen', idBultoOrigen)
+      .input('IdBultoDestino', idBultoDestino || null)
+      .input('IdOrdenDestino', idOrdenDestino || null)
+      .input('Usuario', req.session.usuario ? req.session.usuario.generadoPor : null)
+      .execute('sp_SEL_TrasladarBulto');
+    const fila = result.recordset && result.recordset[0];
+    res.json({
+      ok: true,
+      movidos: fila ? fila.Movidos : 0,
+      idBultoDestino: fila ? fila.IdBultoDestino : null,
+      serialPadreDestino: fila ? fila.SerialPadreDestino : null
+    });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
 // Traslado de un paquete de un bulto a otro (reunion 07/09/2026, seccion nueva en /bultos, ver
 // scriptTraslado() y el <details> "Trasladar paquete" en renderTarjetasBultos). Toda la logica
 // transaccional vive en dbo.sp_SEL_TrasladarPaquete (ver crear_sp_trasladar_paquete.sql) -- este
@@ -8161,7 +8249,7 @@ app.post('/api/selladora/paquete/trasladar', requireLogin, async (req, res) => {
     const result = await p.request()
       .input('idPaquete', idPaquete)
       .input('idBultoDestino', idBultoDestino)
-      .input('Usuario', req.session.usuario ? req.session.usuario.codigo : null)
+      .input('Usuario', req.session.usuario ? req.session.usuario.generadoPor : null)
       .execute('sp_SEL_TrasladarPaquete');
     const fila = result.recordset && result.recordset[0];
     if (!fila) {
@@ -8192,7 +8280,7 @@ app.post('/api/selladora/bulto/reabrir', requireLogin, async (req, res) => {
     const p = await getPool();
     const result = await p.request()
       .input('IdBulto', idBulto)
-      .input('Usuario', req.session.usuario.codigo)
+      .input('Usuario', req.session.usuario ? req.session.usuario.generadoPor : null)
       .execute('sp_SEL_ReabrirBulto');
     const fila = result.recordset && result.recordset[0];
     res.json({ ok: true, serial: fila ? fila.Serial : null, idBultoEliminado: fila ? fila.IdBultoEliminado : null });
