@@ -6779,7 +6779,8 @@ async function obtenerIdGrupoSelladoDeOrden(p, idOrden) {
     INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
       AND (g.Numero = ord.NumeroPedido
         OR EXISTS (SELECT 1 FROM PRDGrupoEtapasPedidosExtra pe
-                   WHERE pe.IdGrupo = g.IdGrupo AND pe.Numero = ord.NumeroPedido AND pe.Linea = ord.Linea))
+                   WHERE pe.IdGrupo = g.IdGrupo AND pe.SubEmpresa = g.SubEmpresa AND pe.Tipo = g.Tipo AND pe.Fecha = g.Fecha
+                     AND pe.Numero = ord.NumeroPedido AND pe.Linea = ord.Linea))
     WHERE ord.IdOrden = @idOrden
   `);
   return dtGrupo.recordset.length > 0 ? dtGrupo.recordset[0].IdGrupo : null;
@@ -6817,6 +6818,8 @@ async function obtenerMiembrosGrupoSellado(p, idGrupo) {
       UNION
       SELECT pe.IdGrupo, pe.Linea AS Linea, pe.Numero AS Numero
       FROM PRDGrupoEtapasPedidosExtra pe
+      INNER JOIN PRDGrupoEtapasCompartidas g2 ON g2.IdGrupo = pe.IdGrupo
+        AND pe.SubEmpresa = g2.SubEmpresa AND pe.Tipo = g2.Tipo AND pe.Fecha = g2.Fecha
       WHERE pe.IdGrupo = @idGrupo
     ) gm
     INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gm.IdGrupo
@@ -6825,6 +6828,7 @@ async function obtenerMiembrosGrupoSellado(p, idGrupo) {
     -- vendan la misma referencia.
     INNER JOIN SEL_OrdenProduccion ord ON ord.Linea = gm.Linea AND ord.NumeroPedido = gm.Numero
     LEFT JOIN PRDGrupoEtapasPedidosExtra pe ON pe.IdGrupo = gm.IdGrupo AND pe.Numero = gm.Numero AND pe.Linea = gm.Linea
+      AND pe.SubEmpresa = g.SubEmpresa AND pe.Tipo = g.Tipo AND pe.Fecha = g.Fecha
     LEFT JOIN VENMovimientosElementos vme ON vme.SubEmpresa = g.SubEmpresa AND vme.Tipo = g.Tipo
       AND vme.Fecha = g.Fecha AND vme.Numero = gm.Numero AND vme.Linea = gm.Linea
     INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
