@@ -168,6 +168,9 @@ Notas:
   curso) sí se pide el chequeo del paso 4 — *¿está en buen estado?* y *¿algún peligro físico?*, sin
   la numeración 4.1/4.2 — antes de confirmar el rollo (a pedido del usuario, 09/09/2026): un rollo
   que entra a mitad de la orden se revisa igual que el primero. Los otros pasos no se repiten.
+  Desde la página de **Información** (05/10/2026), al quedar añadido el rollo arranca además el
+  cronómetro del alistamiento de material: se abre la pausa *Alistamiento › Materiales*
+  (`SEL_TiempoMuerto`), la misma del botón ⏸ Pausa, y se termina con Reanudar.
 - Los dos cronómetros usan los mismos `POST /pausar` y `POST /reanudar` del botón de Pausa, para que
   queden en `SEL_TiempoMuerto` como cualquier otra actividad.
 - Requiere ejecutar **`agregar_protocolo_arranque.sql`** una sola vez contra la base: crea

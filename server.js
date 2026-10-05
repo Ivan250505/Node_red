@@ -82,7 +82,7 @@ app.use((req, res, next) => {
       // 30/09/2026: además del nombre, el rango de horas del turno (ej. "Turno A · 06:00 a 14:00").
       const rango = t.horaInicio && t.horaFin ? ` · ${t.horaInicio} a ${t.horaFin}` : '';
       const txt = (String(t.corto || '') + rango).replace(/&/g, '&amp;').replace(/</g, '&lt;');
-      const pastilla = `<span style="display:inline-block;margin-left:10px;padding:4px 10px;border-radius:999px;` +
+      const pastilla = `<span style="display:inline-block;padding:4px 10px;border-radius:999px;` +
         `background:#fff3cd;color:#7a4b00;font-weight:700;font-size:14px;vertical-align:middle;">Turno ${txt}</span>`;
       cuerpo = cuerpo.replace(/<div class="logo-wrap">([\s\S]*?)<\/div>/, (x, adentro) => `<div class="logo-wrap">${adentro}${pastilla}</div>`);
     }
@@ -499,9 +499,13 @@ function estilosBase() {
     solo pone un techo. Los dos valores -- este y el de main -- tienen que ir siempre iguales, si no
     el encabezado y el contenido quedan desalineados. */
     .header-inner { max-width: 1200px; margin: 0 auto; }
+    /* Columna centrada (a pedido del usuario, 05/10/2026): el logo arriba y la pastilla del turno
+    debajo, ambos centrados, con el recuadro blanco mas alto. Antes el logo quedaba pegado a la
+    izquierda y la pastilla debajo, y el logo se veia descentrado en el recuadro. */
     .logo-wrap {
-      background: white; display: inline-block; padding: 10px 22px;
-      border-radius: 12px; margin-bottom: 14px;
+      background: white; display: inline-flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 10px; padding: 16px 22px; min-height: 72px;
+      box-sizing: border-box; border-radius: 12px; margin-bottom: 14px;
     }
     .logo { height: 40px; display: block; }
     .logo-login { height: 40px; display: block; margin: 0 auto 12px; }
@@ -4133,6 +4137,24 @@ function scriptProtocoloArranque(maquinaCodigo) {
       chequeoRollo(idOrden, rollo, seguir, false);
     }
 
+    // "+ Rollo" de la pagina de Informacion (a pedido del usuario, 05/10/2026): con el rollo ya
+    // chequeado y añadido arranca el cronometro del alistamiento de material -- la misma pausa
+    // Alistamiento > Materiales del boton Pausa (SEL_TiempoMuerto), asi que al recargar la pagina
+    // sale el cronometro bloqueante de siempre (abrirModalPausaActiva) y se termina con Reanudar.
+    // Si la pausa no se puede abrir, el rollo ya quedo añadido: se avisa y se recarga igual.
+    function alistamientoMaterialRolloNuevo(idOrden) {
+      protocoloPost('/api/selladora/orden/' + idOrden + '/pausar', { tipo: 'alistamiento', subtipo: 'materiales' })
+        .then(function(datos) {
+          if (datos && datos.ok) { window.location.reload(); return; }
+          Swal.fire({
+            icon: 'warning', title: 'No se pudo iniciar el alistamiento',
+            text: 'El rollo quedó añadido, pero el cronómetro no arrancó: ' + ((datos && datos.error) || 'error desconocido') +
+                  '. Puede registrarlo con el botón Pausa > Alistamiento > Materiales.',
+            confirmButtonColor: '#71bf44'
+          }).then(function() { window.location.reload(); });
+        });
+    }
+
     function chequeoRollo(idOrden, rollo, seguir, conNumeros) {
       var html =
         '<div style="text-align:left;">' +
@@ -4962,7 +4984,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     // Orden de izquierda a derecha: Rollo, Pausa, Finalizar. El boton Turno se quito de aca
     // (a pedido del usuario, 30/09/2026).
     acciones = `
-      ${grupoSelladoOtras.length === 0 ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${orden.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>` : ''}
+      ${grupoSelladoOtras.length === 0 ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${orden.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo, alAnadir: alistamientoMaterialRolloNuevo })">+ Rollo</button>` : ''}
       ${!pausaActiva ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>` : ''}
       <form method="post" action="/api/selladora/orden/${orden.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
         <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
