@@ -2541,6 +2541,7 @@ function scriptComandos(idOrden, maquinaCodigo, calidadFlags, pausaActiva, calid
       { clave: 'alistamiento', titulo: '⚙️ Alistamiento' },
       { clave: 'orden_aseo', titulo: '🧹 Orden y aseo' },
       { clave: 'limpieza', titulo: '🧼 Limpieza y desinfección' },
+      { clave: 'pausa_activa', titulo: '🤸 Pausas activas' },
       { clave: 'otro', titulo: '❓ Otro' }
     ];
     var SUBMOTIVOS_ALISTAMIENTO = [
@@ -3796,6 +3797,7 @@ function scriptPreguntaActividadInicial() {
       { clave: 'alistamiento', titulo: '⚙️ Alistamiento' },
       { clave: 'orden_aseo', titulo: '🧹 Orden y aseo' },
       { clave: 'limpieza', titulo: '🧼 Limpieza y desinfección' },
+      { clave: 'pausa_activa', titulo: '🤸 Pausas activas' },
       { clave: 'otro', titulo: '❓ Otro' }
     ];
     var SUBMOTIVOS_ALISTAMIENTO_INICIAL = [
@@ -9288,7 +9290,9 @@ const COMANDOS_VALIDOS = new Set([
 // inventario/numeracion como Retal/Troquelado, asi que no hacia falta migrarlo. "SEL_EjecucionOrden
 // debe quedar UN solo registro por orden" (mismo criterio que scan-rollo.js) -- se busca por
 // IdOrden, no hay que resolver bulto activo para esto.
-const MOTIVOS_PAUSA_VALIDOS = new Set(['descanso', 'mantenimiento', 'alistamiento', 'orden_aseo', 'limpieza', 'otro']);
+// 'pausa_activa' (05/10/2026, a pedido del usuario): Pausas activas. Requiere
+// sql/pendientes/20261005_agregar_pausa_activa_tiempomuerto.sql (CHECK de SEL_TiempoMuerto.Tipo).
+const MOTIVOS_PAUSA_VALIDOS = new Set(['descanso', 'mantenimiento', 'alistamiento', 'orden_aseo', 'limpieza', 'pausa_activa', 'otro']);
 // 'arranque' (09/09/2026) es el submotivo del alistamiento del paso 5 del protocolo de arranque
 // (ver scriptProtocoloArranque): no lo elige el operario -- arranca solo apenas se acepta el rollo,
 // por eso no aparece en la lista de SUBMOTIVOS_ALISTAMIENTO del boton de Pausa, solo aca en la
