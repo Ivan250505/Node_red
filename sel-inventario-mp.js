@@ -514,14 +514,30 @@ async function resolverTipoPedido(db, elemento, codCliente) {
 // ejecucion-selladora.js/frmLiberacionProduccion.vb para el bug del pedido 11243): la llave real
 // es ord.Linea, no ord.Elemento -- ver el comentario largo en scan-rollo.js:confirmarRollo.
 async function obtenerAnclaGrupoSellado(db, idOrden) {
+  // Tarjeta #9 (06/10/2026): el grupo puede traer miembros de otros pedidos
+  // (PRDGrupoEtapasPedidosExtra, estructura #7). El ancla es el menor IdOrden del conjunto
+  // (misma máquina, por construcción del grupo). Sin filas extra, idéntico a antes.
   const dt = await db.request().input('idOrden', idOrden).query(`
     SELECT TOP 1 ord2.IdOrden, ord2.Elemento
     FROM SEL_OrdenProduccion ord1
-    INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Linea = ord1.Linea
-    INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl1.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
-      AND g.Numero = ord1.NumeroPedido
-    INNER JOIN PRDGrupoEtapasCompartidasLineas gl2 ON gl2.IdGrupo = g.IdGrupo
-    INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gl2.Linea AND ord2.NumeroPedido = g.Numero
+    INNER JOIN PRDGrupoEtapasCompartidas g ON g.CategoriaMaquina = 'SELLADORA'
+      AND (EXISTS (SELECT 1 FROM PRDGrupoEtapasCompartidasLineas gl
+                  WHERE gl.IdGrupo = g.IdGrupo AND gl.Linea = ord1.Linea AND g.Numero = ord1.NumeroPedido)
+        OR EXISTS (SELECT 1 FROM PRDGrupoEtapasPedidosExtra pe
+                  WHERE pe.IdGrupo = g.IdGrupo AND pe.SubEmpresa = g.SubEmpresa AND pe.Tipo = g.Tipo AND pe.Fecha = g.Fecha
+                    AND pe.Numero = ord1.NumeroPedido AND pe.Linea = ord1.Linea))
+    INNER JOIN (
+      SELECT gl2.Linea AS Linea, g2.Numero AS Numero, gl2.IdGrupo AS IdGrupo
+      FROM PRDGrupoEtapasCompartidasLineas gl2
+      INNER JOIN PRDGrupoEtapasCompartidas g2 ON g2.IdGrupo = gl2.IdGrupo
+      UNION
+      SELECT pe2.Linea AS Linea, pe2.Numero AS Numero, pe2.IdGrupo AS IdGrupo
+      FROM PRDGrupoEtapasPedidosExtra pe2
+      INNER JOIN PRDGrupoEtapasCompartidas g3 ON g3.IdGrupo = pe2.IdGrupo
+        AND pe2.SubEmpresa = g3.SubEmpresa AND pe2.Tipo = g3.Tipo AND pe2.Fecha = g3.Fecha
+    ) gm ON gm.IdGrupo = g.IdGrupo
+    INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gm.Linea AND ord2.NumeroPedido = gm.Numero
+      AND ord2.Maquina = ord1.Maquina
     WHERE ord1.IdOrden = @idOrden
     ORDER BY ord2.IdOrden ASC
   `);
@@ -781,7 +797,21 @@ async function finalizarControlParcialSellado(db, { idOrden, retalManual, tortaM
   const nMaquinaOriginal = dtPrimero.recordset[0].id_maquina;
   const fHoraTurnoOriginal = dtPrimero.recordset[0].HoraFin || dtPrimero.recordset[0].HoraInicio || fFechaOriginal;
   const nTurnoOriginal = await resolverTurnoPorHora(db, nMaquinaOriginal, fHoraTurnoOriginal);
-  const tOP = await obtenerOCrearOrdenProduccion(db, {
+  // Tarjeta #9 (06/10/2026): reutilizar la OT del ancla del grupo en vez de recalcularla con
+  // el Elemento/Línea del miembro (eso creaba una OT extra por cada referencia no-ancla al
+  // Finalizar). Solo crea si el ancla aún no tiene.
+  let tOP = null;
+  const anclaGrupoFin = await obtenerAnclaGrupoSellado(db, idOrden);
+  if (anclaGrupoFin) {
+    const dtOTAncla = await db.request().input('idOrden', anclaGrupoFin.IdOrden).query(`
+      SELECT TOP 1 pp.OrdenProduccion FROM SEL_Bultos b
+      INNER JOIN PRDProduccion pp ON pp.Detalle = b.serialPadre
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+      WHERE ej.IdOrden = @idOrden AND pp.OrdenProduccion IS NOT NULL
+      ORDER BY b.id DESC`);
+    if (dtOTAncla.recordset.length > 0) tOP = dtOTAncla.recordset[0].OrdenProduccion;
+  }
+  if (!tOP) tOP = await obtenerOCrearOrdenProduccion(db, {
     elemento: nUltimoElemento, fecha: fFechaOriginal, lineaAncla: nLineaOriginal, lote: tLoteOriginal,
     codigoDestino: nCodDestinoOriginal, maquina: nMaquinaOriginal, turno: nTurnoOriginal > 0 ? nTurnoOriginal : null,
     generadoPor
@@ -2217,19 +2247,32 @@ async function obtenerSalidaRealSellado(db, idsOrdenes) {
   return Number(dt.recordset[0].Salida) || 0;
 }
 
-// Todos los miembros del grupo de sellado (incluida la orden pedida). Mismo criterio por ord.Linea
-// que ya usan confirmarRollo/finalizarOrden desde el FIX 13/09/2026 -- Elemento por si solo NO es
+// Todos los miembros del grupo de sellado (incluida la orden pedida), de este y de otros
+// pedidos (PedidosExtra, tarjeta #9). Mismo criterio por (pedido, línea) que ya usan
+// confirmarRollo/finalizarOrden desde el FIX 13/09/2026 -- Elemento por si solo NO es
 // llave suficiente (dos lineas del mismo pedido pueden vender la misma referencia sin ser la misma
 // agrupacion fisica). Si la orden no esta agrupada devuelve [idOrden] y todo lo demas funciona igual.
 async function obtenerMiembrosGrupoSellado(db, idOrden) {
   const dt = await db.request().input('idOrden', idOrden).query(`
     SELECT ord2.IdOrden
     FROM SEL_OrdenProduccion ord1
-    INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Linea = ord1.Linea
-    INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl1.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
-      AND g.Numero = ord1.NumeroPedido
-    INNER JOIN PRDGrupoEtapasCompartidasLineas gl2 ON gl2.IdGrupo = g.IdGrupo
-    INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gl2.Linea AND ord2.NumeroPedido = g.Numero
+    INNER JOIN PRDGrupoEtapasCompartidas g ON g.CategoriaMaquina = 'SELLADORA'
+      AND (EXISTS (SELECT 1 FROM PRDGrupoEtapasCompartidasLineas gl
+                  WHERE gl.IdGrupo = g.IdGrupo AND gl.Linea = ord1.Linea AND g.Numero = ord1.NumeroPedido)
+        OR EXISTS (SELECT 1 FROM PRDGrupoEtapasPedidosExtra pe
+                  WHERE pe.IdGrupo = g.IdGrupo AND pe.SubEmpresa = g.SubEmpresa AND pe.Tipo = g.Tipo AND pe.Fecha = g.Fecha
+                    AND pe.Numero = ord1.NumeroPedido AND pe.Linea = ord1.Linea))
+    INNER JOIN (
+      SELECT gl2.Linea AS Linea, g2.Numero AS Numero, gl2.IdGrupo AS IdGrupo
+      FROM PRDGrupoEtapasCompartidasLineas gl2
+      INNER JOIN PRDGrupoEtapasCompartidas g2 ON g2.IdGrupo = gl2.IdGrupo
+      UNION
+      SELECT pe2.Linea AS Linea, pe2.Numero AS Numero, pe2.IdGrupo AS IdGrupo
+      FROM PRDGrupoEtapasPedidosExtra pe2
+      INNER JOIN PRDGrupoEtapasCompartidas g3 ON g3.IdGrupo = pe2.IdGrupo
+        AND pe2.SubEmpresa = g3.SubEmpresa AND pe2.Tipo = g3.Tipo AND pe2.Fecha = g3.Fecha
+    ) gm ON gm.IdGrupo = g.IdGrupo
+    INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gm.Linea AND ord2.NumeroPedido = gm.Numero
     WHERE ord1.IdOrden = @idOrden
   `);
   const ids = [...new Set(dt.recordset.map(r => r.IdOrden))];
