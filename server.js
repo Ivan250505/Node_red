@@ -3970,6 +3970,9 @@ function scriptProtocoloArranque(maquinaCodigo) {
               '<div style="font-size:36px;font-weight:700;color:#006984;" id="protocolo-cronometro">00:00:00</div>',
         confirmButtonText: opciones.textoBoton,
         confirmButtonColor: '#4a9c2e',
+        // 06/10/2026: solo la limpieza del arranque trae "Cancelar arranque" (ver cronometroLimpieza).
+        showDenyButton: !!opciones.alCancelar,
+        denyButtonText: 'Cancelar arranque', denyButtonColor: '#c0392b',
         showCancelButton: false, showCloseButton: false,
         allowOutsideClick: false, allowEscapeKey: false,
         didOpen: function() {
@@ -3993,6 +3996,7 @@ function scriptProtocoloArranque(maquinaCodigo) {
         }
       }).then(function(resultado) {
         if (resultado.isConfirmed) opciones.alTerminar();
+        else if (resultado.isDenied) opciones.alCancelar();
       });
     }
 
@@ -4004,11 +4008,18 @@ function scriptProtocoloArranque(maquinaCodigo) {
     // diferencia: el paso del rollo no obliga a pitar uno nuevo, porque la maquina ya tiene uno
     // montado (ver pasoRolloRelevo). Por eso el relevo se cuenta en 4 pasos y no en 5: el chequeo
     // 4.1/4.2 del rollo solo aparece si de verdad se monta otro.
-    function comenzarProtocoloArranque(idOrden, esRelevo) {
+    // orden (06/10/2026, opcional): { descripcion } de /puede-iniciar -- pedido, línea y referencia
+    // arriba de la lista, para que el operario confirme que es la orden correcta.
+    function comenzarProtocoloArranque(idOrden, esRelevo, orden) {
       Swal.fire({
         icon: 'info',
         title: esRelevo ? 'Protocolo de arranque (relevo)' : 'Protocolo de arranque',
-        html: '<div style="text-align:left;font-size:15px;line-height:1.7;">' +
+        html: (orden && orden.descripcion
+                ? '<div style="font-size:16px;font-weight:600;color:#006984;margin-bottom:12px;">Orden ' +
+                    String(orden.descripcion).replace(/[&<>"]/g, function(c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }) +
+                  '</div>'
+                : '') +
+              '<div style="text-align:left;font-size:15px;line-height:1.7;">' +
                 (esRelevo
                   ? '<b>1.</b> Limpieza y desinfección<br>' +
                     '<b>2.</b> Chequeo de peligro químico<br>' +
@@ -4054,7 +4065,11 @@ function scriptProtocoloArranque(maquinaCodigo) {
         subtitulo: esRelevo ? 'Relevo de operario · paso 1 de 4' : 'Protocolo de arranque · paso 1 de 5',
         horaInicio: horaInicio,
         textoBoton: '■ Terminar limpieza y desinfección',
-        alTerminar: function() { preguntarPeligroQuimico(idOrden, esRelevo); }
+        alTerminar: function() { preguntarPeligroQuimico(idOrden, esRelevo); },
+        // Si se arrepiente de cancelar, vuelve al mismo cronómetro (la limpieza sigue corriendo).
+        alCancelar: esRelevo ? null : function() {
+          cancelarArranqueProtocolo(idOrden, null, null, function() { cronometroLimpieza(idOrden, horaInicio, esRelevo); });
+        }
       });
     }
 
@@ -4513,24 +4528,66 @@ function scriptProtocoloArranque(maquinaCodigo) {
         .then(function(r) { return r.json(); })
         .then(function(v) {
           if (v && v.ok === false) {
+            // 06/10/2026: otra orden de la máquina tiene el protocolo a medias -- se ofrece seguir
+            // con esa o cancelar su arranque (y ahí sí arrancar esta).
+            if (v.ordenAMedias) {
+              Swal.fire({
+                icon: 'warning', title: 'Hay un arranque sin terminar', text: v.error,
+                showDenyButton: true, showCancelButton: true,
+                confirmButtonText: 'Continuar esa orden', confirmButtonColor: '#71bf44',
+                denyButtonText: 'Cancelar ese arranque', denyButtonColor: '#c0392b',
+                cancelButtonText: 'Cerrar', cancelButtonColor: '#64748b'
+              }).then(function(r) {
+                if (r.isConfirmed) seguirIniciarProtocoloArranque(v.ordenAMedias.idOrden);
+                else if (r.isDenied) cancelarArranqueProtocolo(v.ordenAMedias.idOrden, v.ordenAMedias.descripcion,
+                  function() { iniciarProtocoloArranque(idOrden); });
+              });
+              return;
+            }
             Swal.fire({ icon: 'warning', title: 'No se puede iniciar', text: v.error, confirmButtonColor: '#71bf44' });
             return;
           }
           // 26/09/2026: el turno activo se escoge ANTES del protocolo y del primer rollo
           // 28/09/2026: el turno ya se escogió en el login -- no se vuelve a preguntar.
-          seguirIniciarProtocoloArranque(idOrden);
+          seguirIniciarProtocoloArranque(idOrden, v && v.orden);
         })
         .catch(function() { seguirIniciarProtocoloArranque(idOrden); });
     }
 
-    function seguirIniciarProtocoloArranque(idOrden) {
+    function seguirIniciarProtocoloArranque(idOrden, orden) {
       fetch('/api/selladora/orden/' + idOrden + '/protocolo/estado')
         .then(function(r) { return r.json(); })
         .then(function(datos) {
           if (datos.ok && datos.pendiente) { reanudarProtocoloArranque(datos.pendiente, true); return; }
-          comenzarProtocoloArranque(idOrden);
+          comenzarProtocoloArranque(idOrden, false, orden);
         })
-        .catch(function() { comenzarProtocoloArranque(idOrden); });
+        .catch(function() { comenzarProtocoloArranque(idOrden, false, orden); });
+    }
+
+    // 06/10/2026: "Cancelar arranque" -- borra lo que el protocolo alcanzó a guardar (respuestas y
+    // tiempo de limpieza) y deja la orden Pendiente. Solo antes del rollo; el servidor lo valida.
+    // alDesistir: qué hacer si contesta "No" (desde el cronómetro de limpieza, volver a él).
+    function cancelarArranqueProtocolo(idOrden, descripcion, alTerminar, alDesistir) {
+      Swal.fire({
+        icon: 'warning', title: '¿Cancelar el arranque?',
+        text: 'Se borran la limpieza y las respuestas que ya se guardaron' + (descripcion ? ' de la orden ' + descripcion : '') +
+              '. La orden queda como si nunca hubiera arrancado.',
+        showCancelButton: true,
+        confirmButtonText: 'Sí, cancelar arranque', confirmButtonColor: '#c0392b',
+        cancelButtonText: 'No', cancelButtonColor: '#64748b',
+        showLoaderOnConfirm: true,
+        allowOutsideClick: function() { return !Swal.isLoading(); },
+        preConfirm: function() {
+          return protocoloPost('/api/selladora/orden/' + idOrden + '/protocolo/cancelar', {}).then(function(datos) {
+            if (!datos.ok) { Swal.showValidationMessage(datos.error || 'No se pudo cancelar.'); return false; }
+            return true;
+          });
+        }
+      }).then(function(r) {
+        if (!r.isConfirmed) { if (alDesistir) alDesistir(); return; }
+        Swal.fire({ icon: 'success', title: 'Arranque cancelado', timer: 1600, showConfirmButton: false })
+          .then(function() { if (alTerminar) alTerminar(); else location.reload(); });
+      });
     }
 
     // pedido = true cuando el operario acaba de pulsar Iniciar (se entra derecho al paso); false
@@ -4580,14 +4637,20 @@ function scriptProtocoloArranque(maquinaCodigo) {
           relevo ? 'Protocolo de relevo sin terminar' : 'Protocolo de arranque sin terminar',
           textos[pendiente.paso] || '', 'protocolo:' + idOrden + ':' + pendiente.paso);
       }
+      // 06/10/2026: el arranque (no el relevo, que corre con la orden ya Activa) se puede cancelar.
       Swal.fire({
         icon: 'info',
         title: relevo ? 'Protocolo de relevo sin terminar' : 'Protocolo de arranque sin terminar',
-        text: textos[pendiente.paso] || 'El protocolo de arranque de esta orden quedó a medias.',
-        showCancelButton: true,
+        text: (pendiente.descripcion ? 'Orden ' + pendiente.descripcion + '. ' : '') +
+              (textos[pendiente.paso] || 'El protocolo de arranque de esta orden quedó a medias.'),
+        showCancelButton: true, showDenyButton: !relevo,
         confirmButtonText: 'Continuar protocolo', confirmButtonColor: '#71bf44',
+        denyButtonText: 'Cancelar arranque', denyButtonColor: '#c0392b',
         cancelButtonText: 'Ahora no', cancelButtonColor: '#64748b'
-      }).then(function(resultado) { if (resultado.isConfirmed) continuar(); });
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) continuar();
+        else if (resultado.isDenied) cancelarArranqueProtocolo(idOrden, pendiente.descripcion);
+      });
     }
   `;
 }
@@ -5416,22 +5479,43 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto, opcione
 // moverse entre bultos de SU MISMA referencia (son elementos distintos: mover un paquete de la
 // 7002 a un bulto de la 7015 seria un error de datos, no un traslado). Por eso la pagina de grupo
 // renderiza varias secciones y el filtro por referencia las muestra/esconde junto con sus bultos.
+// 06/10/2026: solo se listan los traslados que sp_SEL_TrasladarPaquete acepta (regla 2 de
+// CASOS_USO_HORAS_BULTO_Y_TRASLADOS_01102026.md) -- antes salían todos los paquetes y todos los bultos
+// y el operario se enteraba de la regla por el error. Cada paquete lleva en data-destinos sus bultos
+// válidos y el desplegable de destino se rearma al escogerlo (cambioPaqueteTraslado). El SP sigue
+// validando todo igual (la sección no se refresca con el polling y puede quedar vieja).
 function renderSeccionTraslado(bultos, pesajesPorBulto, opciones) {
   const modoGrupo = !!(opciones && opciones.referencia);
   if (bultos.length < 2) return ''; // hace falta al menos un bulto origen y uno destino
 
+  const esValidado = b => Number(b.Validado) === 1;
+  // El SP le da al paquete el siguiente consecutivo del destino, máximo 99.
+  const admitePaquete = b => {
+    const pesajes = pesajesPorBulto.get(b.id) || [];
+    return pesajes.reduce((max, pe) => Math.max(max, Number(pe.ConsecutivoPaquete) || 0), 0) < 99;
+  };
+  const destinoValido = d => d && !esValidado(d) && admitePaquete(d);
+
+  // `bultos` viene ordenado por id y sin anulados -- los vecinos son los mismos que calcula el SP.
   const opcionesPaquete = [];
-  bultos.forEach(b => {
+  bultos.forEach((b, i) => {
+    if (esValidado(b)) return;
+    const anterior = bultos[i - 1], siguiente = bultos[i + 1];
     const pesajes = pesajesPorBulto.get(b.id) || [];
     pesajes.forEach(pe => {
+      // Al anterior solo el primer paquete; al siguiente solo el último.
+      const destinos = [];
+      if (Number(pe.EsPrimero) === 1 && destinoValido(anterior)) destinos.push(anterior);
+      if (Number(pe.EsUltimo) === 1 && destinoValido(siguiente)) destinos.push(siguiente);
+      if (destinos.length === 0) return;
+      const dataDestinos = destinos.map(d => `${d.id}:${d.numRelativo}`).join(',');
+      const textoDestinos = destinos.map(d => `Bulto ${d.numRelativo}`).join(' o ');
       opcionesPaquete.push(
-        `<option value="${pe.id_paquete}">Bulto ${b.numRelativo} — Paquete ${pe.ConsecutivoPaquete} (${Number(pe.PesoPaqueGr)} kg)</option>`
+        `<option value="${pe.id_paquete}" data-destinos="${dataDestinos}">Bulto ${b.numRelativo} — Paquete ${pe.ConsecutivoPaquete} (${Number(pe.PesoPaqueGr)} kg) → ${textoDestinos}</option>`
       );
     });
   });
-  if (opcionesPaquete.length === 0) return ''; // sin paquetes pesados todavía, nada que trasladar
-
-  const opcionesBulto = bultos.map(b => `<option value="${b.id}">Bulto ${b.numRelativo}</option>`).join('');
+  if (opcionesPaquete.length === 0) return ''; // ningún paquete se puede trasladar ahora mismo
 
   return `
   <div class="card seccion-traslado"${modoGrupo ? ` data-ref="${opciones.referencia}" data-orden="${opciones.idOrden}" style="--color-ref:${opciones.color};"` : ''}>
@@ -5439,16 +5523,15 @@ function renderSeccionTraslado(bultos, pesajesPorBulto, opciones) {
     ${modoGrupo ? `<div class="bulto-ref"><div class="bulto-ref-subrayado"></div><div class="bulto-ref-nombre">${opciones.nombreReferencia || ''}</div></div>` : ''}
     <div class="traslado-campo">
       <label>Paquete a mover</label>
-      <select class="sel-paquete-origen">
+      <select class="sel-paquete-origen" onchange="cambioPaqueteTraslado(this)">
         <option value="">Seleccione…</option>
         ${opcionesPaquete.join('')}
       </select>
     </div>
     <div class="traslado-campo">
       <label>Bulto destino</label>
-      <select class="sel-bulto-destino">
-        <option value="">Seleccione…</option>
-        ${opcionesBulto}
+      <select class="sel-bulto-destino" disabled>
+        <option value="">Primero escoja el paquete…</option>
       </select>
     </div>
     <button type="button" class="btn-accion btn-traslado" onclick="confirmarTraslado(this)">🔀 Trasladar</button>
@@ -5707,6 +5790,27 @@ function scriptTraslado(idOrden, maquinaCodigo) {
     // El boton se pasa a si mismo (10/09/2026) porque ahora puede haber MAS DE UNA seccion de
     // traslado en la misma pagina -- una por referencia de salida, ver renderSeccionTraslado. Los
     // desplegables se buscan dentro de la seccion del boton que se toco, no por id global.
+    // Rearma "Bulto destino" con los destinos válidos del paquete escogido (data-destinos =
+    // "idBulto:numRelativo,..." -- ver renderSeccionTraslado). Si solo hay uno, queda escogido.
+    function cambioPaqueteTraslado(selOrigen) {
+      var seccion = selOrigen.closest('.seccion-traslado');
+      var selDestino = seccion.querySelector('.sel-bulto-destino');
+      var opcion = selOrigen.options[selOrigen.selectedIndex];
+      var destinos = (opcion && opcion.dataset.destinos) ? opcion.dataset.destinos.split(',') : [];
+      selDestino.innerHTML = '';
+      if (destinos.length === 0) {
+        selDestino.add(new Option('Primero escoja el paquete…', ''));
+        selDestino.disabled = true;
+        return;
+      }
+      if (destinos.length > 1) selDestino.add(new Option('Seleccione…', ''));
+      destinos.forEach(function(d) {
+        var partes = d.split(':');
+        selDestino.add(new Option('Bulto ' + partes[1], partes[0]));
+      });
+      selDestino.disabled = false;
+    }
+
     function confirmarTraslado(boton) {
       var seccion = boton ? boton.closest('.seccion-traslado') : document;
       var selOrigen = seccion.querySelector('.sel-paquete-origen');
@@ -7817,9 +7921,16 @@ async function obtenerBultosYPesajes(p, idOrden, esSup = false) {
     // id_paquete (PK real de SEL_PesajeElemento) se necesita para identificar sin ambigüedad UN
     // paquete puntual al trasladarlo (ver /api/selladora/paquete/trasladar) -- ConsecutivoPaquete
     // solo es único DENTRO de un bulto, no en toda la orden.
+    // EsPrimero/EsUltimo (06/10/2026): mismo criterio de orden que sp_SEL_TrasladarPaquete (FechaHora,
+    // consecutivo, id) -- no sirve el consecutivo solo: un paquete recibido del bulto anterior queda con
+    // el consecutivo más alto pero es el más viejo. Ver renderSeccionTraslado.
     const pesajesResult = await p.request().input('idOrden', idOrden).query(`
       SELECT pe.id_paquete, pe.id_bulto, pe.ConsecutivoPaquete, FORMAT(pe.FechaHora,'dd/MM/yyyy HH:mm:ss') AS Hora, pe.PesoPaqueGr,
-             ISNULL(pe.UnidadesPaquete, 100) AS UnidadesPaquete
+             ISNULL(pe.UnidadesPaquete, 100) AS UnidadesPaquete,
+             CASE WHEN ROW_NUMBER() OVER (PARTITION BY pe.id_bulto ORDER BY pe.FechaHora, pe.ConsecutivoPaquete, pe.id_paquete) = 1
+                  THEN 1 ELSE 0 END AS EsPrimero,
+             CASE WHEN ROW_NUMBER() OVER (PARTITION BY pe.id_bulto ORDER BY pe.FechaHora DESC, pe.ConsecutivoPaquete DESC, pe.id_paquete DESC) = 1
+                  THEN 1 ELSE 0 END AS EsUltimo
       FROM SEL_PesajeElemento pe
       INNER JOIN SEL_Bultos b ON b.id = pe.id_bulto
       INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
@@ -9882,21 +9993,134 @@ function proximaVerificacionBascula(idUltima, fechaUltima) {
 // Es la MISMA regla de validarPuedeIniciar que ya frenaba el paso del rollo, solo que ahora se
 // aplica desde el primer paso. Devuelve el mensaje de error, o null si puede seguir. Las ordenes
 // que no estan Pendiente no se tocan: el relevo corre su protocolo con la orden ya Activa.
+// 06/10/2026 (a pedido del usuario, tras el pedido 12170): tampoco puede arrancar mientras OTRA orden
+// Pendiente de la misma máquina tenga el protocolo a medias -- el operario inició la línea 4, hizo la
+// limpieza, se pasó a la línea 1 y la 4 quedó escondida detrás de la Activa (ver
+// ordenConProtocoloAMedias). Hay que continuarlo o cancelarlo (POST .../protocolo/cancelar).
 async function bloqueoArranquePorOrdenActiva(p, idOrden) {
   const dt = await p.request().input('idOrden', idOrden)
     .query(`SELECT Estado FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
   if (dt.recordset.length === 0 || dt.recordset[0].Estado !== 'Pendiente') return null;
   const v = await validarPuedeIniciar(p, idOrden);
-  return v.ok ? null : v.error;
+  if (!v.ok) return v.error;
+  const otra = await ordenConProtocoloAMedias(p, idOrden);
+  return otra
+    ? `La orden ${describirOrden(otra)} ya empezó el protocolo de arranque. Continúelo o cancélelo antes de iniciar otra.`
+    : null;
+}
+
+// Otra orden Pendiente de la misma máquina con rastro de protocolo de arranque (respuestas guardadas
+// o cronómetro de limpieza/alistamiento abierto) -- mismo rastro que usa obtenerProtocoloPendienteMaquina.
+// Una orden Pendiente con rastro es siempre un arranque a medias: las órdenes no vuelven a Pendiente.
+async function ordenConProtocoloAMedias(p, idOrden) {
+  const dt = await p.request().input('idOrden', idOrden).query(`
+    SELECT TOP 1 ord2.IdOrden, ISNULL(ord2.NumeroPedido, '') AS NumeroPedido, ord2.Linea, ie.Referencia, ie.Nombre
+    FROM SEL_OrdenProduccion ord1
+    INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Maquina = ord1.Maquina AND ord2.IdOrden <> ord1.IdOrden
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord2.IdOrden
+    LEFT JOIN INVElementos ie ON ie.Codigo = ord2.Elemento
+    WHERE ord1.IdOrden = @idOrden AND ord2.Estado = 'Pendiente'
+      AND (
+        EXISTS (SELECT 1 FROM SEL_ProtocoloArranque pa WHERE pa.id_ejecucion = ej.IdEjecucion)
+        OR EXISTS (SELECT 1 FROM SEL_TiempoMuerto tm
+                   WHERE tm.id_ejecucion = ej.IdEjecucion AND tm.HoraFin IS NULL
+                     AND (tm.Tipo = 'limpieza' OR (tm.Tipo = 'alistamiento' AND tm.Subtipo = 'arranque')))
+      )
+    ORDER BY ord2.IdOrden ASC
+  `);
+  return dt.recordset[0] || null;
+}
+
+// Pedido, línea y referencia de una orden -- en la cola las líneas de un mismo pedido se ven casi
+// iguales y de ahí vino la confusión del 12170.
+async function datosOrdenParaAviso(p, idOrden) {
+  const dt = await p.request().input('idOrden', idOrden).query(`
+    SELECT ord.IdOrden, ISNULL(ord.NumeroPedido, '') AS NumeroPedido, ord.Linea, ie.Referencia, ie.Nombre
+    FROM SEL_OrdenProduccion ord LEFT JOIN INVElementos ie ON ie.Codigo = ord.Elemento
+    WHERE ord.IdOrden = @idOrden
+  `);
+  return dt.recordset[0] || null;
+}
+
+function describirOrden(o) {
+  return `del pedido ${o.NumeroPedido}, línea ${o.Linea}` + (o.Referencia ? ` (${o.Referencia}${o.Nombre ? ' — ' + o.Nombre : ''})` : '');
+}
+
+function ordenParaCliente(o) {
+  return o ? { idOrden: o.IdOrden, descripcion: describirOrden(o) } : null;
 }
 
 // Lo consulta el boton "▶ Iniciar" antes de abrir el protocolo (ver iniciarProtocoloArranque).
+// ordenAMedias: la otra orden con el protocolo empezado, para ofrecer continuarla o cancelarla.
+// orden: la que se va a iniciar, para mostrar pedido/línea/referencia en la ventana del protocolo.
 app.get('/api/selladora/orden/:idOrden/puede-iniciar', requireLogin, async (req, res) => {
   try {
     const p = await getPool();
-    const error = await bloqueoArranquePorOrdenActiva(p, Number(req.params.idOrden));
-    res.json(error ? { ok: false, error } : { ok: true });
+    const idOrden = Number(req.params.idOrden);
+    const error = await bloqueoArranquePorOrdenActiva(p, idOrden);
+    if (error) {
+      return res.json({ ok: false, error, ordenAMedias: ordenParaCliente(await ordenConProtocoloAMedias(p, idOrden)) });
+    }
+    res.json({ ok: true, orden: ordenParaCliente(await datosOrdenParaAviso(p, idOrden)) });
   } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// 06/10/2026 (a pedido del usuario): "Cancelar arranque" -- deshace un protocolo de arranque que
+// quedó a medias (orden equivocada, se arrepintió) y deja la orden Pendiente como si nunca hubiera
+// arrancado. Lo puede hacer cualquier operario, pero solo ANTES del rollo: sin bultos ni rollo
+// escaneado no hay nada físico que deshacer. Se borran las respuestas del protocolo y su tiempo de
+// limpieza (decisión del usuario: no se conserva como tiempo muerto). Queda rastro en SISMovimientos.
+app.post('/api/selladora/orden/:idOrden/protocolo/cancelar', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  if (!Number.isFinite(idOrden) || idOrden <= 0) return res.json({ ok: false, error: 'Falta la orden.' });
+  let tx;
+  try {
+    const p = await getPool();
+    tx = new sql.Transaction(p);
+    await tx.begin();
+    const dt = await tx.request().input('idOrden', idOrden).query(`
+      SELECT ord.Estado, ISNULL(ord.NumeroPedido, '') AS NumeroPedido, ord.Linea,
+             (SELECT COUNT(*) FROM SEL_Bultos b INNER JOIN SEL_EjecucionOrden e ON e.IdEjecucion = b.id_ejecucion
+              WHERE e.IdOrden = ord.IdOrden) AS Bultos,
+             (SELECT COUNT(*) FROM SEL_RolloPendienteInicio rp INNER JOIN SEL_EjecucionOrden e ON e.IdEjecucion = rp.IdEjecucion
+              WHERE e.IdOrden = ord.IdOrden) AS Rollos
+      FROM SEL_OrdenProduccion ord WITH (UPDLOCK) WHERE ord.IdOrden = @idOrden
+    `);
+    const o = dt.recordset[0];
+    if (!o) throw new Error('Orden no encontrada.');
+    if (o.Estado !== 'Pendiente') throw new Error('Esta orden ya arrancó -- el arranque no se puede cancelar.');
+    if (o.Bultos > 0 || o.Rollos > 0) throw new Error('Esta orden ya tiene el rollo escaneado -- el arranque no se puede cancelar.');
+
+    const dtBorrado = await tx.request().input('idOrden', idOrden).query(`
+      DECLARE @n TABLE (Tabla VARCHAR(40), Filas INT);
+      DELETE pa FROM SEL_ProtocoloArranque pa
+      INNER JOIN SEL_EjecucionOrden e ON e.IdEjecucion = pa.id_ejecucion WHERE e.IdOrden = @idOrden;
+      INSERT INTO @n VALUES ('SEL_ProtocoloArranque', @@ROWCOUNT);
+      DELETE tm FROM SEL_TiempoMuerto tm
+      INNER JOIN SEL_EjecucionOrden e ON e.IdEjecucion = tm.id_ejecucion
+      WHERE e.IdOrden = @idOrden AND (tm.Tipo = 'limpieza' OR (tm.Tipo = 'alistamiento' AND tm.Subtipo = 'arranque'));
+      INSERT INTO @n VALUES ('SEL_TiempoMuerto', @@ROWCOUNT);
+      -- La limpieza deja la ejecución 'En pausa' mientras corre (ver /pausar).
+      UPDATE SEL_EjecucionOrden SET Estado = 'Pendiente' WHERE IdOrden = @idOrden AND Estado = 'En pausa';
+      SELECT Tabla, Filas FROM @n;
+    `);
+    const resumen = dtBorrado.recordset.map(r => r.Tabla + ': ' + r.Filas).join(', ');
+    await tx.request()
+      .input('idOrden', idOrden).input('ref', `Pedido ${o.NumeroPedido} línea ${o.Linea}`.slice(0, 40))
+      .input('usuario', req.session.usuario.codigo || null).input('resumen', ('Borrado -> ' + resumen).slice(0, 500))
+      .query(`
+        IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
+          INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
+          VALUES ('SELLADORA', 'CANCELAR_ARRANQUE', @idOrden, @ref, GETDATE(), @usuario, 'Tableta',
+                  'Protocolo de arranque a medias cancelado por el operario', @resumen);
+      `);
+    await tx.commit();
+    console.log(`Arranque cancelado orden ${idOrden} (pedido ${o.NumeroPedido} línea ${o.Linea}) por ${req.session.usuario.codigo}: ${resumen}`);
+    res.json({ ok: true });
+  } catch (err) {
+    try { if (tx) await tx.rollback(); } catch (e) { /* ya abortada */ }
     res.json({ ok: false, error: err.message });
   }
 });
@@ -10002,11 +10226,21 @@ app.post('/api/selladora/maquina/:codigo/turno-correccion', requireLogin, async 
 app.get('/api/selladora/orden/:idOrden/protocolo/estado', requireLogin, async (req, res) => {
   try {
     const p = await getPool();
-    res.json({ ok: true, pendiente: await obtenerProtocoloPendiente(p, Number(req.params.idOrden)) });
+    res.json({ ok: true, pendiente: await conDescripcionOrden(p, await obtenerProtocoloPendiente(p, Number(req.params.idOrden))) });
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
 });
+
+// 06/10/2026: el aviso de "Protocolo sin terminar" dice de qué orden es (pedido, línea, referencia).
+async function conDescripcionOrden(p, pendiente) {
+  if (!pendiente) return pendiente;
+  try {
+    const o = await datosOrdenParaAviso(p, pendiente.idOrden);
+    if (o) pendiente.descripcion = describirOrden(o);
+  } catch (err) { /* el aviso sale igual, sin la descripción */ }
+  return pendiente;
+}
 
 // Igual que la anterior pero para la pagina de la cola, donde no hay una orden fija: busca cual de
 // las ordenes de esta maquina (si alguna) tiene el protocolo a medias. Primero acota con una sola
@@ -10027,7 +10261,7 @@ async function obtenerProtocoloPendienteMaquina(p, codigo) {
       ORDER BY CASE ord.Estado WHEN 'Activa' THEN 0 ELSE 1 END, ord.IdOrden ASC
     `);
     if (dt.recordset.length === 0) return null;
-    return await obtenerProtocoloPendiente(p, dt.recordset[0].IdOrden);
+    return await conDescripcionOrden(p, await obtenerProtocoloPendiente(p, dt.recordset[0].IdOrden));
   } catch (err) {
     console.error('No se pudo buscar el protocolo de arranque de la máquina:', err.message);
     return null;
