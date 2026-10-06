@@ -5520,12 +5520,36 @@ function renderSeccionTraslado(bultos, pesajesPorBulto, opciones) {
       );
     });
   });
-  if (opcionesPaquete.length === 0) return ''; // ningún paquete se puede trasladar ahora mismo
+  // Sin paquetes pesados todavía no hay nada que mostrar. Con paquetes pero sin ningún traslado
+  // válido (06/10/2026, a pedido del usuario) la tarjeta sigue saliendo con el motivo -- si
+  // desaparecía, el operario no sabía por qué.
+  const hayPaquetes = bultos.some(b => (pesajesPorBulto.get(b.id) || []).length > 0);
+  if (!hayPaquetes) return '';
+  let motivoSinOpciones = '';
+  if (opcionesPaquete.length === 0) {
+    motivoSinOpciones = bultos.every(esValidado)
+      ? 'Todos los bultos ya fueron validados por el digitador.'
+      : bultos.some((b, i) => !esValidado(b) && (pesajesPorBulto.get(b.id) || []).length > 0
+                              && (bultos[i - 1] || bultos[i + 1]) && ![bultos[i - 1], bultos[i + 1]].some(destinoValido))
+        ? 'Los bultos vecinos ya fueron validados por el digitador (o llegaron al paquete #99).'
+        : 'Ningún paquete cumple las reglas de traslado.';
+  }
 
-  return `
+  const encabezado = `
   <div class="card seccion-traslado"${modoGrupo ? ` data-ref="${opciones.referencia}" data-orden="${opciones.idOrden}" style="--color-ref:${opciones.color};"` : ''}>
     <div class="card-top"><span class="bulto-num">🔀 Trasladar paquete entre bultos${modoGrupo ? ` — ${opciones.referencia}` : ''}</span></div>
-    ${modoGrupo ? `<div class="bulto-ref"><div class="bulto-ref-subrayado"></div><div class="bulto-ref-nombre">${opciones.nombreReferencia || ''}</div></div>` : ''}
+    ${modoGrupo ? `<div class="bulto-ref"><div class="bulto-ref-subrayado"></div><div class="bulto-ref-nombre">${opciones.nombreReferencia || ''}</div></div>` : ''}`;
+
+  if (motivoSinOpciones) {
+    return `${encabezado}
+    <div style="font-size:14px;color:#64748b;line-height:1.5;">
+      Ahora no hay paquetes que se puedan trasladar. ${motivoSinOpciones}<br>
+      <span style="font-size:12px;">Solo se traslada entre bultos vecinos sin validar: el primer paquete al bulto anterior, o el último al siguiente.</span>
+    </div>
+  </div>`;
+  }
+
+  return `${encabezado}
     <div class="traslado-campo">
       <label>Paquete a mover</label>
       <select class="sel-paquete-origen" onchange="cambioPaqueteTraslado(this)">
@@ -6520,8 +6544,17 @@ app.post('/admin/tablet-fija/quitar', requireLogin, requireAdmin, async (req, re
 // Node guarda NULL por el mismo camino. Se usa session.usuario.generadoPor (SISUsuarios.Tercero,
 // int, el mismo que el escritorio guarda como usuario en Producción/Inventario); si no hay,
 // NULL. El codigo/login sigue yendo en Motivo.
+// 06/10/2026: el mismo criterio para TODO lo que guarda usuario en una columna/parámetro INT
+// (SISMovimientos.Usuario, @Usuario de sp_SEL_TrasladarPaquete / sp_SEL_ReabrirBulto). Antes esos
+// recibían el codigo de login (texto) y con un login no numérico reventaban con "Error converting
+// data type nvarchar to int".
+function usuarioNumerico(usuario) {
+  return usuario && usuario.generadoPor != null && Number.isInteger(Number(usuario.generadoPor))
+    ? Number(usuario.generadoPor) : null;
+}
+
 async function trazaSimulador(p, usuario, subtipo, motivo, resumen) {
-  const nUsuario = usuario && Number.isInteger(Number(usuario.generadoPor)) ? Number(usuario.generadoPor) : null;
+  const nUsuario = usuarioNumerico(usuario);
   try {
     await p.request()
       .input('usuario', nUsuario).input('subtipo', subtipo).input('motivo', motivo).input('resumen', resumen)
@@ -8326,7 +8359,7 @@ app.post('/api/selladora/paquete/trasladar', requireLogin, async (req, res) => {
     const result = await p.request()
       .input('idPaquete', idPaquete)
       .input('idBultoDestino', idBultoDestino)
-      .input('Usuario', req.session.usuario ? req.session.usuario.codigo : null)
+      .input('Usuario', usuarioNumerico(req.session.usuario))
       .execute('sp_SEL_TrasladarPaquete');
     const fila = result.recordset && result.recordset[0];
     if (!fila) {
@@ -8357,7 +8390,7 @@ app.post('/api/selladora/bulto/reabrir', requireLogin, async (req, res) => {
     const p = await getPool();
     const result = await p.request()
       .input('IdBulto', idBulto)
-      .input('Usuario', req.session.usuario.codigo)
+      .input('Usuario', usuarioNumerico(req.session.usuario))
       .execute('sp_SEL_ReabrirBulto');
     const fila = result.recordset && result.recordset[0];
     res.json({ ok: true, serial: fila ? fila.Serial : null, idBultoEliminado: fila ? fila.IdBultoEliminado : null });
@@ -8520,7 +8553,7 @@ app.post('/api/selladora/bulto/eliminar-vacio', requireLogin, async (req, res) =
 
     const resumen = dtBorrado.recordset.map(r => r.Tabla + ': ' + r.Filas).join(', ');
     await tx.request()
-      .input('idBulto', idBulto).input('serial', b.serialPadre).input('usuario', req.session.usuario.codigo || null)
+      .input('idBulto', idBulto).input('serial', b.serialPadre).input('usuario', usuarioNumerico(req.session.usuario))
       .input('resumen', ('Estado ' + b.estado + ', conteo ' + b.NumPaqu + ', orden ' + b.IdOrden + '. Borrado -> ' + resumen).slice(0, 500))
       .query(`
         IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
@@ -8573,7 +8606,7 @@ app.post('/api/selladora/bulto/corregir-conteo', requireLogin, async (req, res) 
     await tx.request().input('idBulto', idBulto).input('conteo', Number(b.Ultimo))
       .query(`UPDATE SEL_Bultos SET number_paqu = @conteo WHERE id = @idBulto`);
     await tx.request()
-      .input('idBulto', idBulto).input('serial', b.serialPadre).input('usuario', req.session.usuario.codigo || null)
+      .input('idBulto', idBulto).input('serial', b.serialPadre).input('usuario', usuarioNumerico(req.session.usuario))
       .input('ant', String(b.NumPaqu)).input('nue', String(b.Ultimo))
       .query(`
         IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
@@ -10346,7 +10379,7 @@ app.post('/api/selladora/orden/:idOrden/protocolo/cancelar', requireLogin, async
     const resumen = dtBorrado.recordset.map(r => r.Tabla + ': ' + r.Filas).join(', ');
     await tx.request()
       .input('idOrden', idOrden).input('ref', `Pedido ${o.NumeroPedido} línea ${o.Linea}`.slice(0, 40))
-      .input('usuario', req.session.usuario.codigo || null).input('resumen', ('Borrado -> ' + resumen).slice(0, 500))
+      .input('usuario', usuarioNumerico(req.session.usuario)).input('resumen', ('Borrado -> ' + resumen).slice(0, 500))
       .query(`
         IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
           INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
