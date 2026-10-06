@@ -5,6 +5,8 @@ Commits revisados: `843cbb9` (Turno activo: escoger antes de Iniciar y de retoma
 
 ## Contexto
 
+
+
 La planta trabaja en turnos de 8 horas (M 06–14, T 14–22, N 22–06) o de 12 horas (D 06–18, V 18–06). El operario escoge cuál va a trabajar al iniciar sesión. Esa elección debe llegar a todas las tablas que guardan turno o bitácora:
 
 - `SEL_BitacoraTurno` (`Turno`, `FechaTurno`, `Serial` con la letra D/V/M/T/N)

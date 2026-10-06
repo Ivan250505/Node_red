@@ -83,17 +83,26 @@ async function finalizarOrden(pool, idOrden, generadoPor, operarioFinal) {
   // no tiene nada que ver con este grupo). Elemento por sí solo NO es llave suficiente -- dos
   // pedidos DISTINTOS pueden usar la misma referencia de salida en momentos distintos. Exige
   // también el mismo NumeroPedido en ambos lados (ord1 Y ord2 contra g.Numero).
-  // FIX 13/09/2026 (a pedido del usuario, mismo patrón ya corregido en server.js/scan-rollo.js/
-  // frmLiberacionProduccion.vb para el bug del pedido 11243): la llave real es ord.Linea, no
-  // ord.Elemento -- ver el comentario largo en scan-rollo.js:confirmarRollo.
+  // FIX 13/09/2026 (mismo patrón: la llave real es ord.Linea + pedido, no ord.Elemento --
+  // ver el comentario largo en scan-rollo.js:confirmarRollo). Tarjeta #9: el pedido sale de la
+  // fila (Lineas: cabecera; extra: PedidosExtra), no solo de la cabecera.
   const dtGrupo = await pool.request().input('idOrden', idOrden).query(`
     SELECT ord2.IdOrden
     FROM SEL_OrdenProduccion ord1
-    INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Linea = ord1.Linea
-    INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl1.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
-      AND g.Numero = ord1.NumeroPedido
-    INNER JOIN PRDGrupoEtapasCompartidasLineas gl2 ON gl2.IdGrupo = g.IdGrupo
-    INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gl2.Linea AND ord2.NumeroPedido = g.Numero
+    INNER JOIN PRDGrupoEtapasCompartidas g ON g.CategoriaMaquina = 'SELLADORA'
+      AND (EXISTS (SELECT 1 FROM PRDGrupoEtapasCompartidasLineas gl
+                  WHERE gl.IdGrupo = g.IdGrupo AND gl.Linea = ord1.Linea AND g.Numero = ord1.NumeroPedido)
+        OR EXISTS (SELECT 1 FROM PRDGrupoEtapasPedidosExtra pe
+                  WHERE pe.IdGrupo = g.IdGrupo AND pe.Numero = ord1.NumeroPedido AND pe.Linea = ord1.Linea))
+    INNER JOIN (
+      SELECT gl2.Linea AS Linea, g2.Numero AS Numero, gl2.IdGrupo AS IdGrupo
+      FROM PRDGrupoEtapasCompartidasLineas gl2
+      INNER JOIN PRDGrupoEtapasCompartidas g2 ON g2.IdGrupo = gl2.IdGrupo
+      UNION
+      SELECT pe2.Linea AS Linea, pe2.Numero AS Numero, pe2.IdGrupo AS IdGrupo
+      FROM PRDGrupoEtapasPedidosExtra pe2
+    ) gm ON gm.IdGrupo = g.IdGrupo
+    INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gm.Linea AND ord2.NumeroPedido = gm.Numero
     WHERE ord1.IdOrden = @idOrden
   `);
   const idsGrupo = dtGrupo.recordset.length > 0
