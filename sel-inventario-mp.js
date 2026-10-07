@@ -518,36 +518,28 @@ async function obtenerAnclaGrupoSellado(db, idOrden) {
   // (PRDGrupoEtapasPedidosExtra, estructura #7). El ancla es el menor IdOrden del conjunto
   // (misma máquina, por construcción del grupo). Sin filas extra, idéntico a antes.
   const dt = await db.request().input('idOrden', idOrden).query(`
-    SELECT TOP 1 IdOrden, Elemento FROM (
-      SELECT ord2.IdOrden, ord2.Elemento
-      FROM SEL_OrdenProduccion ord1
-      INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Linea = ord1.Linea
-      INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl1.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
-        AND g.Numero = ord1.NumeroPedido
-      INNER JOIN PRDGrupoEtapasCompartidasLineas gl2 ON gl2.IdGrupo = g.IdGrupo
-      INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gl2.Linea AND ord2.NumeroPedido = g.Numero
-        AND ord2.Maquina = ord1.Maquina
-      WHERE ord1.IdOrden = @idOrden
+    SELECT TOP 1 ord2.IdOrden, ord2.Elemento
+    FROM SEL_OrdenProduccion ord1
+    INNER JOIN PRDGrupoEtapasCompartidas g ON g.CategoriaMaquina = 'SELLADORA'
+      AND (EXISTS (SELECT 1 FROM PRDGrupoEtapasCompartidasLineas gl
+                  WHERE gl.IdGrupo = g.IdGrupo AND gl.Linea = ord1.Linea AND g.Numero = ord1.NumeroPedido)
+        OR EXISTS (SELECT 1 FROM PRDGrupoEtapasPedidosExtra pe
+                  WHERE pe.IdGrupo = g.IdGrupo AND pe.SubEmpresa = g.SubEmpresa AND pe.Tipo = g.Tipo AND pe.Fecha = g.Fecha
+                    AND pe.Numero = ord1.NumeroPedido AND pe.Linea = ord1.Linea))
+    INNER JOIN (
+      SELECT gl2.Linea AS Linea, g2.Numero AS Numero, gl2.IdGrupo AS IdGrupo
+      FROM PRDGrupoEtapasCompartidasLineas gl2
+      INNER JOIN PRDGrupoEtapasCompartidas g2 ON g2.IdGrupo = gl2.IdGrupo
       UNION
-      SELECT ord2.IdOrden, ord2.Elemento
-      FROM SEL_OrdenProduccion ord1
-      INNER JOIN PRDGrupoEtapasPedidosExtra pe1 ON pe1.Numero = ord1.NumeroPedido AND pe1.Linea = ord1.Linea
-      INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = pe1.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
-      INNER JOIN PRDGrupoEtapasPedidosExtra pe2 ON pe2.IdGrupo = g.IdGrupo
-      INNER JOIN SEL_OrdenProduccion ord2 ON ord2.NumeroPedido = pe2.Numero AND ord2.Linea = pe2.Linea
-        AND ord2.Maquina = ord1.Maquina
-      WHERE ord1.IdOrden = @idOrden
-      UNION
-      SELECT ord2.IdOrden, ord2.Elemento
-      FROM SEL_OrdenProduccion ord1
-      INNER JOIN PRDGrupoEtapasCompartidasLineas gl1 ON gl1.Linea = ord1.Linea
-      INNER JOIN PRDGrupoEtapasCompartidas g ON g.IdGrupo = gl1.IdGrupo AND g.CategoriaMaquina = 'SELLADORA'
-        AND g.Numero = ord1.NumeroPedido
-      INNER JOIN PRDGrupoEtapasPedidosExtra pe2 ON pe2.IdGrupo = g.IdGrupo
-      INNER JOIN SEL_OrdenProduccion ord2 ON ord2.NumeroPedido = pe2.Numero AND ord2.Linea = pe2.Linea
-        AND ord2.Maquina = ord1.Maquina
-      WHERE ord1.IdOrden = @idOrden
-    ) x ORDER BY IdOrden ASC
+      SELECT pe2.Linea AS Linea, pe2.Numero AS Numero, pe2.IdGrupo AS IdGrupo
+      FROM PRDGrupoEtapasPedidosExtra pe2
+      INNER JOIN PRDGrupoEtapasCompartidas g3 ON g3.IdGrupo = pe2.IdGrupo
+        AND pe2.SubEmpresa = g3.SubEmpresa AND pe2.Tipo = g3.Tipo AND pe2.Fecha = g3.Fecha
+    ) gm ON gm.IdGrupo = g.IdGrupo
+    INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gm.Linea AND ord2.NumeroPedido = gm.Numero
+      AND ord2.Maquina = ord1.Maquina
+    WHERE ord1.IdOrden = @idOrden
+    ORDER BY ord2.IdOrden ASC
   `);
   return dt.recordset.length > 0 ? dt.recordset[0] : null;
 }
@@ -1952,15 +1944,21 @@ const SQL_CONTROLES_DE_OT = `
 
 async function suspenderOTDeOrden(db, { idOrden, usuario, motivo, origen }) {
   try {
+    // TARJETA #11: propagar suspensión a TODO el grupo si la orden pertenece a un grupo
+    const miembros = await obtenerMiembrosGrupoSellado(db, idOrden);
+    const idsMiembros = miembros.join(',');
+
     const r = await db.request()
       .input('idOrden', idOrden).input('usuario', usuario || null)
       .input('motivo', String(motivo || 'Suspensión desde la tableta').slice(0, 200))
       .input('origen', String(origen || 'Tableta').slice(0, 40))
+      .input('idsMiembros', idsMiembros)
       .query(`
         ${SQL_OT_DE_ORDEN}
         IF @OT IS NULL OR NOT EXISTS (SELECT 1 FROM PRDOrdenesProduccion WHERE OrdenProduccion = @OT AND Estado = 'Activa')
         BEGIN SELECT CAST(NULL AS VARCHAR(20)) AS OT; RETURN; END
 
+        -- Suspender OT compartida
         UPDATE PRDOrdenesProduccion SET Estado = 'Suspendida' WHERE OrdenProduccion = @OT AND Estado = 'Activa';
         UPDATE PRDExtrusionControl SET Estado = 'Suspendida', FechaUltimaModificacion = GETDATE()
         WHERE Estado = 'EnProceso' AND IdExtrusionControl IN (${SQL_CONTROLES_DE_OT});
@@ -1968,12 +1966,21 @@ async function suspenderOTDeOrden(db, { idOrden, usuario, motivo, origen }) {
           INSERT INTO PRDOrdenesProduccionPausas (OrdenProduccion, HoraInicioPausa, UsuarioPausa, Observaciones)
           VALUES (@OT, GETDATE(), @usuario, @motivo);
 
+        -- TARJETA #11: suspender TODAS las órdenes/ejecuciones del grupo
+        UPDATE op SET op.Estado = 'Suspendida'
+        FROM SEL_OrdenProduccion op
+        WHERE op.IdOrden IN (${idsMiembros}) AND op.Estado IN ('Pendiente', 'Activa');
+
+        UPDATE ej SET ej.Estado = 'Suspendida'
+        FROM SEL_EjecucionOrden ej
+        WHERE ej.IdOrden IN (${idsMiembros}) AND ej.Estado IN ('Pendiente', 'Activa', 'PendienteSuspension', 'SuspensionEnCurso');
+
         IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
         BEGIN
           DECLARE @Mov TABLE (Id INT);
           INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
           OUTPUT INSERTED.IdMovimiento INTO @Mov
-          VALUES ('ORDEN_TRABAJO', 'PAUSA', @IdOT, @OT, GETDATE(), @usuario, @origen, @motivo, N'Orden de trabajo suspendida desde la tableta');
+          VALUES ('ORDEN_TRABAJO', 'PAUSA', @IdOT, @OT, GETDATE(), @usuario, @origen, @motivo, N'Orden de trabajo suspendida desde la tableta (grupo)');
           INSERT INTO SISMovimientosDetalle (IdMovimiento, Tabla, Campo, ValorAnterior, ValorNuevo)
           SELECT Id, 'PRDOrdenesProduccion', 'Estado', 'Activa', 'Suspendida' FROM @Mov;
         END
@@ -2268,7 +2275,8 @@ async function obtenerMiembrosGrupoSellado(db, idOrden) {
       AND (EXISTS (SELECT 1 FROM PRDGrupoEtapasCompartidasLineas gl
                   WHERE gl.IdGrupo = g.IdGrupo AND gl.Linea = ord1.Linea AND g.Numero = ord1.NumeroPedido)
         OR EXISTS (SELECT 1 FROM PRDGrupoEtapasPedidosExtra pe
-                  WHERE pe.IdGrupo = g.IdGrupo AND pe.Numero = ord1.NumeroPedido AND pe.Linea = ord1.Linea))
+                  WHERE pe.IdGrupo = g.IdGrupo AND pe.SubEmpresa = g.SubEmpresa AND pe.Tipo = g.Tipo AND pe.Fecha = g.Fecha
+                    AND pe.Numero = ord1.NumeroPedido AND pe.Linea = ord1.Linea))
     INNER JOIN (
       SELECT gl2.Linea AS Linea, g2.Numero AS Numero, gl2.IdGrupo AS IdGrupo
       FROM PRDGrupoEtapasCompartidasLineas gl2
@@ -2276,6 +2284,8 @@ async function obtenerMiembrosGrupoSellado(db, idOrden) {
       UNION
       SELECT pe2.Linea AS Linea, pe2.Numero AS Numero, pe2.IdGrupo AS IdGrupo
       FROM PRDGrupoEtapasPedidosExtra pe2
+      INNER JOIN PRDGrupoEtapasCompartidas g3 ON g3.IdGrupo = pe2.IdGrupo
+        AND pe2.SubEmpresa = g3.SubEmpresa AND pe2.Tipo = g3.Tipo AND pe2.Fecha = g3.Fecha
     ) gm ON gm.IdGrupo = g.IdGrupo
     INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gm.Linea AND ord2.NumeroPedido = gm.Numero
     WHERE ord1.IdOrden = @idOrden

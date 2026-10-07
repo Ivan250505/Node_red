@@ -16,9 +16,9 @@ const {
   repararCoberturaTurnos, turnosParaLogin, sincronizarBitacoraAlEntrar, abrirBitacorasPendientes,
   franjasMaquinaOBase, turnoAJson, columnaExiste, esSupervisor,
   infoOTParaCorreccion, turnosParaCorregirOT, corregirTurnoOT,
-  abrirOReanudarBitacora, suspenderOTDeOrden, horaServidorBD,
+  abrirOReanudarBitacora, suspenderOTDeOrden, reanudarOTDeOrden, horaServidorBD,
   candidatosTurnoMaquina, activarTurnoMaquina, turnosParaCorregir, corregirTurnoMaquina,
-  obtenerAnclaGrupoSellado, obtenerEstadoAjusteConsumo, ajustarConsumoRollo
+  obtenerAnclaGrupoSellado, obtenerMiembrosGrupoSellado: miembrosGrupoPorOrden, obtenerEstadoAjusteConsumo, ajustarConsumoRollo
 } = require('./sel-inventario-mp');
 
 const dbConfig = {
@@ -5489,9 +5489,13 @@ function renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto, opcione
 // y el operario se enteraba de la regla por el error. Cada paquete lleva en data-destinos sus bultos
 // válidos y el desplegable de destino se rearma al escogerlo (cambioPaqueteTraslado). El SP sigue
 // validando todo igual (la sección no se refresca con el polling y puede quedar vieja).
-function renderSeccionTraslado(bultos, pesajesPorBulto, opciones) {
+function renderSeccionTraslado(bultos, pesajesPorBulto, opciones, destinoExtra = '') {
   const modoGrupo = !!(opciones && opciones.referencia);
-  if (bultos.length < 2) return ''; // hace falta al menos un bulto origen y uno destino
+  // Tarjeta #10: en grupo multi-referencia el destino puede venir de otra referencia del grupo
+  // (misma OT). destinoExtra trae esos bultos ya etiquetados; el SP valida la OT.
+  const extras = Array.isArray(destinoExtra) ? destinoExtra : [];
+  if (bultos.length === 0) return '';
+  if (bultos.length < 2 && extras.length === 0) return ''; // hace falta un origen y un destino
 
   const esValidado = b => Number(b.Validado) === 1;
   // El SP le da al paquete el siguiente consecutivo del destino, máximo 99.
@@ -5502,6 +5506,10 @@ function renderSeccionTraslado(bultos, pesajesPorBulto, opciones) {
   const destinoValido = d => d && !esValidado(d) && admitePaquete(d);
 
   // `bultos` viene ordenado por id y sin anulados -- los vecinos son los mismos que calcula el SP.
+  // Tarjeta #10: los extras son bultos de otras referencias del grupo (misma OT). El SP solo
+  // acepta el PRIMER paquete del origen hacia otra referencia (regla 51011), asi que solo se
+  // ofrecen al primero.
+  const extraValido = eb => eb && !Number(eb.Validado) && (Number(eb.maxPaquete) || 0) < 99;
   const opcionesPaquete = [];
   bultos.forEach((b, i) => {
     if (esValidado(b)) return;
@@ -5512,11 +5520,16 @@ function renderSeccionTraslado(bultos, pesajesPorBulto, opciones) {
       const destinos = [];
       if (Number(pe.EsPrimero) === 1 && destinoValido(anterior)) destinos.push(anterior);
       if (Number(pe.EsUltimo) === 1 && destinoValido(siguiente)) destinos.push(siguiente);
+      if (Number(pe.EsPrimero) === 1) {
+        for (const eb of extras) {
+          if (extraValido(eb) && !destinos.some(d => d.id === eb.id)) destinos.push(eb);
+        }
+      }
       if (destinos.length === 0) return;
       const dataDestinos = destinos.map(d => `${d.id}:${d.numRelativo}`).join(',');
-      const textoDestinos = destinos.map(d => `Bulto ${d.numRelativo}`).join(' o ');
+      const textoDestinos = destinos.map(d => `Bulto ${d.numRelativo}${d.etiquetaRef ? ` (${d.etiquetaRef})` : ''}`).join(' o ');
       opcionesPaquete.push(
-        `<option value="${pe.id_paquete}" data-destinos="${dataDestinos}">Bulto ${b.numRelativo} — Paquete ${pe.ConsecutivoPaquete} (${Number(pe.PesoPaqueGr)} kg) → ${textoDestinos}</option>`
+        `<option value="${pe.id_paquete}" data-bulto="${b.id}" data-destinos="${dataDestinos}">Bulto ${b.numRelativo} — Paquete ${pe.ConsecutivoPaquete} (${Number(pe.PesoPaqueGr)} kg) → ${textoDestinos}</option>`
       );
     });
   });
@@ -5564,6 +5577,7 @@ function renderSeccionTraslado(bultos, pesajesPorBulto, opciones) {
       </select>
     </div>
     <button type="button" class="btn-accion btn-traslado" onclick="confirmarTraslado(this)">🔀 Trasladar</button>
+    <button type="button" class="btn-accion btn-traslado" style="margin-top:8px;background:#8e44ad;" onclick="confirmarTrasladoBulto(this)">📦 Trasladar bulto completo</button>
   </div>`;
 }
 
@@ -5897,6 +5911,56 @@ function scriptTraslado(idOrden, maquinaCodigo) {
                 confirmButtonColor: '#71bf44'
               }).then(function() { location.reload(); });
             });
+          })
+          .catch(function(err) {
+            Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo trasladar: ' + err.message, confirmButtonColor: '#71bf44' });
+          });
+      });
+    }
+
+    // Tarjeta #10: mueve TODOS los paquetes del bulto del paquete seleccionado al bulto
+    // destino (o crea el Temporal en la orden de la sección si no se elige destino).
+    // El SP mueve en orden con la misma regla y deja el origen eliminado/Temporal en 0.
+    function confirmarTrasladoBulto(boton) {
+      var seccion = boton ? boton.closest('.seccion-traslado') : document;
+      var selOrigen = seccion.querySelector('.sel-paquete-origen');
+      var selDestino = seccion.querySelector('.sel-bulto-destino');
+      var idOrdenSeccion = (seccion.dataset && seccion.dataset.orden) ? Number(seccion.dataset.orden) : null;
+      var optSel = selOrigen.options[selOrigen.selectedIndex];
+      var idBultoOrigen = optSel && optSel.dataset ? Number(optSel.dataset.bulto) : null;
+      var idBultoDestino = selDestino.value ? Number(selDestino.value) : null;
+      if (!idBultoOrigen) {
+        Swal.fire({ icon: 'warning', title: 'Seleccione primero un paquete del bulto a mover.', confirmButtonColor: '#71bf44' });
+        return;
+      }
+      var textoBulto = selDestino.value ? selDestino.options[selDestino.selectedIndex].text : 'un bulto Temporal nuevo';
+      Swal.fire({
+        icon: 'warning',
+        title: '¿Trasladar TODO el bulto a ' + textoBulto + '?',
+        text: 'Se mueven todos sus paquetes en orden. El origen queda eliminado (si estaba cerrado) o Temporal en 0.',
+        showCancelButton: true,
+        confirmButtonText: 'Sí, trasladar todo',
+        cancelButtonText: 'Cancelar',
+        confirmButtonColor: '#71bf44',
+        cancelButtonColor: '#c0392b'
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        Swal.fire({ title: 'Trasladando…', allowOutsideClick: false, didOpen: function() { Swal.showLoading(); } });
+        fetch('/api/selladora/bulto/trasladar', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idBultoOrigen: idBultoOrigen, idBultoDestino: idBultoDestino, idOrdenDestino: idOrdenSeccion })
+        })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (!data.ok) {
+              Swal.fire({ icon: 'error', title: 'No se pudo trasladar', text: data.error || '', confirmButtonColor: '#71bf44' });
+              return;
+            }
+            Swal.fire({
+              icon: 'success', title: 'Bulto trasladado', text: data.movidos + ' paquete(s) movidos.',
+              confirmButtonColor: '#71bf44'
+            }).then(function() { location.reload(); });
           })
           .catch(function(err) {
             Swal.fire({ icon: 'error', title: 'Error', text: 'No se pudo trasladar: ' + err.message, confirmButtonColor: '#71bf44' });
@@ -7695,9 +7759,26 @@ function renderBultosGrupo(idGrupo, numeroPedido, maquinaCodigo, datosPorReferen
   // Una seccion de traslado por referencia: un paquete solo puede moverse entre bultos de su misma
   // referencia. Van fuera de #contenedor-bultos (igual que en la pagina de una orden) para que el
   // sondeo de cada 4s no borre un desplegable a medio llenar.
-  const traslados = datosPorReferencia.map(d => renderSeccionTraslado(d.bultos, d.pesajesPorBulto, {
-    referencia: d.referencia, nombreReferencia: d.nombre, color: d.color, idOrden: d.idOrden
-  })).join('');
+  // Tarjeta #10: en grupo multi-referencia el destino puede ser de OTRA referencia del grupo
+  // (misma OT, lo valida el SP). Se pasan como destinoExtra con su maximo consecutivo para el
+  // tope 99 y etiqueta de referencia para no confundir "Bulto N" entre refs.
+  const maxDe = (mapa, idBulto) => (mapa.get(idBulto) || [])
+    .reduce((max, pe) => Math.max(max, Number(pe.ConsecutivoPaquete) || 0), 0);
+  const traslados = datosPorReferencia.map((d, di) => {
+    const extras = [];
+    datosPorReferencia.forEach((o, oi) => {
+      if (oi === di) return;
+      for (const b of o.bultos) {
+        extras.push({
+          id: b.id, numRelativo: b.numRelativo, Validado: b.Validado,
+          maxPaquete: maxDe(o.pesajesPorBulto, b.id), etiquetaRef: o.referencia
+        });
+      }
+    });
+    return renderSeccionTraslado(d.bultos, d.pesajesPorBulto, {
+      referencia: d.referencia, nombreReferencia: d.nombre, color: d.color, idOrden: d.idOrden
+    }, extras);
+  }).join('');
 
   return `<!DOCTYPE html>
 <html lang="es">
@@ -8340,6 +8421,35 @@ app.get('/selladora/:codigo/orden/:idOrden/bultos/fragmento', requireLogin, asyn
     res.send(renderTarjetasBultos(bultos, pesajesPorBulto, residuosPorBulto));
   } catch (err) {
     res.status(500).send('Error: ' + err.message);
+  }
+});
+
+// Traslado de un bulto COMPLETO a otro de la misma OT (tarjeta #10,
+// dbo.sp_SEL_TrasladarBulto). Toda la lógica transaccional vive en el SP -- este endpoint
+// solo valida la sesión, lo llama y devuelve el conteo movido. Si el destino no existe y viene
+// idOrdenDestino, el SP crea el Temporal vacío.
+app.post('/api/selladora/bulto/trasladar', requireLogin, async (req, res) => {
+  const { idBultoOrigen, idBultoDestino, idOrdenDestino } = req.body;
+  if (!idBultoOrigen) {
+    return res.json({ ok: false, error: 'Falta el bulto origen.' });
+  }
+  try {
+    const p = await getPool();
+    const result = await p.request()
+      .input('IdBultoOrigen', idBultoOrigen)
+      .input('IdBultoDestino', idBultoDestino || null)
+      .input('IdOrdenDestino', idOrdenDestino || null)
+      .input('Usuario', usuarioNumerico(req.session.usuario))
+      .execute('sp_SEL_TrasladarBulto');
+    const fila = result.recordset && result.recordset[0];
+    res.json({
+      ok: true,
+      movidos: fila ? fila.Movidos : 0,
+      idBultoDestino: fila ? fila.IdBultoDestino : null,
+      serialPadreDestino: fila ? fila.SerialPadreDestino : null
+    });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
   }
 });
 
@@ -10617,6 +10727,152 @@ app.post('/api/selladora/orden/:idOrden/responder-suspension', requireLogin, asy
     res.json({ ok: false, error: err.message });
   }
 });
+
+// ============================ TARJETA #11: Pausa / Suspensión / Reanudar a nivel GRUPO ============================
+// Estos endpoints operan sobre el grupo completo (misma OT compartida).
+// Requieren login (operario) y que la orden pertenezca a un grupo SELLADORA.
+
+// POST /api/selladora/grupo/:idGrupo/pausar
+// Pausa la OT del grupo (registra en PRDOrdenesProduccionPausas). La OT sigue 'Activa'.
+app.post('/api/selladora/grupo/:idGrupo/pausar', requireLogin, async (req, res) => {
+  const idGrupo = Number(req.params.idGrupo);
+  const { motivo, usuario } = req.body;
+  const operario = req.session.usuario.codigoOperarioPRD;
+  if (!operario) return res.json({ ok: false, error: 'Su usuario no tiene un operario de planta configurado.' });
+  try {
+    const p = await getPool();
+    // Obtener ancla del grupo para encontrar la OT compartida
+    const dtAncla = await p.request().input('idGrupo', idGrupo).query(`
+      SELECT TOP 1 ord.IdOrden
+      FROM PRDGrupoEtapasCompartidas g
+      INNER JOIN PRDGrupoEtapasCompartidasLineas gl ON gl.IdGrupo = g.IdGrupo
+      INNER JOIN SEL_OrdenProduccion ord ON ord.Linea = gl.Linea AND ord.NumeroPedido = g.Numero
+        AND ord.Maquina = (SELECT Maquina FROM PRDGrupoEtapasCompartidas WHERE IdGrupo = g.IdGrupo)
+      WHERE g.IdGrupo = @idGrupo AND g.CategoriaMaquina = 'SELLADORA' AND ord.Estado IN ('Activa', 'Pendiente')
+      ORDER BY ord.IdOrden
+    `);
+    if (dtAncla.recordset.length === 0) return res.json({ ok: false, error: 'Grupo no encontrado o sin orden ancla activa.' });
+    const idOrdenAncla = dtAncla.recordset[0].IdOrden;
+
+    const miembros = await miembrosGrupoPorOrden(p, idOrdenAncla);
+    const idsMiembros = miembros.join(',');
+
+    await p.request()
+      .input('idOrden', idOrdenAncla).input('idsMiembros', idsMiembros)
+      .input('usuario', usuario || operario).input('motivo', String(motivo || 'Pausa grupo desde tableta').slice(0, 200))
+      .input('origen', 'Tableta').query(`
+        DECLARE @OT VARCHAR(20), @IdOT INT;
+        SELECT TOP 1 @OT = p.OrdenProduccion
+        FROM PRDProduccion p
+        INNER JOIN SEL_Bultos b ON b.serialPadre = p.Detalle
+        INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+        WHERE ej.IdOrden = @idOrden AND p.OrdenProduccion IS NOT NULL
+        ORDER BY b.id DESC;
+        SELECT @IdOT = IdOrdenProduccion FROM PRDOrdenesProduccion WHERE OrdenProduccion = @OT;
+
+        IF @OT IS NULL OR NOT EXISTS (SELECT 1 FROM PRDOrdenesProduccion WHERE OrdenProduccion = @OT AND Estado = 'Activa')
+          SELECT CAST(NULL AS VARCHAR(20)) AS OT;
+
+        IF NOT EXISTS (SELECT 1 FROM PRDOrdenesProduccionPausas WHERE OrdenProduccion = @OT AND HoraFinPausa IS NULL)
+          INSERT INTO PRDOrdenesProduccionPausas (OrdenProduccion, HoraInicioPausa, UsuarioPausa, Observaciones)
+          VALUES (@OT, GETDATE(), @usuario, @motivo);
+
+        IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
+        BEGIN
+          DECLARE @Mov TABLE (Id INT);
+          INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
+          OUTPUT INSERTED.IdMovimiento INTO @Mov
+          VALUES ('ORDEN_TRABAJO', 'PAUSA', @IdOT, @OT, GETDATE(), @usuario, @origen, @motivo, N'Pausa grupo desde tableta');
+          INSERT INTO SISMovimientosDetalle (IdMovimiento, Tabla, Campo, ValorAnterior, ValorNuevo)
+          SELECT Id, 'PRDOrdenesProduccion', 'Estado', 'Activa', 'Activa' FROM @Mov; -- pausa no cambia estado
+        END
+        SELECT @OT AS OT;
+      `);
+    res.json({ ok: true });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// POST /api/selladora/grupo/:idGrupo/suspender
+// Suspende el grupo completo: OT -> Suspendida, ejecuciones/órdenes del grupo -> Suspendida.
+// Lo llama Programación (admin) o el operario al responder "No" a la suspensión.
+app.post('/api/selladora/grupo/:idGrupo/suspender', requireLogin, async (req, res) => {
+  const idGrupo = Number(req.params.idGrupo);
+  const { motivo, terminarBulto } = req.body; // terminarBulto=true: solo marca PendienteSuspension; false: corta ya
+  const operario = req.session.usuario.codigoOperarioPRD;
+  if (!operario) return res.json({ ok: false, error: 'Su usuario no tiene un operario de planta configurado.' });
+  try {
+    const p = await getPool();
+    const dtAncla = await p.request().input('idGrupo', idGrupo).query(`
+      SELECT TOP 1 ord.IdOrden
+      FROM PRDGrupoEtapasCompartidas g
+      INNER JOIN PRDGrupoEtapasCompartidasLineas gl ON gl.IdGrupo = g.IdGrupo
+      INNER JOIN SEL_OrdenProduccion ord ON ord.Linea = gl.Linea AND ord.NumeroPedido = g.Numero
+        AND ord.Maquina = (SELECT Maquina FROM PRDGrupoEtapasCompartidas WHERE IdGrupo = g.IdGrupo)
+      WHERE g.IdGrupo = @idGrupo AND g.CategoriaMaquina = 'SELLADORA' AND ord.Estado IN ('Activa', 'Pendiente')
+      ORDER BY ord.IdOrden
+    `);
+    if (dtAncla.recordset.length === 0) return res.json({ ok: false, error: 'Grupo no encontrado o sin orden ancla activa.' });
+    const idOrdenAncla = dtAncla.recordset[0].IdOrden;
+
+    const miembros = await miembrosGrupoPorOrden(p, idOrdenAncla);
+    const idsMiembros = miembros.join(',');
+
+    if (terminarBulto) {
+      // Marcar todas las ejecuciones del grupo como PendienteSuspension (el operario terminará el bulto)
+      await p.request().input('idsMiembros', idsMiembros).query(`
+        UPDATE SEL_EjecucionOrden SET Estado = 'PendienteSuspension'
+        WHERE IdOrden IN (${idsMiembros}) AND Estado IN ('Activa', 'PendienteSuspension');
+      `);
+      return res.json({ ok: true, modo: 'terminarBulto' });
+    }
+
+    // Suspender YA: cortar bultos, suspender OT, ejecuciones, órdenes del grupo
+    await suspenderOTDeOrden(p, { idOrden: idOrdenAncla, usuario: operario, motivo: motivo || 'Suspendida grupo desde Programación', origen: 'Tableta' });
+    res.json({ ok: true, modo: 'suspenderYa' });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// POST /api/selladora/grupo/:idGrupo/reanudar
+// Reanuda el grupo: OT -> Activa, ejecuciones/órdenes del grupo -> Activa, cierra pausa.
+app.post('/api/selladora/grupo/:idGrupo/reanudar', requireLogin, async (req, res) => {
+  const idGrupo = Number(req.params.idGrupo);
+  const operario = req.session.usuario.codigoOperarioPRD;
+  if (!operario) return res.json({ ok: false, error: 'Su usuario no tiene un operario de planta configurado.' });
+  try {
+    const p = await getPool();
+    const dtAncla = await p.request().input('idGrupo', idGrupo).query(`
+      SELECT TOP 1 ord.IdOrden
+      FROM PRDGrupoEtapasCompartidas g
+      INNER JOIN PRDGrupoEtapasCompartidasLineas gl ON gl.IdGrupo = g.IdGrupo
+      INNER JOIN SEL_OrdenProduccion ord ON ord.Linea = gl.Linea AND ord.NumeroPedido = g.Numero
+        AND ord.Maquina = (SELECT Maquina FROM PRDGrupoEtapasCompartidas WHERE IdGrupo = g.IdGrupo)
+      WHERE g.IdGrupo = @idGrupo AND g.CategoriaMaquina = 'SELLADORA' AND ord.Estado IN ('Suspendida', 'Activa')
+      ORDER BY ord.IdOrden
+    `);
+    if (dtAncla.recordset.length === 0) return res.json({ ok: false, error: 'Grupo no encontrado o sin orden suspendida.' });
+    const idOrdenAncla = dtAncla.recordset[0].IdOrden;
+
+    // reanudarOTDeOrden ya usa obtenerMiembrosGrupoSellado internamente y reactiva OT + cierra pausa
+    const ot = await reanudarOTDeOrden(p, { idOrden: idOrdenAncla, usuario: operario, origen: 'Tableta' });
+    if (!ot) return res.json({ ok: false, error: 'No se pudo reanudar: la OT no está suspendida o no existe.' });
+
+    // Reactivar ejecuciones y órdenes del grupo
+    const miembros = await miembrosGrupoPorOrden(p, idOrdenAncla);
+    const idsMiembros = miembros.join(',');
+    await p.request().input('idsMiembros', idsMiembros).query(`
+      UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden IN (${idsMiembros}) AND Estado = 'Suspendida';
+      UPDATE SEL_EjecucionOrden SET Estado = 'Activa' WHERE IdOrden IN (${idsMiembros}) AND Estado = 'Suspendida';
+    `);
+    res.json({ ok: true, ot });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
 
 app.post('/api/comando', requireLogin, async (req, res) => {
   const { comando, idOrden, maquinaCodigo, datos } = req.body;
