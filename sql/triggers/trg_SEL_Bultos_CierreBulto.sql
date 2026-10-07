@@ -47,6 +47,17 @@
 --      todavia no existe, queda NULL y se completa al cerrar el bulto. Tambien se guarda en
 --      SEL_Bultos.IdBitacora (antes solo el primer bulto la tenia ahi).
 --
+-- ACTUALIZADO 07/10/2026 (a pedido del usuario) -- PENDIENTE de aplicar con CREATE OR ALTER:
+-- cliente del bulto. PRDProduccion.ClienteProduccion y CodigoCliente se copian del bulto ANTERIOR de la
+-- misma orden (el ultimo que los tenga en no NULL); si no hay anterior, ClienteProduccion se resuelve de
+-- SEL_OrdenProduccion.Cliente. Se hace al ABRIR el bulto nuevo (INSERT del cursor) y al CERRAR (solo
+-- llena los que esten en NULL -- cubre el primer bulto que crea Node y los que abrieron con la orden en
+-- NULL). Nunca pisa un valor ya puesto ni bloquea el cierre.
+--
+-- ACTUALIZADO 06/10/2026 (a pedido del usuario): al cerrar un bulto, si el operario que tiene el control
+-- de la maquina no esta en PRDProduccionOperarios de ese bulto, se agrega como otra linea (bulto empezado
+-- por un operario y cerrado por otro queda con los dos). PENDIENTE de aplicar con CREATE OR ALTER.
+--
 -- ACTUALIZADO 06/10/2026 (matriz tarjeta #9, misma ref en 2 pedidos): el INSERT de abajo
 -- es por conjunto (un UPDATE puede cerrar varios bultos a la vez, ej. Finalizar cierra los
 -- EnEspera con paquetes de todas las referencias). El MAX+1 se calculaba igual para cada
@@ -131,6 +142,31 @@ BEGIN
         -- se queda en 0 para algun bulto que ya esta Cerrado en SEL_Bultos
     END CATCH
 
+    -- 06/10/2026 (a pedido del usuario): operario que CIERRA el bulto. Si el operario que tiene el control
+    -- de la maquina al cerrar (SEL_OperarioActualMaquina; si nadie, el de la ejecucion) no esta ya en
+    -- PRDProduccionOperarios para este bulto, se AGREGA como otra linea (misma Fecha/Lote/Elemento/Linea).
+    -- Caso: A abre el bulto, termina su turno sin cerrarlo y B lo cierra -> el bulto queda con A y B y la
+    -- etiqueta imprime 'A,B'. Si cierra el mismo que ya esta, no hace nada. Nunca bloquea el cierre.
+    BEGIN TRY
+        INSERT INTO PRDProduccionOperarios (Fecha, Lote, Elemento, Linea, Operario)
+        SELECT DISTINCT p.Fecha, p.Lote, p.Elemento, p.Linea, op.Operario
+        FROM PRDProduccion p
+        JOIN SEL_Bultos b ON b.serialPadre = p.Detalle
+        JOIN inserted i ON i.id = b.id
+        JOIN deleted d ON d.id = b.id
+        LEFT JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+        LEFT JOIN SEL_OperarioActualMaquina oam ON oam.Maquina = b.id_maquina
+        CROSS APPLY (SELECT ISNULL(oam.Operario, ej.Operario) AS Operario) op
+        WHERE i.estado = 'Cerrado' AND d.estado <> 'Cerrado'
+          AND op.Operario > 0
+          AND NOT EXISTS (SELECT 1 FROM PRDProduccionOperarios x
+                          WHERE x.Fecha = p.Fecha AND x.Lote = p.Lote AND x.Elemento = p.Elemento
+                            AND x.Linea = p.Linea AND x.Operario = op.Operario);
+    END TRY
+    BEGIN CATCH
+        -- no bloquear el cierre del bulto por esto
+    END CATCH
+
     -- Bitacora del bulto que se cierra (FIX 24/09/2026): si abrio antes de que el operario del turno
     -- tomara control, quedo sin bitacora (ver cursor de abajo). Al cerrar se busca otra vez la
     -- bitacora de SU turno (Turno + FechaTurno de su HoraInicio) -- para entonces ya deberia existir.
@@ -170,6 +206,43 @@ BEGIN
     END TRY
     BEGIN CATCH
         -- no bloquear el cierre del bulto por esto -- el bulto queda sin bitacora
+    END CATCH
+
+    -- 07/10/2026 (a pedido del usuario): cliente del bulto que se cierra. Solo llena lo que este en NULL:
+    -- ClienteProduccion y CodigoCliente se copian del bulto anterior de la misma orden; si no hay,
+    -- ClienteProduccion sale de SEL_OrdenProduccion.Cliente. CodigoCliente (FK a PRDClientes) solo se
+    -- copia de otro bulto, nunca de la orden (la orden guarda un codigo de VISTerceros).
+    BEGIN TRY
+        UPDATE p
+        SET p.ClienteProduccion = ISNULL(p.ClienteProduccion, ISNULL(antCli.ClienteProduccion, op.Cliente)),
+            p.CodigoCliente     = ISNULL(p.CodigoCliente, antCod.CodigoCliente)
+        FROM PRDProduccion p
+        JOIN SEL_Bultos b ON b.serialPadre = p.Detalle
+        JOIN inserted i ON i.id = b.id
+        JOIN deleted d ON d.id = b.id
+        LEFT JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+        LEFT JOIN SEL_OrdenProduccion op ON op.IdOrden = ej.IdOrden
+        OUTER APPLY (
+            SELECT TOP 1 pa.ClienteProduccion
+            FROM PRDProduccion pa
+            JOIN SEL_Bultos ba ON ba.serialPadre = pa.Detalle
+            JOIN SEL_EjecucionOrden ea ON ea.IdEjecucion = ba.id_ejecucion
+            WHERE ea.IdOrden = ej.IdOrden AND ba.id < b.id AND pa.ClienteProduccion IS NOT NULL
+            ORDER BY ba.id DESC
+        ) antCli
+        OUTER APPLY (
+            SELECT TOP 1 pa.CodigoCliente
+            FROM PRDProduccion pa
+            JOIN SEL_Bultos ba ON ba.serialPadre = pa.Detalle
+            JOIN SEL_EjecucionOrden ea ON ea.IdEjecucion = ba.id_ejecucion
+            WHERE ea.IdOrden = ej.IdOrden AND ba.id < b.id AND pa.CodigoCliente IS NOT NULL
+            ORDER BY ba.id DESC
+        ) antCod
+        WHERE i.estado = 'Cerrado' AND d.estado <> 'Cerrado'
+          AND (p.ClienteProduccion IS NULL OR p.CodigoCliente IS NULL);
+    END TRY
+    BEGIN CATCH
+        -- no bloquear el cierre del bulto por esto -- el bulto queda con el cliente que tenia
     END CATCH
 
     -- Completa el peso real en PRDExtrusionRollos del bulto que se acaba de cerrar (reservada en
@@ -261,7 +334,7 @@ BEGIN
                 @SerialNuevo varchar(40), @Lote varchar(6), @Turno int, @CodCliente int, @CodDestino int,
                 @IdExtrusionControl int, @NumeroSecuencial int, @OrdenProduccion varchar(20), @Operario int,
                 @TipoPedido int, @IdBitacora int, @FechaTurno date, @GeneradoPor int,
-                @LoteOriginal varchar(20), @FechaOriginal date;
+                @LoteOriginal varchar(20), @FechaOriginal date, @ClienteAnterior int, @CodigoCliente int;
 
         DECLARE curNuevoBulto CURSOR LOCAL FAST_FORWARD FOR
             SELECT nb.agno, nb.mes, nb.dia, nb.refsalida, nb.id_maquina, nb.id_ejecucion,
@@ -298,6 +371,28 @@ BEGIN
             FROM SEL_EjecucionOrden ej4
             INNER JOIN SEL_OrdenProduccion op ON op.IdOrden = ej4.IdOrden
             WHERE ej4.IdEjecucion = @id_ejecucion;
+
+            -- 07/10/2026 (a pedido del usuario): cliente copiado del bulto anterior de la misma orden
+            -- (el ultimo que lo tenga en no NULL); si no hay, ClienteProduccion queda el de la orden
+            -- (@CodCliente, arriba). CodigoCliente solo se copia del anterior (FK a PRDClientes).
+            SET @ClienteAnterior = NULL;
+            SELECT TOP 1 @ClienteAnterior = p6.ClienteProduccion
+            FROM PRDProduccion p6
+            INNER JOIN SEL_Bultos b6 ON b6.serialPadre = p6.Detalle
+            INNER JOIN SEL_EjecucionOrden e6 ON e6.IdEjecucion = b6.id_ejecucion
+            WHERE e6.IdOrden = (SELECT TOP 1 IdOrden FROM SEL_EjecucionOrden WHERE IdEjecucion = @id_ejecucion)
+              AND b6.serialPadre <> @SerialNuevo AND p6.ClienteProduccion IS NOT NULL
+            ORDER BY b6.id DESC;
+            SET @CodCliente = ISNULL(@ClienteAnterior, @CodCliente);
+
+            SET @CodigoCliente = NULL;
+            SELECT TOP 1 @CodigoCliente = p6.CodigoCliente
+            FROM PRDProduccion p6
+            INNER JOIN SEL_Bultos b6 ON b6.serialPadre = p6.Detalle
+            INNER JOIN SEL_EjecucionOrden e6 ON e6.IdEjecucion = b6.id_ejecucion
+            WHERE e6.IdOrden = (SELECT TOP 1 IdOrden FROM SEL_EjecucionOrden WHERE IdEjecucion = @id_ejecucion)
+              AND b6.serialPadre <> @SerialNuevo AND p6.CodigoCliente IS NOT NULL
+            ORDER BY b6.id DESC;
 
             SET @OrdenProduccion = NULL;
             SELECT TOP 1 @OrdenProduccion = p3.OrdenProduccion
@@ -392,12 +487,12 @@ BEGIN
             BEGIN
                 INSERT INTO PRDProduccion
                     (Fecha, Maquina, Turno, Duracion, Lote, Elemento, Linea, Cantidad, PesoCono, Unidades, Detalle,
-                     ClienteProduccion, Destino, Grafilado, Abierto, Servicio, Retal, GeneradoPor,
+                     ClienteProduccion, CodigoCliente, Destino, Grafilado, Abierto, Servicio, Retal, GeneradoPor,
                      FechaModificado, HoraInicio, HoraFinal, Torta, BolsasxGolpe, TipoPedido, NumeroPedido, OrdenProduccion, IdBitacora,
                      LoteOriginal, FechaOriginal)
                 VALUES
                     (DATEFROMPARTS(@agno, @mes, @dia), @id_maquina, @Turno, 0, @Lote, @refsalida, @NuevoNumBulto,
-                     0, 0, 0, @SerialNuevo, @CodCliente, @CodDestino, 0, 0, 0, 0, ISNULL(@GeneradoPor, 0), GETDATE(), @HoraFin, @HoraFin, 0,
+                     0, 0, 0, @SerialNuevo, @CodCliente, @CodigoCliente, @CodDestino, 0, 0, 0, 0, ISNULL(@GeneradoPor, 0), GETDATE(), @HoraFin, @HoraFin, 0,
                      @BolsasxGolpe, ISNULL(@TipoPedido, 4),
                      CASE WHEN ISNULL(@NumeroPedido, '') <> '' THEN @NumeroPedido ELSE NULL END,
                      @OrdenProduccion, @IdBitacora,
