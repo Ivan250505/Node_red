@@ -16,7 +16,7 @@ const {
   repararCoberturaTurnos, turnosParaLogin, sincronizarBitacoraAlEntrar, abrirBitacorasPendientes,
   franjasMaquinaOBase, turnoAJson, columnaExiste, esSupervisor,
   infoOTParaCorreccion, turnosParaCorregirOT, corregirTurnoOT,
-  abrirOReanudarBitacora, suspenderOTDeOrden, horaServidorBD,
+  abrirOReanudarBitacora, suspenderOTDeOrden, reanudarOTDeOrden, horaServidorBD,
   candidatosTurnoMaquina, activarTurnoMaquina, turnosParaCorregir, corregirTurnoMaquina,
   obtenerAnclaGrupoSellado, obtenerEstadoAjusteConsumo, ajustarConsumoRollo
 } = require('./sel-inventario-mp');
@@ -4550,11 +4550,42 @@ function scriptProtocoloArranque(maquinaCodigo) {
             Swal.fire({ icon: 'warning', title: 'No se puede iniciar', text: v.error, confirmButtonColor: '#71bf44' });
             return;
           }
+          // 07/10/2026 (pedido 12209): suspendida y reanudada por Programación -- se retoma sobre lo
+          // ya producido, no se vuelve a arrancar (ver POST /reanudar-suspendida).
+          if (v && v.reanudacion) { retomarOrdenSuspendida(idOrden, v.orden); return; }
           // 26/09/2026: el turno activo se escoge ANTES del protocolo y del primer rollo
           // 28/09/2026: el turno ya se escogió en el login -- no se vuelve a preguntar.
           seguirIniciarProtocoloArranque(idOrden, v && v.orden);
         })
         .catch(function() { seguirIniciarProtocoloArranque(idOrden); });
+    }
+
+    function retomarOrdenSuspendida(idOrden, orden) {
+      Swal.fire({
+        icon: 'question', title: 'Retomar orden suspendida',
+        html: (orden && orden.descripcion
+                ? '<div style="font-size:16px;font-weight:600;color:#006984;margin-bottom:10px;">Orden ' +
+                    String(orden.descripcion).replace(/[&<>"]/g, function(c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }) +
+                  '</div>'
+                : '') +
+              '<div style="text-align:left;font-size:14px;color:#64748b;line-height:1.5;">' +
+                'Esta orden fue suspendida y ya tiene producción. Se retoma sobre lo producido, ' +
+                'con el mismo rollo y sin protocolo de arranque: queda lista para producir.' +
+              '</div>',
+        showCancelButton: true,
+        confirmButtonText: '▶ Retomar', confirmButtonColor: '#71bf44',
+        cancelButtonText: 'Cancelar', cancelButtonColor: '#64748b',
+        showLoaderOnConfirm: true,
+        allowOutsideClick: function() { return !Swal.isLoading(); },
+        preConfirm: function() {
+          return protocoloPost('/api/selladora/orden/' + idOrden + '/reanudar-suspendida', {}).then(function(datos) {
+            if (!datos.ok) { Swal.showValidationMessage(datos.error || 'No se pudo retomar la orden.'); return false; }
+            return true;
+          });
+        }
+      }).then(function(r) {
+        if (r.isConfirmed) location.reload();
+      });
     }
 
     function seguirIniciarProtocoloArranque(idOrden, orden) {
@@ -9984,6 +10015,10 @@ async function obtenerProtocoloPendiente(p, idOrden) {
     const { IdEjecucion } = dtEj.recordset[0];
     let EstadoOrden = dtEj.recordset[0].EstadoOrden;
     if (EstadoOrden !== 'Pendiente' && EstadoOrden !== 'Activa') return null;
+    // 07/10/2026 (pedido 12209): suspendida y reanudada -- sus pasos son los del arranque original,
+    // ya completo. Leerla como Pendiente la daba por arranque a medias ("falta escanear el rollo").
+    // Se retoma con POST .../reanudar-suspendida, que la deja Activa y sin protocolo.
+    if (EstadoOrden === 'Pendiente' && await esOrdenSuspendidaReanudada(p, idOrden)) return null;
 
     // FIX 16/09/2026 (rediseno del Iniciar -- autocuracion): si el Alistamiento del protocolo de
     // arranque YA se cerro (HoraFin puesto, ver POST /reanudar) pero la materializacion del bulto
@@ -10267,10 +10302,21 @@ function proximaVerificacionBascula(idUltima, fechaUltima) {
 // Pendiente de la misma máquina tenga el protocolo a medias -- el operario inició la línea 4, hizo la
 // limpieza, se pasó a la línea 1 y la 4 quedó escondida detrás de la Activa (ver
 // ordenConProtocoloAMedias). Hay que continuarlo o cancelarlo (POST .../protocolo/cancelar).
+// 07/10/2026 (pedido 12209): una orden suspendida que Programación reanudó vuelve a 'Pendiente' pero
+// YA tiene producción -- no se arranca de nuevo (limpieza, rollo, bulto nuevo): se retoma con
+// POST .../reanudar-suspendida. Por eso aquí se rechaza el camino del arranque para ella.
 async function bloqueoArranquePorOrdenActiva(p, idOrden) {
   const dt = await p.request().input('idOrden', idOrden)
     .query(`SELECT Estado FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
   if (dt.recordset.length === 0 || dt.recordset[0].Estado !== 'Pendiente') return null;
+  if (await esOrdenSuspendidaReanudada(p, idOrden)) {
+    return 'Esta orden fue suspendida y ya tiene producción: se retoma con "▶ Iniciar" desde la cola de la máquina, sin volver a arrancarla.';
+  }
+  return bloqueoPorOtraOrdenDeLaMaquina(p, idOrden);
+}
+
+// Lo que impide que esta orden tome la máquina: otra Activa, u otra con el arranque a medias.
+async function bloqueoPorOtraOrdenDeLaMaquina(p, idOrden) {
   const v = await validarPuedeIniciar(p, idOrden);
   if (!v.ok) return v.error;
   const otra = await ordenConProtocoloAMedias(p, idOrden);
@@ -10279,9 +10325,22 @@ async function bloqueoArranquePorOrdenActiva(p, idOrden) {
     : null;
 }
 
+// Orden 'Pendiente' que ya tiene bultos = suspendida y devuelta a la cola por Programación
+// (Programacion.vb:ReanudarOrdenCola). Un arranque normal no crea bultos hasta terminar el
+// alistamiento, y ahí la orden ya pasa a 'Activa'.
+async function esOrdenSuspendidaReanudada(p, idOrden) {
+  const dt = await p.request().input('idOrden', idOrden).query(`
+    SELECT TOP 1 1 AS X FROM SEL_OrdenProduccion ord
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
+    INNER JOIN SEL_Bultos b ON b.id_ejecucion = ej.IdEjecucion
+    WHERE ord.IdOrden = @idOrden AND ord.Estado = 'Pendiente'
+  `);
+  return dt.recordset.length > 0;
+}
+
 // Otra orden Pendiente de la misma máquina con rastro de protocolo de arranque (respuestas guardadas
 // o cronómetro de limpieza/alistamiento abierto) -- mismo rastro que usa obtenerProtocoloPendienteMaquina.
-// Una orden Pendiente con rastro es siempre un arranque a medias: las órdenes no vuelven a Pendiente.
+// Se excluyen las suspendidas reanudadas (con bultos): su protocolo viejo está completo, no a medias.
 async function ordenConProtocoloAMedias(p, idOrden) {
   const dt = await p.request().input('idOrden', idOrden).query(`
     SELECT TOP 1 ord2.IdOrden, ISNULL(ord2.NumeroPedido, '') AS NumeroPedido, ord2.Linea, ie.Referencia, ie.Nombre
@@ -10290,6 +10349,7 @@ async function ordenConProtocoloAMedias(p, idOrden) {
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord2.IdOrden
     LEFT JOIN INVElementos ie ON ie.Codigo = ord2.Elemento
     WHERE ord1.IdOrden = @idOrden AND ord2.Estado = 'Pendiente'
+      AND NOT EXISTS (SELECT 1 FROM SEL_Bultos b WHERE b.id_ejecucion = ej.IdEjecucion)
       AND (
         EXISTS (SELECT 1 FROM SEL_ProtocoloArranque pa WHERE pa.id_ejecucion = ej.IdEjecucion)
         OR EXISTS (SELECT 1 FROM SEL_TiempoMuerto tm
@@ -10327,12 +10387,100 @@ app.get('/api/selladora/orden/:idOrden/puede-iniciar', requireLogin, async (req,
   try {
     const p = await getPool();
     const idOrden = Number(req.params.idOrden);
-    const error = await bloqueoArranquePorOrdenActiva(p, idOrden);
+    // 07/10/2026: suspendida y reanudada -> la tableta la retoma (reanudacion: true) en vez de
+    // abrir el protocolo de arranque. Igual tiene que tener la máquina libre.
+    const reanudacion = await esOrdenSuspendidaReanudada(p, idOrden);
+    const error = reanudacion ? await bloqueoPorOtraOrdenDeLaMaquina(p, idOrden) : await bloqueoArranquePorOrdenActiva(p, idOrden);
     if (error) {
       return res.json({ ok: false, error, ordenAMedias: ordenParaCliente(await ordenConProtocoloAMedias(p, idOrden)) });
     }
-    res.json({ ok: true, orden: ordenParaCliente(await datosOrdenParaAviso(p, idOrden)) });
+    res.json({ ok: true, reanudacion, orden: ordenParaCliente(await datosOrdenParaAviso(p, idOrden)) });
   } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// 07/10/2026 (a pedido del usuario, pedido 12209): retomar una orden suspendida que Programación
+// devolvió a la cola. Antes "▶ Iniciar" la trataba como un arranque a medias y pedía escanear el
+// rollo (y, de seguir, habría creado otro bulto de arranque encima de lo ya producido). Ahora es lo
+// parecido a retomar una ejecución (tomar-control-ejecucion): la orden vuelve a 'Activa' sobre su
+// MISMA ejecución, el bulto que quedó 'Suspendido' vuelve a recibir paquetes y la OT se reanuda.
+// SIN protocolo (decisión del usuario, 07/10/2026): ni arranque ni ronda de relevo -- queda lista
+// para producir. Si la ejecución quedó con una actividad abierta (una pausa), sigue abierta y el
+// operario la termina como cualquier pausa.
+app.post('/api/selladora/orden/:idOrden/reanudar-suspendida', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  const miOperario = req.session.usuario.codigoOperarioPRD;
+  if (!miOperario || miOperario <= 0) return res.json({ ok: false, error: 'Su usuario no tiene un operario de planta asignado.' });
+  let tx;
+  try {
+    const p = await getPool();
+    if (!(await esOrdenSuspendidaReanudada(p, idOrden))) {
+      return res.json({ ok: false, error: 'Esta orden no es una orden suspendida pendiente de retomar.' });
+    }
+    const bloqueo = await bloqueoPorOtraOrdenDeLaMaquina(p, idOrden);
+    if (bloqueo) return res.json({ ok: false, error: bloqueo });
+
+    tx = new sql.Transaction(p);
+    await tx.begin();
+    const dt = await tx.request().input('idOrden', idOrden).query(`
+      SELECT ord.Estado, ord.Maquina, ISNULL(ord.NumeroPedido, '') AS NumeroPedido, ord.Linea, ej.IdEjecucion, ej.Operario
+      FROM SEL_OrdenProduccion ord WITH (UPDLOCK)
+      INNER JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
+      WHERE ord.IdOrden = @idOrden ORDER BY ej.IdEjecucion ASC
+    `);
+    const o = dt.recordset[0];
+    if (!o || o.Estado !== 'Pendiente') throw new Error('La orden ya no está pendiente de retomar.');
+
+    // El bulto suspendido vuelve a la línea: 'Activo' si alcanzó a tener paquetes (suspensión sin
+    // terminar el bulto), 'Temporal' si es el reservado vacío (suspensión al terminar el bulto).
+    const dtBulto = await tx.request().input('idEjecucion', o.IdEjecucion).query(`
+      DECLARE @IdBulto INT = (SELECT TOP 1 id FROM SEL_Bultos
+                              WHERE id_ejecucion = @idEjecucion AND estado = 'Suspendido' ORDER BY id DESC);
+      UPDATE SEL_Bultos
+      SET estado = CASE WHEN EXISTS (SELECT 1 FROM SEL_PesajeElemento pe WHERE pe.id_bulto = @IdBulto)
+                        THEN 'Activo' ELSE 'Temporal' END
+      WHERE id = @IdBulto;
+      SELECT @IdBulto AS IdBulto, (SELECT estado FROM SEL_Bultos WHERE id = @IdBulto) AS Estado;
+    `);
+    await tx.request().input('idOrden', idOrden).query(`UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden = @idOrden`);
+    // Una pausa abierta se respeta (igual que tomar-control-ejecucion); si no, queda 'Activa'.
+    await tx.request().input('idEjecucion', o.IdEjecucion).input('operario', miOperario).query(`
+      UPDATE SEL_EjecucionOrden
+      SET Operario = @operario, Estado = CASE WHEN Estado = 'En pausa' THEN 'En pausa' ELSE 'Activa' END
+      WHERE IdEjecucion = @idEjecucion
+    `);
+    const bulto = dtBulto.recordset[0] || {};
+    await tx.request()
+      .input('idOrden', idOrden).input('ref', `Pedido ${o.NumeroPedido} línea ${o.Linea}`.slice(0, 40))
+      .input('usuario', usuarioNumerico(req.session.usuario))
+      .input('resumen', (bulto.IdBulto ? `Bulto ${bulto.IdBulto} Suspendido -> ${bulto.Estado}` : 'Sin bulto suspendido') + `, operario ${miOperario}`)
+      .query(`
+        IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
+          INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
+          VALUES ('SELLADORA', 'REANUDAR_SUSPENDIDA', @idOrden, @ref, GETDATE(), @usuario, 'Tableta',
+                  'Orden suspendida retomada desde la tableta', @resumen);
+      `);
+    await tx.commit();
+    tx = null;
+
+    // Lo mismo que hace tomar-control-ejecucion al cambiar la máquina de dueño. Nada de esto
+    // deshace la retoma si falla: cada uno ya se degrada solo.
+    await p.request().input('maquina', o.Maquina).input('operario', miOperario).query(`
+      MERGE SEL_OperarioActualMaquina AS destino
+      USING (SELECT @maquina AS Maquina) AS origen ON destino.Maquina = origen.Maquina
+      WHEN MATCHED THEN UPDATE SET Operario = @operario, FechaHora = GETDATE()
+      WHEN NOT MATCHED THEN INSERT (Maquina, Operario, FechaHora) VALUES (@maquina, @operario, GETDATE());
+    `);
+    await activarTurnoDeSesion(p, req, o.Maquina);
+    await abrirOReanudarBitacora(p, o.Maquina, miOperario);
+    // Mismo criterio de usuario que materializarInicioOrden al reanudar la OT.
+    await reanudarOTDeOrden(p, { idOrden, usuario: Number(req.session.usuario.codigo) || null });
+
+    console.log(`Orden suspendida ${idOrden} (pedido ${o.NumeroPedido} línea ${o.Linea}) retomada por ${req.session.usuario.codigo}`);
+    res.json({ ok: true, maquina: o.Maquina });
+  } catch (err) {
+    try { if (tx) await tx.rollback(); } catch (e) { /* ya abortada */ }
     res.json({ ok: false, error: err.message });
   }
 });
@@ -10522,6 +10670,8 @@ async function obtenerProtocoloPendienteMaquina(p, codigo) {
       FROM SEL_OrdenProduccion ord
       INNER JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
       WHERE ord.Maquina = @codigo AND ord.Estado IN ('Pendiente','Activa')
+        -- 07/10/2026: una Pendiente con bultos es una suspendida reanudada, no un arranque a medias.
+        AND (ord.Estado = 'Activa' OR NOT EXISTS (SELECT 1 FROM SEL_Bultos b WHERE b.id_ejecucion = ej.IdEjecucion))
         AND (
           EXISTS (SELECT 1 FROM SEL_TiempoMuerto tm
                   WHERE tm.id_ejecucion = ej.IdEjecucion AND tm.HoraFin IS NULL
