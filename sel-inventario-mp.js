@@ -1944,15 +1944,21 @@ const SQL_CONTROLES_DE_OT = `
 
 async function suspenderOTDeOrden(db, { idOrden, usuario, motivo, origen }) {
   try {
+    // TARJETA #11: propagar suspensión a TODO el grupo si la orden pertenece a un grupo
+    const miembros = await obtenerMiembrosGrupoSellado(db, idOrden);
+    const idsMiembros = miembros.join(',');
+
     const r = await db.request()
       .input('idOrden', idOrden).input('usuario', usuario || null)
       .input('motivo', String(motivo || 'Suspensión desde la tableta').slice(0, 200))
       .input('origen', String(origen || 'Tableta').slice(0, 40))
+      .input('idsMiembros', idsMiembros)
       .query(`
         ${SQL_OT_DE_ORDEN}
         IF @OT IS NULL OR NOT EXISTS (SELECT 1 FROM PRDOrdenesProduccion WHERE OrdenProduccion = @OT AND Estado = 'Activa')
         BEGIN SELECT CAST(NULL AS VARCHAR(20)) AS OT; RETURN; END
 
+        -- Suspender OT compartida
         UPDATE PRDOrdenesProduccion SET Estado = 'Suspendida' WHERE OrdenProduccion = @OT AND Estado = 'Activa';
         UPDATE PRDExtrusionControl SET Estado = 'Suspendida', FechaUltimaModificacion = GETDATE()
         WHERE Estado = 'EnProceso' AND IdExtrusionControl IN (${SQL_CONTROLES_DE_OT});
@@ -1960,12 +1966,21 @@ async function suspenderOTDeOrden(db, { idOrden, usuario, motivo, origen }) {
           INSERT INTO PRDOrdenesProduccionPausas (OrdenProduccion, HoraInicioPausa, UsuarioPausa, Observaciones)
           VALUES (@OT, GETDATE(), @usuario, @motivo);
 
+        -- TARJETA #11: suspender TODAS las órdenes/ejecuciones del grupo
+        UPDATE op SET op.Estado = 'Suspendida'
+        FROM SEL_OrdenProduccion op
+        WHERE op.IdOrden IN (${idsMiembros}) AND op.Estado IN ('Pendiente', 'Activa');
+
+        UPDATE ej SET ej.Estado = 'Suspendida'
+        FROM SEL_EjecucionOrden ej
+        WHERE ej.IdOrden IN (${idsMiembros}) AND ej.Estado IN ('Pendiente', 'Activa', 'PendienteSuspension', 'SuspensionEnCurso');
+
         IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
         BEGIN
           DECLARE @Mov TABLE (Id INT);
           INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
           OUTPUT INSERTED.IdMovimiento INTO @Mov
-          VALUES ('ORDEN_TRABAJO', 'PAUSA', @IdOT, @OT, GETDATE(), @usuario, @origen, @motivo, N'Orden de trabajo suspendida desde la tableta');
+          VALUES ('ORDEN_TRABAJO', 'PAUSA', @IdOT, @OT, GETDATE(), @usuario, @origen, @motivo, N'Orden de trabajo suspendida desde la tableta (grupo)');
           INSERT INTO SISMovimientosDetalle (IdMovimiento, Tabla, Campo, ValorAnterior, ValorNuevo)
           SELECT Id, 'PRDOrdenesProduccion', 'Estado', 'Activa', 'Suspendida' FROM @Mov;
         END

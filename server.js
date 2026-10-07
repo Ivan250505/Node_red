@@ -16,9 +16,9 @@ const {
   repararCoberturaTurnos, turnosParaLogin, sincronizarBitacoraAlEntrar, abrirBitacorasPendientes,
   franjasMaquinaOBase, turnoAJson, columnaExiste, esSupervisor,
   infoOTParaCorreccion, turnosParaCorregirOT, corregirTurnoOT,
-  abrirOReanudarBitacora, suspenderOTDeOrden, horaServidorBD,
+  abrirOReanudarBitacora, suspenderOTDeOrden, reanudarOTDeOrden, horaServidorBD,
   candidatosTurnoMaquina, activarTurnoMaquina, turnosParaCorregir, corregirTurnoMaquina,
-  obtenerAnclaGrupoSellado, obtenerEstadoAjusteConsumo, ajustarConsumoRollo
+  obtenerAnclaGrupoSellado, obtenerMiembrosGrupoSellado, obtenerEstadoAjusteConsumo, ajustarConsumoRollo
 } = require('./sel-inventario-mp');
 
 const dbConfig = {
@@ -6849,7 +6849,7 @@ async function obtenerIdGrupoSelladoDeOrden(p, idOrden) {
 //   - saca SUS botones de residuos (botonesResiduos necesita MaquinaTipo y Troquelado),
 //   - y decide que preguntas de Calidad aplican (calcularFlagsCalidad necesita ademas
 //     CierreHermetico/CintaAdhesiva).
-async function obtenerMiembrosGrupoSellado(p, idGrupo) {
+async function obtenerMiembrosGrupoSelladoUI(p, idGrupo) {
   const dtMiembros = await p.request().input('idGrupo', idGrupo).query(`
     SELECT ord.IdOrden, ie.Referencia, ie.Nombre, ord.Estado, ISNULL(ord.NumeroPedido,'') AS NumeroPedido,
            ord.TipoSellado, ord.Troquelado, ord.UsoPrevisto, ord.Manija, ord.ManijaColor, ord.Tula,
@@ -6900,7 +6900,7 @@ async function obtenerMiembrosGrupoSellado(p, idGrupo) {
 async function obtenerGrupoSelladoDeOrden(p, idOrden) {
   const nIdGrupo = await obtenerIdGrupoSelladoDeOrden(p, idOrden);
   if (nIdGrupo == null) return [];
-  return obtenerMiembrosGrupoSellado(p, nIdGrupo);
+  return obtenerMiembrosGrupoSelladoUI(p, nIdGrupo);
 }
 
 // FIX 09/09/2026 (a pedido del usuario, confirmado vía AskUserQuestion: "+ Rollo" es UNA sola
@@ -10413,6 +10413,151 @@ app.post('/api/selladora/orden/:idOrden/responder-suspension', requireLogin, asy
     });
 
     res.json({ ok: true });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// ============================ TARJETA #11: Pausa / Suspensión / Reanudar a nivel GRUPO ============================
+// Estos endpoints operan sobre el grupo completo (misma OT compartida).
+// Requieren login (operario) y que la orden pertenezca a un grupo SELLADORA.
+
+// POST /api/selladora/grupo/:idGrupo/pausar
+// Pausa la OT del grupo (registra en PRDOrdenesProduccionPausas). La OT sigue 'Activa'.
+app.post('/api/selladora/grupo/:idGrupo/pausar', requireLogin, async (req, res) => {
+  const idGrupo = Number(req.params.idGrupo);
+  const { motivo, usuario } = req.body;
+  const operario = req.session.usuario.codigoOperarioPRD;
+  if (!operario) return res.json({ ok: false, error: 'Su usuario no tiene un operario de planta configurado.' });
+  try {
+    const p = await getPool();
+    // Obtener ancla del grupo para encontrar la OT compartida
+    const dtAncla = await p.request().input('idGrupo', idGrupo).query(`
+      SELECT TOP 1 ord.IdOrden
+      FROM PRDGrupoEtapasCompartidas g
+      INNER JOIN PRDGrupoEtapasCompartidasLineas gl ON gl.IdGrupo = g.IdGrupo
+      INNER JOIN SEL_OrdenProduccion ord ON ord.Linea = gl.Linea AND ord.NumeroPedido = g.Numero
+        AND ord.Maquina = (SELECT Maquina FROM PRDGrupoEtapasCompartidas WHERE IdGrupo = g.IdGrupo)
+      WHERE g.IdGrupo = @idGrupo AND g.CategoriaMaquina = 'SELLADORA' AND ord.Estado IN ('Activa', 'Pendiente')
+      ORDER BY ord.IdOrden
+    `);
+    if (dtAncla.recordset.length === 0) return res.json({ ok: false, error: 'Grupo no encontrado o sin orden ancla activa.' });
+    const idOrdenAncla = dtAncla.recordset[0].IdOrden;
+
+    const miembros = await obtenerMiembrosGrupoSellado(p, idOrdenAncla);
+    const idsMiembros = miembros.join(',');
+
+    await p.request()
+      .input('idOrden', idOrdenAncla).input('idsMiembros', idsMiembros)
+      .input('usuario', usuario || operario).input('motivo', String(motivo || 'Pausa grupo desde tableta').slice(0, 200))
+      .input('origen', 'Tableta').query(`
+        DECLARE @OT VARCHAR(20), @IdOT INT;
+        SELECT TOP 1 @OT = p.OrdenProduccion
+        FROM PRDProduccion p
+        INNER JOIN SEL_Bultos b ON b.serialPadre = p.Detalle
+        INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+        WHERE ej.IdOrden = @idOrden AND p.OrdenProduccion IS NOT NULL
+        ORDER BY b.id DESC;
+        SELECT @IdOT = IdOrdenProduccion FROM PRDOrdenesProduccion WHERE OrdenProduccion = @OT;
+
+        IF @OT IS NULL OR NOT EXISTS (SELECT 1 FROM PRDOrdenesProduccion WHERE OrdenProduccion = @OT AND Estado = 'Activa')
+          SELECT CAST(NULL AS VARCHAR(20)) AS OT;
+
+        IF NOT EXISTS (SELECT 1 FROM PRDOrdenesProduccionPausas WHERE OrdenProduccion = @OT AND HoraFinPausa IS NULL)
+          INSERT INTO PRDOrdenesProduccionPausas (OrdenProduccion, HoraInicioPausa, UsuarioPausa, Observaciones)
+          VALUES (@OT, GETDATE(), @usuario, @motivo);
+
+        IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
+        BEGIN
+          DECLARE @Mov TABLE (Id INT);
+          INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
+          OUTPUT INSERTED.IdMovimiento INTO @Mov
+          VALUES ('ORDEN_TRABAJO', 'PAUSA', @IdOT, @OT, GETDATE(), @usuario, @origen, @motivo, N'Pausa grupo desde tableta');
+          INSERT INTO SISMovimientosDetalle (IdMovimiento, Tabla, Campo, ValorAnterior, ValorNuevo)
+          SELECT Id, 'PRDOrdenesProduccion', 'Estado', 'Activa', 'Activa' FROM @Mov; -- pausa no cambia estado
+        END
+        SELECT @OT AS OT;
+      `);
+    res.json({ ok: true });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// POST /api/selladora/grupo/:idGrupo/suspender
+// Suspende el grupo completo: OT -> Suspendida, ejecuciones/órdenes del grupo -> Suspendida.
+// Lo llama Programación (admin) o el operario al responder "No" a la suspensión.
+app.post('/api/selladora/grupo/:idGrupo/suspender', requireLogin, async (req, res) => {
+  const idGrupo = Number(req.params.idGrupo);
+  const { motivo, terminarBulto } = req.body; // terminarBulto=true: solo marca PendienteSuspension; false: corta ya
+  const operario = req.session.usuario.codigoOperarioPRD;
+  if (!operario) return res.json({ ok: false, error: 'Su usuario no tiene un operario de planta configurado.' });
+  try {
+    const p = await getPool();
+    const dtAncla = await p.request().input('idGrupo', idGrupo).query(`
+      SELECT TOP 1 ord.IdOrden
+      FROM PRDGrupoEtapasCompartidas g
+      INNER JOIN PRDGrupoEtapasCompartidasLineas gl ON gl.IdGrupo = g.IdGrupo
+      INNER JOIN SEL_OrdenProduccion ord ON ord.Linea = gl.Linea AND ord.NumeroPedido = g.Numero
+        AND ord.Maquina = (SELECT Maquina FROM PRDGrupoEtapasCompartidas WHERE IdGrupo = g.IdGrupo)
+      WHERE g.IdGrupo = @idGrupo AND g.CategoriaMaquina = 'SELLADORA' AND ord.Estado IN ('Activa', 'Pendiente')
+      ORDER BY ord.IdOrden
+    `);
+    if (dtAncla.recordset.length === 0) return res.json({ ok: false, error: 'Grupo no encontrado o sin orden ancla activa.' });
+    const idOrdenAncla = dtAncla.recordset[0].IdOrden;
+
+    const miembros = await obtenerMiembrosGrupoSellado(p, idOrdenAncla);
+    const idsMiembros = miembros.join(',');
+
+    if (terminarBulto) {
+      // Marcar todas las ejecuciones del grupo como PendienteSuspension (el operario terminará el bulto)
+      await p.request().input('idsMiembros', idsMiembros).query(`
+        UPDATE SEL_EjecucionOrden SET Estado = 'PendienteSuspension'
+        WHERE IdOrden IN (${idsMiembros}) AND Estado IN ('Activa', 'PendienteSuspension');
+      `);
+      return res.json({ ok: true, modo: 'terminarBulto' });
+    }
+
+    // Suspender YA: cortar bultos, suspender OT, ejecuciones, órdenes del grupo
+    await suspenderOTDeOrden(p, { idOrden: idOrdenAncla, usuario: operario, motivo: motivo || 'Suspendida grupo desde Programación', origen: 'Tableta' });
+    res.json({ ok: true, modo: 'suspenderYa' });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// POST /api/selladora/grupo/:idGrupo/reanudar
+// Reanuda el grupo: OT -> Activa, ejecuciones/órdenes del grupo -> Activa, cierra pausa.
+app.post('/api/selladora/grupo/:idGrupo/reanudar', requireLogin, async (req, res) => {
+  const idGrupo = Number(req.params.idGrupo);
+  const operario = req.session.usuario.codigoOperarioPRD;
+  if (!operario) return res.json({ ok: false, error: 'Su usuario no tiene un operario de planta configurado.' });
+  try {
+    const p = await getPool();
+    const dtAncla = await p.request().input('idGrupo', idGrupo).query(`
+      SELECT TOP 1 ord.IdOrden
+      FROM PRDGrupoEtapasCompartidas g
+      INNER JOIN PRDGrupoEtapasCompartidasLineas gl ON gl.IdGrupo = g.IdGrupo
+      INNER JOIN SEL_OrdenProduccion ord ON ord.Linea = gl.Linea AND ord.NumeroPedido = g.Numero
+        AND ord.Maquina = (SELECT Maquina FROM PRDGrupoEtapasCompartidas WHERE IdGrupo = g.IdGrupo)
+      WHERE g.IdGrupo = @idGrupo AND g.CategoriaMaquina = 'SELLADORA' AND ord.Estado IN ('Suspendida', 'Activa')
+      ORDER BY ord.IdOrden
+    `);
+    if (dtAncla.recordset.length === 0) return res.json({ ok: false, error: 'Grupo no encontrado o sin orden suspendida.' });
+    const idOrdenAncla = dtAncla.recordset[0].IdOrden;
+
+    // reanudarOTDeOrden ya usa obtenerMiembrosGrupoSellado internamente y reactiva OT + cierra pausa
+    const ot = await reanudarOTDeOrden(p, { idOrden: idOrdenAncla, usuario: operario, origen: 'Tableta' });
+    if (!ot) return res.json({ ok: false, error: 'No se pudo reanudar: la OT no está suspendida o no existe.' });
+
+    // Reactivar ejecuciones y órdenes del grupo
+    const miembros = await obtenerMiembrosGrupoSellado(p, idOrdenAncla);
+    const idsMiembros = miembros.join(',');
+    await p.request().input('idsMiembros', idsMiembros).query(`
+      UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden IN (${idsMiembros}) AND Estado = 'Suspendida';
+      UPDATE SEL_EjecucionOrden SET Estado = 'Activa' WHERE IdOrden IN (${idsMiembros}) AND Estado = 'Suspendida';
+    `);
+    res.json({ ok: true, ot });
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
