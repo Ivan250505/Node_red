@@ -2854,6 +2854,9 @@ function abrirCalidad() {
     // recibiendo paquetes -- si ya tiene paquetes y todavia no tiene un chequeo, hay que pedirlo.
     // Al vivir del lado del servidor, recargar la pagina o cambiar de pestaña no pierde ni repite
     // nada: el chequeo del bulto 3 se pide una sola vez, la haga quien la haga.
+    // CAMBIO 08/10/2026: si el bulto tarda mas de 30 minutos en llenarse, vuelve a salir cada 30
+    // minutos desde el ultimo chequeo de ESE bulto -- tambien lo decide el servidor
+    // (CALIDAD_INTERVALO_MIN en /calidad-pendiente).
     //
     // Sigue sin ser mutuamente excluyente con Pausa: si al tocar el turno hay otra ventana
     // bloqueante abierta (pausa, escaneo de rollo, protocolo de arranque), NO se fuerza encima --
@@ -8070,8 +8073,9 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
     let pausaActiva = null;
     // Chequeo de Calidad (03/09/2026, reescrito el 11/09/2026 a pedido del usuario): ya no se
     // programa una hora futura (la vieja columna SEL_EjecucionOrden.ProximaCalidad, que era un
-    // chequeo aleatorio cada 20-30 min). Ahora sale en el PRIMER PAQUETE de cada bulto y quien lo
-    // decide es el servidor, en /calidad-pendiente -- aca solo se resuelve si esta pagina tiene que
+    // chequeo aleatorio cada 20-30 min). Ahora sale en el PRIMER PAQUETE de cada bulto y, desde el
+    // 08/10/2026, tambien cada 30 min mientras el mismo bulto siga llenandose; quien lo decide es el servidor, en
+    // /calidad-pendiente -- aca solo se resuelve si esta pagina tiene que
     // vigilarlo.
     // Se mantiene el FIX 03/09/2026: exige que la EJECUCION (no solo la orden) este realmente en
     // curso -- Activa o En pausa, nunca 'PendienteOperador' (nadie ha retomado el control todavia,
@@ -9000,6 +9004,17 @@ app.get('/selladora/:codigo/orden/:idOrden/resumen-bulto-activo', requireLogin, 
 // Criterio del bulto identico al de registrarChequeoCalidad (estado='Activo', el mas reciente):
 // tiene que ser el MISMO bulto que termine en la columna id_bulto del chequeo, si no se volveria
 // a pedir para siempre.
+//
+// CAMBIO 08/10/2026 (a pedido del usuario: "ademas de salir en el primer bulto debe salir cada 30
+// minutos"; precisado el mismo dia: "debe ser por bulto, si un bulto dura mas de media hora
+// haciendose debe salir el chequeo, desde el primer chequeo del primer paquete"): se suma una
+// segunda condicion -- si desde el ULTIMO chequeo de ESTE bulto ya pasaron CALIDAD_INTERVALO_MIN
+// minutos, se vuelve a pedir. El reloj arranca en el chequeo del primer paquete del bulto y se
+// reinicia con cada chequeo respondido de ese mismo bulto; un bulto que se llena en menos de media
+// hora solo tiene el chequeo del primer paquete. Se mide con GETDATE()
+// del servidor SQL (el mismo reloj del DEFAULT de FechaHora), no con la hora de la tableta. Las dos
+// condiciones exigen que el bulto ya tenga paquetes: sin producto no hay nada que revisar.
+const CALIDAD_INTERVALO_MIN = 30;
 app.get('/selladora/:codigo/orden/:idOrden/calidad-pendiente', requireLogin, async (req, res) => {
   const { idOrden } = req.params;
   try {
@@ -9016,10 +9031,13 @@ app.get('/selladora/:codigo/orden/:idOrden/calidad-pendiente', requireLogin, asy
     const idBulto = dtBulto.recordset[0].id;
     const dtEstado = await p.request().input('idBulto', idBulto).query(`
       SELECT (SELECT COUNT(*) FROM SEL_PesajeElemento WHERE id_bulto = @idBulto) AS Paquetes,
-             (SELECT COUNT(*) FROM SEL_ChequeoCalidad WHERE id_bulto = @idBulto) AS Chequeos
+             (SELECT COUNT(*) FROM SEL_ChequeoCalidad WHERE id_bulto = @idBulto) AS Chequeos,
+             (SELECT DATEDIFF(SECOND, MAX(FechaHora), GETDATE()) FROM SEL_ChequeoCalidad
+               WHERE id_bulto = @idBulto) AS SegundosDesdeUltimo
     `);
-    const { Paquetes, Chequeos } = dtEstado.recordset[0];
-    res.json({ ok: true, pendiente: Paquetes > 0 && Chequeos === 0, idBulto, paquetes: Paquetes });
+    const { Paquetes, Chequeos, SegundosDesdeUltimo } = dtEstado.recordset[0];
+    const vencido = SegundosDesdeUltimo != null && SegundosDesdeUltimo >= CALIDAD_INTERVALO_MIN * 60;
+    res.json({ ok: true, pendiente: Paquetes > 0 && (Chequeos === 0 || vencido), idBulto, paquetes: Paquetes });
   } catch (err) {
     // Mismo blindaje que el resto de tablas nuevas: SEL_ChequeoCalidad puede no existir todavia en
     // la base contra la que se este probando (ver agregar_calidad_por_bulto_y_medidas.sql). Sin esa
