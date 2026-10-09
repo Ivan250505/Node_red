@@ -5057,7 +5057,17 @@ function seccionOrdenTrabajo(otInfo, esSup) {
     </script>` : ''}`;
 }
 
-function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, ordenProduccion, esSup, otInfo, simBloque = '') {
+function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, ordenProduccion, esSup, otInfo, simBloque = '', retoma = null) {
+  // 09/10/2026: sin control de la ejecucion (ver retomaPendiente) no se ofrece nada que la toque:
+  // ni Produccion, ni Residuos, ni Imprimir/Cierre bulto; tampoco el cronometro de la pausa, la
+  // Calidad ni el protocolo a medias, que son del operario que si la tiene.
+  const avisoRetomar = bloqueRetomar(retoma && orden.Estado === 'Activa' ? [retoma] : []);
+  const sinControl = !!avisoRetomar.html;
+  if (sinControl) {
+    pausaActiva = null;
+    calidadHabilitada = false;
+    protocoloPendiente = null;
+  }
   // Sellado en paralelo (ver DISENO_SELLADO_PARALELO_08092026.md): si esta orden comparte máquina
   // con otras (mismo rollo, hasta 3 referencias de salida distintas), grupoSellado trae TODAS las
   // referencias del grupo (incluida esta misma) -- solo se usa para saber si hay que ocultar
@@ -5115,7 +5125,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   if (orden.Estado === 'Pendiente') {
     // Mismo protocolo de arranque que el boton Iniciar de la cola, ver renderColaOrdenes.
     acciones = `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${orden.IdOrden})">▶ Iniciar</button>`;
-  } else if (activa) {
+  } else if (activa && !sinControl) {
     // Sellado en paralelo (08/09/2026): "+Rollo" no aplica a una orden agrupada -- el rollo de
     // entrada ya quedó registrado UNA sola vez para las 3 referencias al dar "Iniciar" en la ancla.
     // Orden de izquierda a derecha: Rollo, Pausa, Finalizar. El boton Turno se quito de aca
@@ -5138,7 +5148,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   // van agrupados bajo un titulo "Residuos", en su propia isla separada de "Producción"
   // (+Rollo/Finalizar/Pausa) pero en la MISMA fila (a pedido del usuario, 01/09/2026 -- antes vivian
   // junto a Imprimir etiqueta/Cierre bulto). Ver botonesResiduos().
-  const botonesResiduosHTML = activa ? botonesResiduos(orden, null) : '';
+  const botonesResiduosHTML = activa && !sinControl ? botonesResiduos(orden, null) : '';
 
   // Peso en vivo + Imprimir etiqueta/Cierre bulto/Residuos: solo tienen sentido con la orden
   // Activa (bascula/impresora actuando sobre el bulto que se esta armando en este momento).
@@ -5169,7 +5179,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   // quedan aca. FIX 09/09/2026: tampoco esta ya el boton "🌡️ Temperatura perilla" -- la
   // temperatura la pide el paso 6 del protocolo de arranque, al terminar el alistamiento y antes
   // de empezar a producir (a pedido del usuario, ver scriptProtocoloArranque).
-  const imprimirYAccionesBox = activa ? `
+  const imprimirYAccionesBox = activa && !sinControl ? `
     <div class="peso-box">
       <div class="imprimir-acciones-grid">
         <button type="button" class="btn-accion btn-imprimir" onclick="confirmarYEnviar('¿Está seguro de imprimir la etiqueta?', 'imprimir_etiqueta', this)">🖨️ Imprimir etiqueta</button>
@@ -5240,6 +5250,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     </div>
   </header>
   <main>
+    ${avisoRetomar.html}
     ${/* La fila ya no cuelga de `acciones`: la isla de Autorizacion va aca (24/09/2026) y la firma
           se puede pedir en cualquier estado, tambien con la orden ya finalizada o en validacion,
           que es cuando `acciones` viene vacio. Produccion y Residuos si siguen apareciendo solo
@@ -5305,6 +5316,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     reanudarProtocoloArranque(${JSON.stringify(protocoloPendiente)}, false);
   </script>` : ''}
   ${avanceCard ? `<script>${scriptAvanceProduccion(orden.IdOrden, maquinaCodigo)}</script>` : ''}
+  ${avisoRetomar.script ? `<script>${avisoRetomar.script}</script>` : ''}
   ${scriptMensajeVolver()}
 </body>
 </html>`;
@@ -7446,7 +7458,7 @@ function calcularAvanceTotalGrupo(miembros) {
 // del usuario): peso de bascula, paquetes del bulto actual y peso acumulado DE ESA REFERENCIA,
 // Imprimir etiqueta, Cierre bulto y sus Especificaciones. Los botones de operar solo salen si la
 // orden de esa referencia esta Activa.
-function renderTarjetaReferenciaGrupo(m, indice, simHtml = '') {
+function renderTarjetaReferenciaGrupo(m, indice, simHtml = '', sinControl = false) {
   const color = colorReferenciaGrupo(indice);
   const refJs = jsString(m.Referencia).replace(/"/g, '&quot;');
   const activa = m.Estado === 'Activa';
@@ -7489,6 +7501,7 @@ function renderTarjetaReferenciaGrupo(m, indice, simHtml = '') {
           </div>
           <span class="peso-estado peso-vivo-estado desconectado">Conectando…</span>
         </div>
+        ${sinControl ? `<div class="pesaje-vacio">Retome la ejecución (arriba) para imprimir, cerrar bultos o registrar residuos.</div>` : `
         <div class="imprimir-acciones-grid">
           <button type="button" class="btn-accion btn-imprimir" onclick="accionReferencia('imprimir_etiqueta', this, ${m.IdOrden})">🖨️ Imprimir etiqueta</button>
           <button type="button" class="btn-accion btn-cierre-bulto" onclick="accionReferencia('cierre_bulto', this, ${m.IdOrden})">📦 Cierre bulto</button>
@@ -7496,7 +7509,7 @@ function renderTarjetaReferenciaGrupo(m, indice, simHtml = '') {
         <div class="ref-residuos">
           <div class="label">Residuos</div>
           <div class="orden-acciones">${botonesResiduos(m, { idOrden: m.IdOrden, referencia: m.Referencia })}</div>
-        </div>` : `
+        </div>`}` : `
         <div class="pesaje-vacio">Esta referencia no está activa (${m.Estado}) — no se puede imprimir ni cerrar bultos.</div>`;
 
   return `
@@ -7536,7 +7549,15 @@ function renderTarjetaReferenciaGrupo(m, indice, simHtml = '') {
 //   - Una tarjeta interactiva por referencia (ver renderTarjetaReferenciaGrupo).
 // "Ver bultos" lleva a la pagina de bultos del GRUPO (/grupo/:idGrupo/bultos), con el filtro por
 // referencia -- no a la de una sola orden.
-function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquinaCodigo, miembros, usuario, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, ordenProduccion, esSup, otInfo, simPorOrden = {}) {
+function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquinaCodigo, miembros, usuario, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, ordenProduccion, esSup, otInfo, simPorOrden = {}, retomas = []) {
+  // 09/10/2026: sin control de la ejecucion -- mismo criterio que renderOrdenDetalle.
+  const avisoRetomar = bloqueRetomar(retomas);
+  const sinControl = !!avisoRetomar.html;
+  if (sinControl) {
+    pausaActiva = null;
+    calidadHabilitada = false;
+    protocoloPendiente = null;
+  }
   // "Activo ahora" es el que esta recibiendo paquetes en este momento (su bulto esta Activo o
   // Temporal). Si ninguno lo esta (grupo recien creado, nadie ha dado Iniciar) no se ofrece
   // "+ Rollo": el rollo se registra siempre contra la referencia activa.
@@ -7586,7 +7607,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
 
   // Orden de izquierda a derecha: Rollo, Pausa, Finalizar. El boton Turno se quito de aca
   // (a pedido del usuario, 30/09/2026).
-  const accionesProduccion = [
+  const accionesProduccion = sinControl ? '' : [
     miembroActivoAhora
       ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${miembroActivoAhora.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>`
       : '',
@@ -7600,7 +7621,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
       : ''
   ].join('');
 
-  const tarjetasReferencia = miembros.map((m, i) => renderTarjetaReferenciaGrupo(m, i, simPorOrden[m.IdOrden] || '')).join('');
+  const tarjetasReferencia = miembros.map((m, i) => renderTarjetaReferenciaGrupo(m, i, simPorOrden[m.IdOrden] || '', sinControl)).join('');
 
   // Tarjeta de avance TOTAL del pedido en el encabezado -- los mismos ids que usa la pagina de una
   // sola referencia (avance-porcentaje/relleno/producido/programado), porque quien la refresca cada
@@ -7655,6 +7676,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
     </div>
   </header>
   <main>
+    ${avisoRetomar.html}
     <div class="islas-fila">
       ${accionesProduccion ? `<div class="isla">
         <div class="label">Producción</div>
@@ -7728,6 +7750,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
     // que en la pagina de una referencia suelta.
     reanudarProtocoloArranque(${JSON.stringify(protocoloPendiente)}, false);
   </script>` : ''}
+  ${avisoRetomar.script ? `<script>${avisoRetomar.script}</script>` : ''}
   ${scriptMensajeVolver()}
 </body>
 </html>`;
@@ -7930,8 +7953,14 @@ app.get('/selladora/:codigo/grupo/:idGrupo', requireLogin, async (req, res) => {
     }
     // Tarjeta #9: encabezado con TODOS los pedidos del grupo ("Pedido 11285 · 11286").
     const pedidosGrupo = [...new Set(miembros.map(m => (m.NumeroPedido || '').trim()).filter(Boolean))];
+    // 09/10/2026: cada referencia tiene su propia ejecucion -- una por cada una que haga falta retomar.
+    const retomas = [];
+    for (const m of miembros) {
+      const r = await retomaPendiente(p, m.IdOrden, req.session.usuario.codigoOperarioPRD);
+      if (r) retomas.push(r);
+    }
     res.send(renderGrupoSelladoDetalle(idGrupo, pedidosGrupo.join(' · ') || miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, textoOT,
-      esSupervisor(req.session.usuario), await infoOTParaCorreccion(p, ordenProduccion), simPorOrden));
+      esSupervisor(req.session.usuario), await infoOTParaCorreccion(p, ordenProduccion), simPorOrden, retomas));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
@@ -8169,8 +8198,10 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
       }
     }
     const textoOT = await textoOTConOperario(p, ordenProduccion, req.session.usuario.codigoOperarioPRD);
+    // 09/10/2026: si la ejecucion no es de quien mira, aviso con Retomar y sin acciones (ver retomaPendiente).
+    const retoma = await retomaPendiente(p, idOrden, req.session.usuario.codigoOperarioPRD);
     res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, textoOT,
-      esSupervisor(req.session.usuario), await infoOTParaCorreccion(p, ordenProduccion), simBloque));
+      esSupervisor(req.session.usuario), await infoOTParaCorreccion(p, ordenProduccion), simBloque, retoma));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
@@ -9097,6 +9128,85 @@ app.get('/selladora/:codigo/peso-patron-pendiente', requireLogin, async (req, re
 // operario actual de la maquina (SEL_OperarioActualMaquina, ver agregar_operarioactualmaquina.sql
 // -- lo consulta trg_SEL_Bultos_CierreBulto para cada bulto nuevo que la maquina cree sola).
 //
+// 09/10/2026 (a pedido del usuario, bug real: maquina 7, noche del 08/10): Andres entro a la tableta
+// y trabajo toda la noche desde Informacion sin darle Retomar -- la ejecucion y el operario actual
+// de la maquina siguieron a nombre de Ronal, y los 10 bultos de su turno salieron a nombre de Ronal.
+// Ahora, si la ejecucion de una orden Activa no es de quien mira (mismo criterio que
+// renderColaOrdenes), la pantalla de la orden/grupo muestra el aviso con Retomar y esconde las
+// acciones, y el servidor rechaza +Rollo, Pausa, Finalizar, Alternar y los comandos al PLC.
+// Devuelve null si no hay nada que retomar, o { idOrden, operario, nombre, esElMismo }.
+async function retomaPendiente(p, idOrden, miOperario) {
+  const dt = await p.request().input('idOrden', Number(idOrden)).query(`
+    SELECT TOP 1 ord.Estado AS EstadoOrden, ej.Estado AS EstadoEjecucion, ej.Operario, op.Nombre
+    FROM SEL_OrdenProduccion ord
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
+    LEFT JOIN PRDOperarios op ON op.Codigo = ej.Operario
+    WHERE ord.IdOrden = @idOrden
+    ORDER BY ej.IdEjecucion ASC
+  `);
+  const r = dt.recordset[0];
+  if (!r || r.EstadoOrden !== 'Activa' || r.EstadoEjecucion == null) return null;
+  const yo = Number(miOperario) || null;
+  const flag = r.EstadoEjecucion === 'PendienteOperador';
+  const distinto = !!yo && Number(r.Operario) !== yo;
+  if (!flag && !distinto) return null;
+  return {
+    idOrden: Number(idOrden),
+    operario: r.Operario,
+    nombre: r.Nombre || 'un operario sin nombre configurado',
+    esElMismo: !!yo && Number(r.Operario) === yo
+  };
+}
+
+function mensajeRetomaPendiente(retoma) {
+  return retoma.esElMismo
+    ? 'Usted cerró sesión con esta orden en curso. Toque "Reanudar ejecución" en la pantalla de la orden antes de seguir.'
+    : `Esta orden está a nombre de ${retoma.nombre}. Toque "Retomar ejecución" en la pantalla de la orden antes de seguir.`;
+}
+
+// Aviso de la pantalla de la orden/grupo: una franja con el boton Retomar (o Reanudar) por cada
+// orden que haga falta tomar, y una ventana al cargar para que no pase de largo. El boton reusa
+// confirmarTomarControlEjecucion (scriptConfirmarFinalizar), igual que el de la cola.
+function bloqueRetomar(retomas) {
+  if (!retomas || retomas.length === 0) return { html: '', script: '' };
+  const r0 = retomas[0];
+  const texto = r0.esElMismo
+    ? 'Usted cerró sesión con esta orden en curso. Toque <b>Reanudar ejecución</b> para seguir trabajándola.'
+    : `Esta orden está a nombre de <b>${escapeHtmlTurno(r0.nombre)}</b>. Para trabajarla con su usuario toque <b>Retomar ejecución</b>. ` +
+      `Mientras no lo haga no puede añadir rollo, pausar, cerrar bultos ni finalizar, y los bultos siguen saliendo a nombre de ${escapeHtmlTurno(r0.nombre)}.`;
+  const botones = retomas.map(r => `
+      <form method="post" action="/api/selladora/orden/${r.idOrden}/tomar-control-ejecucion" onsubmit="return confirmarTomarControlEjecucion(event, this, ${r.esElMismo}, ${jsString(r.nombre).replace(/"/g, '&quot;')});">
+        <button type="submit" class="btn-accion" style="background:#b46200;">${r.esElMismo ? '▶ Reanudar ejecución' : '🔓 Retomar ejecución'}</button>
+      </form>`).join('');
+  const html = `
+    <div id="aviso-retomar" style="background:#fff4e5;border:2px solid #b46200;border-radius:12px;padding:14px 16px;margin-bottom:16px;">
+      <div style="font-size:15px;color:#7a4300;line-height:1.45;margin-bottom:10px;">⚠ ${texto}</div>
+      <div class="orden-acciones">${botones}</div>
+    </div>`;
+  const script = `
+    (function() {
+      var titulo = ${jsString(r0.esElMismo ? 'Reanude la ejecución' : 'Retome la ejecución')};
+      var html = ${jsString(texto)};
+      var boton = ${jsString(r0.esElMismo ? '▶ Reanudar ejecución' : '🔓 Retomar ejecución')};
+      var accion = ${jsString(`/api/selladora/orden/${r0.idOrden}/tomar-control-ejecucion`)};
+      function avisar() {
+        if (window.Swal && Swal.isVisible()) { setTimeout(avisar, 1500); return; }
+        Swal.fire({
+          icon: 'warning', title: titulo, html: html,
+          showCancelButton: true, confirmButtonText: boton, cancelButtonText: 'Solo mirar',
+          confirmButtonColor: '#b46200', cancelButtonColor: '#7f8c8d', allowOutsideClick: false
+        }).then(function(r) {
+          if (!r.isConfirmed) return;
+          var f = document.createElement('form');
+          f.method = 'post'; f.action = accion; f.style.display = 'none';
+          document.body.appendChild(f); f.submit();
+        });
+      }
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', avisar); else avisar();
+    })();`;
+  return { html, script };
+}
+
 // FIX 01/09/2026: ya NO exige Estado='PendienteOperador' -- ese flag solo se pone si el operario
 // anterior cerro sesion con el boton Salir; si el servidor se reinicia a mitad de turno, las
 // sesiones se pierden pero esa fila nunca se marca. El chequeo real es simplemente "el Operario de
@@ -9254,6 +9364,11 @@ app.post('/api/selladora/orden/:idOrden/rollo', requireLogin, async (req, res) =
     const p = await getPool();
     const check = esNuevoRollo ? await validarPuedeAnadirRollo(p, idOrden) : await validarPuedeIniciar(p, idOrden);
     if (!check.ok) return res.json({ ok: false, error: check.error });
+    // 09/10/2026: +Rollo solo con el control de la ejecucion (ver retomaPendiente).
+    if (esNuevoRollo) {
+      const retoma = await retomaPendiente(p, idOrden, usuario.codigoOperarioPRD);
+      if (retoma) return res.json({ ok: false, error: mensajeRetomaPendiente(retoma) });
+    }
 
     const maquinaCodigo = await obtenerCodigoMaquinaDeOrden(p, idOrden);
     await activarTurnoDeSesion(p, req, maquinaCodigo);   // 28/09/2026: turno escogido en el login
@@ -9332,6 +9447,8 @@ app.post('/api/selladora/orden/:idOrden/alternar-referencia', requireLogin, asyn
 
   try {
     const p = await getPool();
+    const retoma = await retomaPendiente(p, idOrden, usuario.codigoOperarioPRD);   // 09/10/2026
+    if (retoma) return res.json({ ok: false, error: mensajeRetomaPendiente(retoma) });
     const maquinaCodigo = await obtenerCodigoMaquinaDeOrden(p, idOrden);
 
     const dtBolsas = await p.request().input('maquina', maquinaCodigo).query(`
@@ -9785,6 +9902,10 @@ app.post('/api/selladora/orden/:idOrden/pausar', requireLogin, async (req, res) 
   }
   try {
     const p = await getPool();
+    // 09/10/2026: una orden Activa solo la pausa quien tiene el control de su ejecucion. Una
+    // Pendiente (limpieza del protocolo de arranque) no tiene a quien retomarle: retomaPendiente da null.
+    const retoma = await retomaPendiente(p, idOrden, operario);
+    if (retoma) return res.json({ ok: false, error: mensajeRetomaPendiente(retoma) });
     // 26/09/2026: la limpieza del protocolo de arranque entra por aca -- una orden Pendiente no la
     // puede abrir con otra orden Activa en la misma maquina (ver bloqueoArranquePorOrdenActiva).
     const bloqueo = await bloqueoArranquePorOrdenActiva(p, idOrden);
@@ -10830,6 +10951,12 @@ app.post('/api/comando', requireLogin, async (req, res) => {
     return res.status(400).json({ ok: false, error: 'Comando inválido.' });
   }
   try {
+    // 09/10/2026: imprimir, cerrar bulto y residuos solo con el control de la ejecucion (ver
+    // retomaPendiente). Calidad no: la tableta solo la pide a quien ya tiene el control.
+    if (comando !== 'calidad' && Number(idOrden) > 0) {
+      const retoma = await retomaPendiente(await getPool(), idOrden, req.session.usuario.codigoOperarioPRD);
+      if (retoma) return res.json({ ok: false, error: mensajeRetomaPendiente(retoma) });
+    }
     await enviarComandoANodeRed({
       comando,
       idOrden: Number(idOrden),
@@ -10871,6 +10998,10 @@ app.post('/api/selladora/orden/:idOrden/finalizar', requireLogin, async (req, re
   try {
     const p = await getPool();
     maquinaCodigo = await obtenerCodigoMaquinaDeOrden(p, idOrden);
+
+    // 09/10/2026: solo finaliza quien tiene el control de la ejecucion (ver retomaPendiente).
+    const retoma = await retomaPendiente(p, idOrden, usuario.codigoOperarioPRD);
+    if (retoma) throw new Error(mensajeRetomaPendiente(retoma));
 
     // Sin la firma de un lider no se finaliza (22/09/2026). La comprobacion va EN EL SERVIDOR y no
     // solo en el modal: Finalizar es un form POST normal, asi que un navegador que no corra el
