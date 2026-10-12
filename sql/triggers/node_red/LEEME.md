@@ -58,3 +58,13 @@ El PLC **no abre bultos** y no tiene SQL para eso:
 Los archivos originales siguen en `../../` (`agregar_unidadespaquete_referencia_pesaje_21092026.sql`,
 `insertar_residuo_hijo_nodered.sql`, `marcar_residuo_hijo_pendiente_nodered.sql`) como historial;
 de aquí en adelante se edita **solo** esta carpeta.
+
+## Requisitos en cada base (tarjeta #9, 06/10/2026)
+
+Sin esto fallan Iniciar y Finalizar de grupos con otros pedidos, y el cierre de bultos
+puede calcular mal el siguiente:
+
+- `orden_trabajo/1_estructura/agregar_grupo_sellado_otro_pedido_01102026.sql` (tabla
+  `PRDGrupoEtapasPedidosExtra`, estructura #7).
+- `trg_SEL_Bultos_CierreBulto.sql` actualizado (versión con `ROW_NUMBER()`, fix 06/10/2026
+  contra duplicados de serial al cerrar varios bultos de la misma referencia a la vez).

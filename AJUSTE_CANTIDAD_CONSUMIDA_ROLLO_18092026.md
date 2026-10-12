@@ -5,6 +5,7 @@ Para: el programador que haga el cambio (el diseño de abajo se conserva tal cua
 
 ## 0. Estado de la implementación (18/09/2026)
 
+
 Implementado **solo del lado Node** (este repo no tiene el código VB de Mirane). Qué quedó dónde:
 
 | Pieza | Dónde |

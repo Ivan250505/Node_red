@@ -546,7 +546,10 @@ async function materializarInicioOrden(pool, { idOrden, idEjecucion, codOperario
         AND (EXISTS (SELECT 1 FROM PRDGrupoEtapasCompartidasLineas gl
                     WHERE gl.IdGrupo = g.IdGrupo AND gl.Linea = ord1.Linea AND g.Numero = ord1.NumeroPedido)
           OR EXISTS (SELECT 1 FROM PRDGrupoEtapasPedidosExtra pe
-                    WHERE pe.IdGrupo = g.IdGrupo AND pe.Numero = ord1.NumeroPedido AND pe.Linea = ord1.Linea))
+                    -- FIX 08/10/2026 (rev Iván): sin filtro SubEmpresa/Tipo/Fecha -- Fecha es la
+                    -- del pedido EXTRA, no la del grupo; basta pe.IdGrupo = g.IdGrupo.
+                    WHERE pe.IdGrupo = g.IdGrupo
+                      AND pe.Numero = ord1.NumeroPedido AND pe.Linea = ord1.Linea))
       INNER JOIN (
         SELECT gl2.Linea AS Linea, g2.Numero AS Numero, gl2.IdGrupo AS IdGrupo
         FROM PRDGrupoEtapasCompartidasLineas gl2
@@ -554,6 +557,7 @@ async function materializarInicioOrden(pool, { idOrden, idEjecucion, codOperario
         UNION
         SELECT pe2.Linea AS Linea, pe2.Numero AS Numero, pe2.IdGrupo AS IdGrupo
         FROM PRDGrupoEtapasPedidosExtra pe2
+        INNER JOIN PRDGrupoEtapasCompartidas g3 ON g3.IdGrupo = pe2.IdGrupo
       ) gm ON gm.IdGrupo = g.IdGrupo
       INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gm.Linea AND ord2.NumeroPedido = gm.Numero
         AND ord2.Maquina = ord1.Maquina
