@@ -47,6 +47,12 @@
 --      todavia no existe, queda NULL y se completa al cerrar el bulto. Tambien se guarda en
 --      SEL_Bultos.IdBitacora (antes solo el primer bulto la tenia ahi).
 --
+-- ACTUALIZADO 08/10/2026 (a pedido del usuario) -- PENDIENTE de aplicar con CREATE OR ALTER:
+-- caso particular CARLIXPLAST. Si el ClienteProduccion del bulto es 0 (tercero CARLIXPLAST, pedidos
+-- internos que se remisionan al almacen CARLIXPLAST), CodigoCliente se guarda en 28 (PRDClientes) en vez
+-- de copiarlo del bulto anterior. Al cerrar solo llena si CodigoCliente esta en NULL. Los demas clientes
+-- siguen igual.
+--
 -- ACTUALIZADO 07/10/2026 (a pedido del usuario) -- PENDIENTE de aplicar con CREATE OR ALTER:
 -- cliente del bulto. PRDProduccion.ClienteProduccion y CodigoCliente se copian del bulto ANTERIOR de la
 -- misma orden (el ultimo que los tenga en no NULL); si no hay anterior, ClienteProduccion se resuelve de
@@ -215,7 +221,9 @@ BEGIN
     BEGIN TRY
         UPDATE p
         SET p.ClienteProduccion = ISNULL(p.ClienteProduccion, ISNULL(antCli.ClienteProduccion, op.Cliente)),
-            p.CodigoCliente     = ISNULL(p.CodigoCliente, antCod.CodigoCliente)
+            p.CodigoCliente     = ISNULL(p.CodigoCliente,
+                                    CASE WHEN ISNULL(p.ClienteProduccion, ISNULL(antCli.ClienteProduccion, op.Cliente)) = 0
+                                         THEN 28 ELSE antCod.CodigoCliente END)
         FROM PRDProduccion p
         JOIN SEL_Bultos b ON b.serialPadre = p.Detalle
         JOIN inserted i ON i.id = b.id
@@ -393,6 +401,9 @@ BEGIN
             WHERE e6.IdOrden = (SELECT TOP 1 IdOrden FROM SEL_EjecucionOrden WHERE IdEjecucion = @id_ejecucion)
               AND b6.serialPadre <> @SerialNuevo AND p6.CodigoCliente IS NOT NULL
             ORDER BY b6.id DESC;
+
+            -- 08/10/2026: tercero 0 (CARLIXPLAST) -> CodigoCliente 28 en PRDClientes
+            IF @CodCliente = 0 SET @CodigoCliente = 28;
 
             SET @OrdenProduccion = NULL;
             SELECT TOP 1 @OrdenProduccion = p3.OrdenProduccion
