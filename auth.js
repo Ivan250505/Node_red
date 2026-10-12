@@ -77,7 +77,12 @@ function requireAdmin(req, res, next) {
 // en la tableta ni en el servidor), no sale el aviso de fin de turno y no se pinta la isla con el
 // boton "Autorizacion". La tabla SEL_AutorizacionPedido y los endpoints /autorizacion siguen ahi;
 // para volver a exigir la firma basta con ponerlo en true.
-const AUTORIZACION_LIDER_ACTIVA = false;
+const AUTORIZACION_LIDER_ACTIVA = true;
+
+// CAMBIO 08/10/2026 (a pedido del usuario): vuelve el boton, la firma sigue siendo por turno, pero
+// "no es un limitante": Finalizar y Cerrar sesion sin firma solo muestran un RECORDATORIO y dejan
+// seguir. En false el servidor no bloquea y la tableta no exige; en true vuelve el bloqueo de antes.
+const AUTORIZACION_LIDER_OBLIGATORIA = false;
 
 const CARGOS_AUTORIZAN_PEDIDO = [
   { idCargo: 16, nombre: 'Director de Calidad e Inocuidad' },
@@ -117,4 +122,5 @@ async function validarAutorizadorPedido(pool, codigo, passwordEscrito) {
 }
 
 module.exports = { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO,
-                   validarAutorizadorPedido, CARGOS_AUTORIZAN_PEDIDO, AUTORIZACION_LIDER_ACTIVA };
+                   validarAutorizadorPedido, CARGOS_AUTORIZAN_PEDIDO, AUTORIZACION_LIDER_ACTIVA,
+                   AUTORIZACION_LIDER_OBLIGATORIA };

@@ -7,7 +7,8 @@ const session = require('express-session');
 const sql = require('mssql');
 const { desencriptar } = require('./crypto-mirane');
 const { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO,
-        validarAutorizadorPedido, CARGOS_AUTORIZAN_PEDIDO, AUTORIZACION_LIDER_ACTIVA } = require('./auth');
+        validarAutorizadorPedido, CARGOS_AUTORIZAN_PEDIDO, AUTORIZACION_LIDER_ACTIVA,
+        AUTORIZACION_LIDER_OBLIGATORIA } = require('./auth');
 const { registrarEvento } = require('./accesos');
 const { consultarSerial, confirmarRollo, alternarReferenciaGrupo, materializarInicioOrden } = require('./scan-rollo');
 const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
@@ -2853,6 +2854,9 @@ function abrirCalidad() {
     // recibiendo paquetes -- si ya tiene paquetes y todavia no tiene un chequeo, hay que pedirlo.
     // Al vivir del lado del servidor, recargar la pagina o cambiar de pestaña no pierde ni repite
     // nada: el chequeo del bulto 3 se pide una sola vez, la haga quien la haga.
+    // CAMBIO 08/10/2026: si el bulto tarda mas de 30 minutos en llenarse, vuelve a salir cada 30
+    // minutos desde el ultimo chequeo de ESE bulto -- tambien lo decide el servidor
+    // (CALIDAD_INTERVALO_MIN en /calidad-pendiente).
     //
     // Sigue sin ser mutuamente excluyente con Pausa: si al tocar el turno hay otra ventana
     // bloqueante abierta (pausa, escaneo de rollo, protocolo de arranque), NO se fuerza encima --
@@ -2970,8 +2974,10 @@ function scriptAutorizacion() {
                       opciones.aviso + '</div>'
                   : '') +
                 '<div style="background:#fff4e5;border-left:5px solid #f39c12;padding:10px 12px;border-radius:8px;margin-bottom:14px;">' +
-                  'Bitácora del <b>' + (b.nombre || '') + '</b>. Esta firma se pide <b>una vez por turno</b> y ' +
-                  'sin ella no se puede finalizar el pedido ni cerrar sesión.' +
+                  'Bitácora del <b>' + (b.nombre || '') + '</b>. Esta firma se pide <b>una vez por turno</b>' +
+                  (${AUTORIZACION_LIDER_OBLIGATORIA}
+                    ? ' y sin ella no se puede finalizar el pedido ni cerrar sesión.'
+                    : '. Pídala al líder antes de finalizar el pedido o de cerrar sesión.') +
                 '</div>' +
                 '<label style="display:block;font-weight:600;margin-bottom:4px;">Usuario</label>' +
                 '<input id="aut-usuario" class="swal2-input" style="margin:0 0 10px;width:100%;" ' +
@@ -3021,21 +3027,55 @@ function scriptAutorizacion() {
       });
     }
 
-    // Puerta unica: devuelve una promesa que resuelve true SOLO si la bitacora que se exige quedo
-    // autorizada. La usan el Finalizar y el cierre de sesion. Una maquina sin bitacora no la exige.
+    // Puerta unica: la usan el Finalizar y el cierre de sesion. Una maquina sin bitacora no la exige.
+    // Con AUTORIZACION_LIDER_OBLIGATORIA resuelve true SOLO si la bitacora quedo autorizada. Sin ella
+    // (08/10/2026, a pedido del usuario: "no es un limitante, solo sale un recordatorio") resuelve
+    // true tambien sin firma -- false unicamente si el operario elige "Volver" -- y un fallo al
+    // consultar deja seguir en silencio, igual que el servidor.
     function exigirAutorizacion(idOrden) {
       // Autorizacion apagada (AUTORIZACION_LIDER_ACTIVA en auth.js): se deja pasar sin consultar.
       if (!${AUTORIZACION_LIDER_ACTIVA}) return Promise.resolve(true);
+      var obligatoria = ${AUTORIZACION_LIDER_OBLIGATORIA};
       return estadoAutorizacion(idOrden).then(function(datos) {
         if (!datos.ok) {
+          if (!obligatoria) return true;
           return Swal.fire({ icon: 'error', title: 'No se pudo comprobar', text: datos.error, confirmButtonColor: '#71bf44' })
             .then(function() { return false; });
         }
         if (datos.sinBitacora || datos.autorizado) return true;
-        return pedirFirmaAutorizacion(idOrden, datos);
+        if (obligatoria) return pedirFirmaAutorizacion(idOrden, datos);
+        return recordatorioAutorizacion(idOrden, datos);
       }).catch(function() {
+        if (!obligatoria) return true;
         return Swal.fire({ icon: 'error', title: 'Error de conexión', text: 'No se pudo comprobar la autorización.', confirmButtonColor: '#71bf44' })
           .then(function() { return false; });
+      });
+    }
+
+    // Recordatorio (no bloquea): la bitacora del turno no tiene firma. "Pedir firma" abre la ventana
+    // de firma y, firme o no, sigue; "Continuar sin firma" sigue directo; "Volver" se queda.
+    function recordatorioAutorizacion(idOrden, datos) {
+      var b = datos.bitacora || {};
+      var cargos = (datos.cargosPermitidos || []).join(', ');
+      return Swal.fire({
+        icon: 'info',
+        title: 'Recordatorio: firma del turno',
+        html: '<div style="text-align:left;font-size:14px;">' +
+                'La bitácora del <b>' + (b.nombre || '') + '</b> todavía no tiene la autorización de un líder.' +
+                '<div style="font-size:12px;color:#64748b;margin-top:10px;">Pueden autorizar: ' + cargos + '.</div>' +
+              '</div>',
+        showDenyButton: true,
+        showCancelButton: true,
+        confirmButtonText: '🔑 Pedir firma',
+        confirmButtonColor: '#0078d7',
+        denyButtonText: 'Continuar sin firma',
+        denyButtonColor: '#71bf44',
+        cancelButtonText: 'Volver',
+        cancelButtonColor: '#c0392b',
+        allowOutsideClick: false
+      }).then(function(r) {
+        if (r.isConfirmed) return pedirFirmaAutorizacion(idOrden, datos).then(function() { return true; });
+        return !!r.isDenied;
       });
     }
 
@@ -3100,7 +3140,8 @@ function scriptAutorizacion() {
         var b = datos.bitacora || {};
         var min = datos.minutosParaFin;
         var aviso = (b.cerrada || (min != null && min <= 0))
-          ? '⏰ <b>El turno ya terminó</b> y la bitácora no tiene firma. No se podrá finalizar ni cerrar sesión sin ella.'
+          ? '⏰ <b>El turno ya terminó</b> y la bitácora no tiene firma.' +
+            (${AUTORIZACION_LIDER_OBLIGATORIA} ? ' No se podrá finalizar ni cerrar sesión sin ella.' : ' Pídala al líder antes de salir.')
           : '⏰ El turno termina a las <b>' + (b.horaFin || '—') + '</b> (en ' + min + ' min). Pida la firma del líder antes de salir.';
         firmaTurnoEnPantalla = true;
         pedirFirmaAutorizacion(idOrden, datos, { aviso: aviso, textoCancelar: 'Más tarde' })
@@ -5214,7 +5255,6 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
       </div>` : ''}
       ${AUTORIZACION_LIDER_ACTIVA ? `<div class="isla">
         <div class="label">Autorización del turno</div>
-        <div class="isla-detalle">Necesaria para finalizar y para cerrar sesión</div>
         <div class="orden-acciones">${botonAutorizacion}</div>
       </div>` : ''}
     </div>
@@ -6334,7 +6374,9 @@ app.get('/logout', async (req, res) => {
   // NUNCA deja a nadie encerrado por un fallo tecnico: si la consulta revienta (base caida, script
   // SQL sin correr) se deja salir, que es como se comportaba antes de que esto existiera. Lo que
   // se bloquea es la salida SIN firma, no la salida cuando no se pudo comprobar.
-  if (AUTORIZACION_LIDER_ACTIVA && usuario && usuario.codigoOperarioPRD) {
+  // Desde el 08/10/2026 solo bloquea con AUTORIZACION_LIDER_OBLIGATORIA (ver auth.js); sin ella la
+  // tableta muestra un recordatorio y deja salir.
+  if (AUTORIZACION_LIDER_ACTIVA && AUTORIZACION_LIDER_OBLIGATORIA && usuario && usuario.codigoOperarioPRD) {
     try {
       const p = await getPool();
       const dtActiva = await p.request().input('operario', usuario.codigoOperarioPRD).query(`
@@ -7699,7 +7741,6 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
       ${AUTORIZACION_LIDER_ACTIVA ? `<div class="isla isla-con-boton">
         <div class="isla-texto">
           <div class="label">Autorización del turno</div>
-          <div class="isla-detalle">Necesaria para finalizar y para cerrar sesión</div>
         </div>
         ${botonAutorizacion}
       </div>` : ''}` : ''}
@@ -8113,8 +8154,9 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
     let pausaActiva = null;
     // Chequeo de Calidad (03/09/2026, reescrito el 11/09/2026 a pedido del usuario): ya no se
     // programa una hora futura (la vieja columna SEL_EjecucionOrden.ProximaCalidad, que era un
-    // chequeo aleatorio cada 20-30 min). Ahora sale en el PRIMER PAQUETE de cada bulto y quien lo
-    // decide es el servidor, en /calidad-pendiente -- aca solo se resuelve si esta pagina tiene que
+    // chequeo aleatorio cada 20-30 min). Ahora sale en el PRIMER PAQUETE de cada bulto y, desde el
+    // 08/10/2026, tambien cada 30 min mientras el mismo bulto siga llenandose; quien lo decide es el servidor, en
+    // /calidad-pendiente -- aca solo se resuelve si esta pagina tiene que
     // vigilarlo.
     // Se mantiene el FIX 03/09/2026: exige que la EJECUCION (no solo la orden) este realmente en
     // curso -- Activa o En pausa, nunca 'PendienteOperador' (nadie ha retomado el control todavia,
@@ -9072,6 +9114,17 @@ app.get('/selladora/:codigo/orden/:idOrden/resumen-bulto-activo', requireLogin, 
 // Criterio del bulto identico al de registrarChequeoCalidad (estado='Activo', el mas reciente):
 // tiene que ser el MISMO bulto que termine en la columna id_bulto del chequeo, si no se volveria
 // a pedir para siempre.
+//
+// CAMBIO 08/10/2026 (a pedido del usuario: "ademas de salir en el primer bulto debe salir cada 30
+// minutos"; precisado el mismo dia: "debe ser por bulto, si un bulto dura mas de media hora
+// haciendose debe salir el chequeo, desde el primer chequeo del primer paquete"): se suma una
+// segunda condicion -- si desde el ULTIMO chequeo de ESTE bulto ya pasaron CALIDAD_INTERVALO_MIN
+// minutos, se vuelve a pedir. El reloj arranca en el chequeo del primer paquete del bulto y se
+// reinicia con cada chequeo respondido de ese mismo bulto; un bulto que se llena en menos de media
+// hora solo tiene el chequeo del primer paquete. Se mide con GETDATE()
+// del servidor SQL (el mismo reloj del DEFAULT de FechaHora), no con la hora de la tableta. Las dos
+// condiciones exigen que el bulto ya tenga paquetes: sin producto no hay nada que revisar.
+const CALIDAD_INTERVALO_MIN = 30;
 app.get('/selladora/:codigo/orden/:idOrden/calidad-pendiente', requireLogin, async (req, res) => {
   const { idOrden } = req.params;
   try {
@@ -9088,10 +9141,13 @@ app.get('/selladora/:codigo/orden/:idOrden/calidad-pendiente', requireLogin, asy
     const idBulto = dtBulto.recordset[0].id;
     const dtEstado = await p.request().input('idBulto', idBulto).query(`
       SELECT (SELECT COUNT(*) FROM SEL_PesajeElemento WHERE id_bulto = @idBulto) AS Paquetes,
-             (SELECT COUNT(*) FROM SEL_ChequeoCalidad WHERE id_bulto = @idBulto) AS Chequeos
+             (SELECT COUNT(*) FROM SEL_ChequeoCalidad WHERE id_bulto = @idBulto) AS Chequeos,
+             (SELECT DATEDIFF(SECOND, MAX(FechaHora), GETDATE()) FROM SEL_ChequeoCalidad
+               WHERE id_bulto = @idBulto) AS SegundosDesdeUltimo
     `);
-    const { Paquetes, Chequeos } = dtEstado.recordset[0];
-    res.json({ ok: true, pendiente: Paquetes > 0 && Chequeos === 0, idBulto, paquetes: Paquetes });
+    const { Paquetes, Chequeos, SegundosDesdeUltimo } = dtEstado.recordset[0];
+    const vencido = SegundosDesdeUltimo != null && SegundosDesdeUltimo >= CALIDAD_INTERVALO_MIN * 60;
+    res.json({ ok: true, pendiente: Paquetes > 0 && (Chequeos === 0 || vencido), idBulto, paquetes: Paquetes });
   } catch (err) {
     // Mismo blindaje que el resto de tablas nuevas: SEL_ChequeoCalidad puede no existir todavia en
     // la base contra la que se este probando (ver agregar_calidad_por_bulto_y_medidas.sql). Sin esa
@@ -11078,7 +11134,9 @@ app.post('/api/selladora/orden/:idOrden/finalizar', requireLogin, async (req, re
     // la pantalla. El de la tableta existe igual, pero para explicar, no para proteger.
     // Desde el 25/09/2026 la firma es de la bitacora de turno mas reciente de la maquina (abierta o
     // ya cerrada por fin de turno); una maquina sin bitacora no la exige.
-    const ordenParaFirma = AUTORIZACION_LIDER_ACTIVA ? await numeroPedidoDeOrden(p, idOrden) : null;
+    // Desde el 08/10/2026 solo bloquea con AUTORIZACION_LIDER_OBLIGATORIA (ver auth.js).
+    const ordenParaFirma = AUTORIZACION_LIDER_ACTIVA && AUTORIZACION_LIDER_OBLIGATORIA
+      ? await numeroPedidoDeOrden(p, idOrden) : null;
     const biParaFirma = ordenParaFirma ? await bitacoraParaFirma(p, ordenParaFirma.Maquina) : null;
     if (biParaFirma) {
       const firma = await obtenerAutorizacionBitacora(p, biParaFirma.IdBitacora);
