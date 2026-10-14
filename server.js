@@ -20,7 +20,7 @@ const {
   infoOTParaCorreccion, turnosParaCorregirOT, corregirTurnoOT,
   abrirOReanudarBitacora, suspenderOTDeOrden, reanudarOTDeOrden, reabrirOTDeOrden, horaServidorBD,
   candidatosTurnoMaquina, activarTurnoMaquina, turnosParaCorregir, corregirTurnoMaquina,
-  obtenerAnclaGrupoSellado, obtenerEstadoAjusteConsumo, ajustarConsumoRollo
+  obtenerAnclaGrupoSellado, obtenerEstadoAjusteConsumo, ajustarConsumoRollo, obtenerLoteRollo
 } = require('./sel-inventario-mp');
 
 const dbConfig = {
@@ -3936,7 +3936,7 @@ function scriptEscanearRollo(maquinaCodigo) {
     //       recargar la pagina. Lo usa el protocolo de relevo (18/09/2026), donde pitar otro rollo
     //       es un paso a mitad del protocolo y recargar perderia el hilo.
     function abrirEscaneoRollo(idOrden, esNuevoRollo, ganchos) {
-      var titulo = esNuevoRollo ? 'Añadir rollo' : 'Iniciar ejecución';
+      var titulo = esNuevoRollo ? 'Añadir rollo' : (ganchos && ganchos.sinConfirmacion ? 'Primer rollo' : 'Iniciar ejecución');
       fetch('/api/selladora/orden/' + idOrden + '/rollo/preparar?nuevo=' + (esNuevoRollo ? '1' : '0'))
         .then(function(r) { return r.json(); })
         .then(function(datos) {
@@ -3996,18 +3996,46 @@ function scriptEscanearRollo(maquinaCodigo) {
       });
     }
 
+    // Protocolo de arranque (14/10/2026): el primer rollo, ya chequeado, se registra directo con las
+    // pistas del protocolo. Sigue quedando pendiente (sale del inventario al terminar el alistamiento).
+    function registrarPrimerRollo(idOrden, rollo, ganchos) {
+      Swal.fire({ title: 'Registrando el rollo…', allowOutsideClick: false, showConfirmButton: false, didOpen: function() { Swal.showLoading(); } });
+      fetch('/api/selladora/orden/' + idOrden + '/rollo', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serial: rollo.serial, esNuevoRollo: false, bolsasXGolpe: ganchos.pistas })
+      }).then(function(r) { return r.json(); }).then(function(datos) {
+        if (!datos.ok) {
+          Swal.fire({ icon: 'error', title: 'No se pudo registrar el rollo', text: datos.error || '',
+                      confirmButtonText: 'Escanear de nuevo', confirmButtonColor: '#71bf44', allowOutsideClick: false })
+            .then(function() { pedirSerialRollo(idOrden, false, 'Iniciar ejecución', 0, ganchos); });
+          return;
+        }
+        ganchos.alIniciar(idOrden);
+      }).catch(function(err) {
+        Swal.fire({ icon: 'error', title: 'Sin conexión', text: err.message, confirmButtonText: 'Escanear de nuevo', confirmButtonColor: '#71bf44' })
+          .then(function() { pedirSerialRollo(idOrden, false, 'Iniciar ejecución', 0, ganchos); });
+      });
+    }
+
     function confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, rollo, ganchos) {
+      if (!esNuevoRollo && ganchos && ganchos.sinConfirmacion) { registrarPrimerRollo(idOrden, rollo, ganchos); return; }
       var detalle =
         filaRollo('Serial', rollo.serial) +
         filaRollo('Peso (Kg)', rollo.cantidad) +
         filaRollo('Lote', rollo.lote || '—') +
         filaRollo('Bodega', rollo.bodegaNombre) +
         filaRollo('Referencia', rollo.referencia);
-      // Al +Rollo las bolsas x golpe ya vienen de la ejecucion en curso (solo se muestran); al
-      // Iniciar las escribe el operario -- el servidor vuelve a decidir cual usar, esto es la UI.
-      var campoBolsas = esNuevoRollo
-        ? filaRollo('Bolsas x golpe', bolsasActual || '—')
-        : '<label for="rollo-bolsas" style="display:block;text-align:left;font-size:13px;font-weight:600;margin:12px 0 6px;">Bolsas x golpe</label>' +
+      // Al +Rollo las pistas ya vienen de la ejecucion en curso (solo se muestran); al Iniciar las
+      // escribe el operario -- el servidor vuelve a decidir cual usar, esto es la UI.
+      // 14/10/2026 (a pedido del usuario): se pregunta el NUMERO DE PISTAS en vez de "Bolsas x
+      // golpe". Es el mismo dato (cada pista da una bolsa por golpe) y se guarda en la misma
+      // columna BolsasxGolpe, asi que la base y los reportes del escritorio no cambian.
+      // Con el protocolo de arranque las pistas ya se respondieron en su propio paso (ganchos.pistas):
+      // aca solo se muestran. El campo queda para el camino viejo sin protocolo.
+      var pistasProtocolo = !esNuevoRollo && ganchos && ganchos.pistas ? ganchos.pistas : null;
+      var campoBolsas = esNuevoRollo || pistasProtocolo
+        ? filaRollo('Pistas', (esNuevoRollo ? bolsasActual : pistasProtocolo) || '—')
+        : '<label for="rollo-bolsas" style="display:block;text-align:left;font-size:13px;font-weight:600;margin:12px 0 6px;">Número de pistas</label>' +
           '<input id="rollo-bolsas" class="swal2-input" style="margin:0;width:100%;" type="number" min="1" inputmode="numeric">';
       Swal.fire({
         title: titulo,
@@ -4023,10 +4051,10 @@ function scriptEscanearRollo(maquinaCodigo) {
           if (campo) campo.focus();
         },
         preConfirm: function() {
-          var bolsas = bolsasActual;
-          if (!esNuevoRollo) {
+          var bolsas = esNuevoRollo ? bolsasActual : pistasProtocolo;
+          if (!esNuevoRollo && !pistasProtocolo) {
             bolsas = parseInt(document.getElementById('rollo-bolsas').value, 10);
-            if (!bolsas || bolsas <= 0) { Swal.showValidationMessage('Ingrese un número de bolsas x golpe válido.'); return false; }
+            if (!bolsas || bolsas <= 0) { Swal.showValidationMessage('Ingrese un número de pistas válido.'); return false; }
           }
           return fetch('/api/selladora/orden/' + idOrden + '/rollo', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -4391,8 +4419,9 @@ function scriptProtocoloArranque(maquinaCodigo) {
         if (resultado.dismiss === Swal.DismissReason.cancel) {
           guardarPasoProtocolo(idOrden, { paso: 'peligro_quimico', respuesta: 'No' }, function() {
             // En el relevo el paso 3 no es el escaneo sino la confirmacion del rollo ya montado.
+            // 14/10/2026: en el arranque, antes del primer rollo se pregunta el numero de pistas.
             if (esRelevo) pasoRolloRelevo(idOrden);
-            else pasoEscanearRolloProtocolo(idOrden);
+            else pasoPistasProtocolo(idOrden);
           });
         }
       });
@@ -4403,10 +4432,53 @@ function scriptProtocoloArranque(maquinaCodigo) {
     // uno entre consultar el serial y confirmarlo (las preguntas 4.1/4.2) y otro para lo que sigue
     // despues de que la ejecucion arranca (el alistamiento del paso 5, en vez de la vieja pregunta
     // "¿va a realizar alguna actividad antes de producir?").
-    function pasoEscanearRolloProtocolo(idOrden) {
+    // ---------------- Paso 3a: numero de pistas (14/10/2026) ----------------
+    // A pedido del usuario: se pregunta en el protocolo, ANTES de escanear el primer rollo (antes iba
+    // en la ventana del rollo como "Bolsas x golpe"; es el mismo dato y la misma columna). Queda en
+    // SEL_ProtocoloArranque (Paso 'pistas') y el servidor lo toma de ahi al confirmar el rollo.
+    // actual: el valor ya respondido, para reconfirmarlo al cambiar el primer rollo.
+    function pasoPistasProtocolo(idOrden, actual) {
+      Swal.fire({
+        icon: 'question',
+        title: '¿Con cuántas pistas va a trabajar?',
+        html: '<div style="font-size:14px;color:#64748b;margin-bottom:12px;">Cada pista da una bolsa por golpe. ' +
+                'Un rollo puede alimentar más de una pista: los rollos se escanean después.</div>' +
+              '<input id="protocolo-pistas" class="swal2-input" style="margin:0;width:100%;" type="number" min="1" inputmode="numeric"' +
+                (actual ? ' value="' + Number(actual) + '"' : '') + '>',
+        showCancelButton: true,
+        confirmButtonText: 'Continuar', confirmButtonColor: '#71bf44',
+        cancelButtonText: 'Salir', cancelButtonColor: '#64748b',
+        allowOutsideClick: false, allowEscapeKey: false,
+        didOpen: function() {
+          var campo = document.getElementById('protocolo-pistas');
+          campo.focus();
+          campo.addEventListener('keydown', function(evento) {
+            if (evento.key === 'Enter') { evento.preventDefault(); Swal.clickConfirm(); }
+          });
+        },
+        preConfirm: function() {
+          var pistas = parseInt(document.getElementById('protocolo-pistas').value, 10);
+          if (!pistas || pistas <= 0) { Swal.showValidationMessage('Ingrese un número de pistas válido.'); return false; }
+          return pistas;
+        }
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        var pistas = resultado.value;
+        guardarPasoProtocolo(idOrden, { paso: 'pistas', respuesta: String(pistas) }, function() {
+          pasoEscanearRolloProtocolo(idOrden, pistas);
+        });
+      });
+    }
+
+    function pasoEscanearRolloProtocolo(idOrden, pistas) {
       abrirEscaneoRollo(idOrden, false, {
+        pistas: pistas,
+        // 14/10/2026: sin la ventana intermedia -- "Iniciar ejecución" sale al final, con todos los
+        // rollos montados (ver ventanaIniciarEjecucion).
+        sinConfirmacion: true,
         antesDeConfirmar: preguntarEstadoRollo,
-        alIniciar: pasoAlistamientoProtocolo
+        // 14/10/2026: con mas de una pista, antes del alistamiento: "¿Se monta otro rollo?"
+        alIniciar: pasoRollosAdicionales
       });
     }
 
@@ -4561,6 +4633,137 @@ function scriptProtocoloArranque(maquinaCodigo) {
       abrirEscaneoRollo(idOrden, true, {
         antesDeConfirmar: preguntarEstadoRolloNuevo,
         alAnadir: function() { pasoAlistamientoProtocolo(idOrden, true); }
+      });
+    }
+
+    // ---------------- Paso 3b: rollos adicionales e "Iniciar ejecución" (14/10/2026) ----------------
+    // Despues del primer rollo: con mas de una pista se pregunta "¿Se monta otro rollo?" (dos pistas
+    // no siempre son dos rollos: a veces un rollo da dos pistas; maximo uno por pista contando el
+    // primero). Si le dio "Sí" por equivocacion, "Cancelar" en la ventana del serial (o en el chequeo
+    // del rollo) vuelve a la pregunta sin agregar nada. Al final sale "Iniciar ejecución" con el
+    // resumen de lo montado, y "Iniciar" arranca el alistamiento. Los rollos salen del inventario al
+    // terminar el alistamiento.
+    function pasoRollosAdicionales(idOrden) {
+      fetch('/api/selladora/orden/' + idOrden + '/rollos-arranque')
+        .then(function(r) { return r.json(); })
+        .then(function(datos) {
+          if (!datos.ok) { pasoAlistamientoProtocolo(idOrden); return; }
+          if (datos.adicionales.length + 1 < datos.pistas) preguntarOtroRollo(idOrden, datos);
+          else ventanaIniciarEjecucion(idOrden, datos);
+        })
+        .catch(function() { pasoAlistamientoProtocolo(idOrden); });
+    }
+
+    function escaparRollo(texto) {
+      return String(texto == null ? '' : texto).replace(/[&<>"]/g, function(c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+      });
+    }
+
+    function preguntarOtroRollo(idOrden, datos) {
+      var montados = datos.adicionales.length + 1;
+      Swal.fire({
+        icon: 'question',
+        title: '¿Se monta otro rollo?',
+        html: '<div style="font-size:14px;color:#64748b;line-height:1.5;">' +
+                'La máquina trabaja con <b>' + datos.pistas + ' pistas</b> y lleva <b>' + montados + ' rollo' + (montados === 1 ? '' : 's') + '</b>. ' +
+                'Un rollo puede alimentar más de una pista: monte otro solo si de verdad va otro rollo en la máquina.' +
+              '</div>',
+        showDenyButton: true,
+        confirmButtonText: 'Sí, montar otro rollo', confirmButtonColor: '#006984',
+        denyButtonText: 'No, continuar', denyButtonColor: '#71bf44',
+        allowOutsideClick: false, allowEscapeKey: false
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) { montarRolloAdicional(idOrden, function() { pasoRollosAdicionales(idOrden); }); return; }
+        ventanaIniciarEjecucion(idOrden, datos);
+      });
+    }
+
+    // El cierre del paso del rollo: lo que quedo montado, sin repetir datos (las pistas, y la
+    // referencia si todos los rollos son de la misma, una sola vez; por rollo, lo que cambia).
+    function ventanaIniciarEjecucion(idOrden, datos) {
+      var rollos = [datos.principal].concat(datos.adicionales);
+      var referencias = rollos.map(function(r) { return r.referencia || ''; });
+      var mismaReferencia = referencias.every(function(x) { return x === referencias[0]; });
+      var total = rollos.reduce(function(suma, r) { return suma + (Number(r.cantidad) || 0); }, 0);
+      var celda = 'padding:6px 8px;border-bottom:1px solid #eef0f2;';
+      var filas = rollos.map(function(r, i) {
+        return '<tr>' +
+                 '<td style="' + celda + 'color:#006984;font-weight:700;">' + (i + 1) + '</td>' +
+                 '<td style="' + celda + 'word-break:break-all;">' + escaparRollo(r.serial) +
+                   (mismaReferencia ? '' : '<div style="font-size:12px;color:#64748b;">' + escaparRollo(r.referencia) + '</div>') + '</td>' +
+                 '<td style="' + celda + 'text-align:right;white-space:nowrap;">' + (r.cantidad != null ? escaparRollo(r.cantidad) : '—') + '</td>' +
+                 '<td style="' + celda + '">' + escaparRollo(r.lote || '—') + '</td>' +
+               '</tr>';
+      }).join('');
+      var encabezado = 'padding:6px 8px;border-bottom:2px solid #dde3e8;font-size:12px;color:#64748b;text-align:left;';
+      Swal.fire({
+        title: 'Iniciar ejecución',
+        html: '<div style="text-align:left;font-size:14px;">' +
+                filaRollo('Pistas', datos.pistas) +
+                (mismaReferencia && referencias[0] ? filaRollo('Referencia', referencias[0]) : '') +
+                '<table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:8px;font-variant-numeric:tabular-nums;">' +
+                  '<thead><tr><th style="' + encabezado + '">#</th><th style="' + encabezado + '">Rollo</th>' +
+                    '<th style="' + encabezado + 'text-align:right;">Peso (kg)</th><th style="' + encabezado + '">Lote</th></tr></thead>' +
+                  '<tbody>' + filas + '</tbody>' +
+                  (rollos.length > 1
+                    ? '<tfoot><tr><td></td><td style="padding:6px 8px;font-weight:600;">Total</td>' +
+                        '<td style="padding:6px 8px;text-align:right;font-weight:600;">' + total.toFixed(2) + '</td><td></td></tr></tfoot>'
+                    : '') +
+                '</table>' +
+                '<div style="font-size:12px;color:#64748b;margin-top:10px;">Al iniciar arranca el alistamiento.</div>' +
+              '</div>',
+        width: 560,
+        confirmButtonText: '▶ Iniciar', confirmButtonColor: '#71bf44',
+        showCancelButton: true,
+        cancelButtonText: 'Cancelar', cancelButtonColor: '#64748b',
+        allowOutsideClick: false, allowEscapeKey: false
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) { pasoAlistamientoProtocolo(idOrden); return; }
+        // Cancelar: no inicia; vuelve a las pistas (con el valor anterior) y a escanear desde el
+        // primer rollo (la lista de adicionales arranca de nuevo, ver confirmarRollo).
+        if (resultado.dismiss === Swal.DismissReason.cancel) pasoPistasProtocolo(idOrden, datos.pistas);
+      });
+    }
+
+    function montarRolloAdicional(idOrden, volver) {
+      Swal.fire({
+        title: 'Otro rollo',
+        html: '<div style="text-align:left;font-size:13px;color:#64748b;margin-bottom:10px;">' +
+              'Escanee la etiqueta del rollo con la pistola (código de 19 dígitos) o escríbalo.</div>' +
+              '<input id="rollo-adicional-serial" class="swal2-input" style="margin:0;width:100%;" inputmode="numeric" placeholder="Serial del rollo">' +
+              '<div style="text-align:left;font-size:12px;color:#64748b;margin-top:10px;">' +
+                'Si tocó "Sí" por equivocación, toque <b>Cancelar</b>: no se agrega ningún rollo.</div>',
+        showCancelButton: true,
+        cancelButtonText: 'Cancelar', confirmButtonText: 'Buscar', confirmButtonColor: '#71bf44',
+        showLoaderOnConfirm: true,
+        allowOutsideClick: function() { return !Swal.isLoading(); },
+        didOpen: function() {
+          var campo = document.getElementById('rollo-adicional-serial');
+          campo.focus();
+          campo.addEventListener('keydown', function(evento) {
+            if (evento.key === 'Enter') { evento.preventDefault(); Swal.clickConfirm(); }
+          });
+        },
+        preConfirm: function() {
+          var serial = (document.getElementById('rollo-adicional-serial').value || '').trim();
+          if (!serial) { Swal.showValidationMessage('Escanee o escriba el serial del rollo.'); return false; }
+          return protocoloPost('/api/selladora/orden/' + idOrden + '/rollos-arranque/consultar', { serial: serial }).then(function(datos) {
+            if (!datos.ok) { Swal.showValidationMessage(datos.error || 'No se pudo consultar el rollo.'); return false; }
+            return datos;
+          });
+        }
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) { volver(); return; }
+        var rollo = resultado.value;
+        chequeoRollo(idOrden, rollo, function(decision) {
+          if (decision === 'reescanear') { montarRolloAdicional(idOrden, volver); return; }
+          if (decision !== 'confirmar') { volver(); return; }
+          protocoloPost('/api/selladora/orden/' + idOrden + '/rollos-arranque', { serial: rollo.serial }).then(function(datos) {
+            if (datos.ok) { volver(); return; }
+            Swal.fire({ icon: 'error', title: 'No se pudo agregar el rollo', text: datos.error || '', confirmButtonColor: '#71bf44' }).then(volver);
+          });
+        }, false);
       });
     }
 
@@ -4936,6 +5139,8 @@ function scriptProtocoloArranque(maquinaCodigo) {
       if (pendiente.paso === 'amperaje') { pasoAmperajeProtocolo(idOrden); return; }
 
       var textos = {
+        pistas: 'Falta indicar el número de pistas para poder seguir.',
+        rollos_adicionales: 'Falta confirmar los rollos montados y empezar el alistamiento.',
         peligro_quimico: 'Falta responder el chequeo de peligro químico para poder seguir.',
         rollo: relevo
           ? 'Falta confirmar el rollo que está montado para poder seguir.'
@@ -4944,8 +5149,10 @@ function scriptProtocoloArranque(maquinaCodigo) {
       };
       var continuar = function() {
         if (pendiente.paso === 'peligro_quimico') preguntarPeligroQuimico(idOrden, relevo);
+        else if (pendiente.paso === 'rollos_adicionales') pasoRollosAdicionales(idOrden);
+        else if (pendiente.paso === 'pistas') pasoPistasProtocolo(idOrden);
         else if (relevo) pasoRolloRelevo(idOrden);
-        else pasoEscanearRolloProtocolo(idOrden);
+        else pasoEscanearRolloProtocolo(idOrden, pendiente.pistas);
       };
       if (pedido) { continuar(); return; }
       // Historial de notificaciones (18/09/2026). Con clave porque este aviso vuelve a salir en
@@ -5162,7 +5369,10 @@ function filasEspecificaciones(orden) {
     const etiqueta = MEDIDAS_BOLSA.find(x => x.clave === m.clave).etiqueta;
     return [etiqueta.charAt(0).toUpperCase() + etiqueta.slice(1), m.valorEsperado];
   });
+  // 14/10/2026 (a pedido del usuario): el cliente del pedido, de primero. SEL_OrdenProduccion.Cliente
+  // contra VISTerceros (NombreCliente, lo traen las dos consultas que alimentan esta funcion).
   return [
+    ['Cliente', orden.NombreCliente],
     ...filasMedidas,
     ['Tipo de sellado', orden.TipoSellado],
     ['Troquelado', orden.Troquelado],
@@ -7301,6 +7511,8 @@ async function obtenerMiembrosGrupoSellado(p, idGrupo) {
            ord.TipoSellado, ord.Troquelado, ord.UsoPrevisto, ord.Manija, ord.ManijaColor, ord.Tula,
            ord.TulaColor, ord.Parche, ord.CierreDeslizador, ord.Perforaciones,
            ord.CierreHermetico, ord.CintaAdhesiva, maq.Tipo AS MaquinaTipo,
+           -- 14/10/2026: nombre del cliente para Especificaciones (Cliente 0 = Carlixplast).
+           (SELECT TOP 1 t.Nombre FROM VISTerceros t WHERE t.Codigo = ord.Cliente AND t.Sucursal = 0) AS NombreCliente,
            CASE WHEN er12.Valor IS NOT NULL THEN 1 ELSE 0 END AS TieneImpresion,
            ti.Descripcion AS TipoImpresionDescripcion,
            ${COLUMNAS_MEDIDAS_BOLSA},
@@ -8345,6 +8557,8 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
              ord.TipoSellado, ord.Troquelado, ord.UsoPrevisto, ord.Manija, ord.ManijaColor, ord.Tula,
              ord.TulaColor, ord.Parche, ord.CierreDeslizador, ord.Perforaciones,
              ord.CierreHermetico, ord.CintaAdhesiva,
+             -- 14/10/2026: nombre del cliente para Especificaciones (Cliente 0 = Carlixplast).
+             (SELECT TOP 1 t.Nombre FROM VISTerceros t WHERE t.Codigo = ord.Cliente AND t.Sucursal = 0) AS NombreCliente,
              CASE WHEN er12.Valor IS NOT NULL THEN 1 ELSE 0 END AS TieneImpresion,
              ti.Descripcion AS TipoImpresionDescripcion,
              ${COLUMNAS_MEDIDAS_BOLSA}
@@ -9646,7 +9860,9 @@ app.post('/api/selladora/orden/:idOrden/rollo', requireLogin, async (req, res) =
       serial,
       esNuevoRollo: !!esNuevoRollo,
       codOperario: usuario.codigoOperarioPRD,
-      bolsasXGolpe: esNuevoRollo ? check.bolsasActual : Number(bolsasXGolpe),
+      // 14/10/2026: al Iniciar, las pistas que se respondieron en el protocolo mandan; lo que llega
+      // del navegador queda solo para el camino viejo sin protocolo.
+      bolsasXGolpe: esNuevoRollo ? check.bolsasActual : ((await pistasDelArranque(p, idOrden)) || Number(bolsasXGolpe)),
       generadoPor: usuario.generadoPor
     });
 
@@ -10395,7 +10611,9 @@ const PASOS_PROTOCOLO_VALIDOS = new Set([
   // cuando alguien retoma una ejecucion en curso -- obtenerProtocoloPendiente la usa como linea
   // divisoria y solo evalua los pasos posteriores. 'rollo_mismo' es la respuesta propia de esa
   // ronda: el operario confirmo que sigue con el rollo que ya estaba montado, sin pitar otro.
-  'relevo', 'rollo_mismo'
+  'relevo', 'rollo_mismo',
+  // Numero de pistas del arranque (14/10/2026): Respuesta = el numero. Ver pistasDeLosPasos.
+  'pistas'
 ]);
 
 app.post('/api/selladora/orden/:idOrden/protocolo/respuesta', requireLogin, async (req, res) => {
@@ -10436,6 +10654,23 @@ app.post('/api/selladora/orden/:idOrden/protocolo/respuesta', requireLogin, asyn
     res.json({ ok: false, error: falta ? 'Falta crear la tabla SEL_ProtocoloArranque (ejecute agregar_protocolo_arranque.sql).' : err.message });
   }
 });
+
+// Numero de pistas respondido en el protocolo de arranque (el ultimo), o null. 14/10/2026.
+function pistasDeLosPasos(pasos) {
+  const fila = [...pasos].reverse().find(x => x.Paso === 'pistas');
+  const n = fila ? parseInt(fila.Respuesta, 10) : NaN;
+  return n > 0 ? n : null;
+}
+
+async function pistasDelArranque(p, idOrden) {
+  const dt = await p.request().input('idOrden', idOrden).query(`
+    SELECT pa.Paso, pa.Respuesta FROM SEL_ProtocoloArranque pa
+    WHERE pa.id_ejecucion = (SELECT TOP 1 IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden ORDER BY IdEjecucion ASC)
+      AND pa.Paso = 'pistas'
+    ORDER BY pa.Id ASC
+  `);
+  return pistasDeLosPasos(dt.recordset);
+}
 
 // En que paso quedo un protocolo a medias, o null si no hay ninguno pendiente para esta orden.
 // Se deduce de lo que hay en la BASE (no de nada guardado en el navegador), para que el protocolo
@@ -10543,7 +10778,15 @@ async function obtenerProtocoloPendiente(p, idOrden) {
     if (EstadoOrden === 'Pendiente') {
       const quimico = [...pasos].reverse().find(x => x.Paso === 'peligro_quimico');
       if (!quimico || quimico.Respuesta !== 'No') return { idOrden: Number(idOrden), paso: 'peligro_quimico' };
-      return { idOrden: Number(idOrden), paso: 'rollo' };
+      // 14/10/2026: el primer rollo ya quedo escaneado y el alistamiento no ha empezado -- se sigue
+      // por la lista de rollos (o directo al alistamiento con una sola pista), no por volver a
+      // escanear. Desde la lista se puede cambiar el primero ("📷 Cambiar el primer rollo").
+      if (dtPendienteAutocura.recordset.length > 0) return { idOrden: Number(idOrden), paso: 'rollos_adicionales' };
+      // 14/10/2026: antes del primer rollo, el numero de pistas (paso propio). Un protocolo que ya
+      // venia a medias sin ese paso tambien lo pide.
+      const pistas = pistasDeLosPasos(pasos);
+      if (!pistas) return { idOrden: Number(idOrden), paso: 'pistas' };
+      return { idOrden: Number(idOrden), paso: 'rollo', pistas };
     }
 
     // PROTOCOLO YA TERMINADO -> no hay nada pendiente. El ultimo paso es 'amperaje' desde el
@@ -12145,6 +12388,119 @@ async function reabrirOrdenFinalizada(p, req, idOrden, firmas) {
     throw err;
   }
 }
+
+// ---------------- Rollos adicionales del arranque (14/10/2026, a pedido del usuario) ----------------
+// Al Iniciar ya no se pide "Bolsas x golpe" sino el numero de PISTAS (se guarda en la misma columna
+// BolsasxGolpe: cada pista da una bolsa por golpe). Con mas de una pista la tableta pregunta
+// "¿Se monta otro rollo?" -- dos pistas no siempre son dos rollos (a veces un rollo da dos pistas),
+// asi que es el operario el que dice cuantos van, hasta uno por pista contando el principal. Los
+// adicionales quedan PENDIENTES en SEL_ProtocoloArranque (Paso 'rollo_adicional') y salen del
+// inventario recien al terminar el alistamiento (montarRollosAdicionales en scan-rollo.js). Cada
+// uno pasa antes por el chequeo 4.1/4.2 de siempre. Si el operario le da "Sí" por equivocacion,
+// "Cancelar" vuelve a la pregunta sin agregar nada. Cambiar el primer rollo vacia la lista (ver
+// confirmarRollo), asi que nunca quedan mas rollos que pistas.
+
+// La lista del arranque en curso: el rollo principal pendiente y los adicionales. null si la orden
+// ya no esta en el arranque (no esta Pendiente, o todavia no tiene el principal escaneado).
+async function rollosDelArranque(p, idOrden) {
+  const dt = await p.request().input('idOrden', idOrden).query(`
+    SELECT TOP 1 ord.Estado, ej.IdEjecucion, rp.Serial, rp.Cantidad, rp.Lote, rp.BolsasXGolpe, ie.Referencia
+    FROM SEL_OrdenProduccion ord
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
+    LEFT JOIN SEL_RolloPendienteInicio rp ON rp.IdEjecucion = ej.IdEjecucion AND rp.Procesado = 0
+    OUTER APPLY (SELECT TOP 1 Elemento FROM INVExistencias WHERE Detalle = rp.Serial) ex
+    LEFT JOIN INVElementos ie ON ie.Codigo = ex.Elemento
+    WHERE ord.IdOrden = @idOrden
+    ORDER BY ej.IdEjecucion ASC, rp.Id DESC
+  `);
+  const f = dt.recordset[0];
+  if (!f || f.Estado !== 'Pendiente' || !f.Serial) return null;
+  const dtAd = await p.request().input('idEjecucion', f.IdEjecucion).query(`
+    SELECT pa.Serial, ex.Cantidad, ie.Referencia
+    FROM SEL_ProtocoloArranque pa
+    OUTER APPLY (SELECT TOP 1 Cantidad, Elemento FROM INVExistencias WHERE Detalle = pa.Serial) ex
+    LEFT JOIN INVElementos ie ON ie.Codigo = ex.Elemento
+    WHERE pa.id_ejecucion = @idEjecucion AND pa.Paso = 'rollo_adicional' AND pa.Respuesta = 'Pendiente'
+    ORDER BY pa.Id ASC
+  `);
+  return {
+    idEjecucion: f.IdEjecucion,
+    pistas: Number(f.BolsasXGolpe) || 1,
+    principal: { serial: String(f.Serial).trim(), cantidad: f.Cantidad, lote: f.Lote,
+                 referencia: f.Referencia ? String(f.Referencia).trim() : '' },
+    adicionales: await Promise.all(dtAd.recordset.map(async r => ({
+      serial: String(r.Serial).trim(), cantidad: r.Cantidad, referencia: r.Referencia ? String(r.Referencia).trim() : '',
+      lote: await obtenerLoteRollo(p, String(r.Serial).trim()).catch(() => '')
+    })))
+  };
+}
+
+// Valida un rollo adicional sin escribir nada. Devuelve la consulta del serial (para la vista
+// previa) o revienta con un mensaje para el operario.
+async function validarRolloAdicional(p, idOrden, serial, lista) {
+  if (!lista) throw new Error('El arranque de esta orden ya terminó: para montar otro rollo use "+ Rollo".');
+  const tSerial = String(serial || '').trim();
+  if (!tSerial) throw new Error('Escanee o escriba el serial del rollo.');
+  if (tSerial === lista.principal.serial || lista.adicionales.some(r => r.serial === tSerial)) {
+    throw new Error('Ese rollo ya está en la lista.');
+  }
+  if (lista.adicionales.length + 1 >= lista.pistas) {
+    throw new Error(`Con ${lista.pistas} pista(s) van máximo ${lista.pistas} rollo(s), y ya están todos.`);
+  }
+  const consulta = await consultarSerial(p, { idOrden, serial: tSerial, esNuevoRollo: false });
+  if (!consulta.ok) throw new Error(consulta.error);
+  // Misma regla que "+ Rollo": todos los rollos del proceso, de la misma bodega que el principal.
+  const principal = await consultarSerial(p, { idOrden, serial: lista.principal.serial, esNuevoRollo: false });
+  if (principal.ok && consulta.bodega && principal.bodega &&
+      String(consulta.bodega).trim().toUpperCase() !== String(principal.bodega).trim().toUpperCase()) {
+    throw new Error(`Este rollo es de la bodega "${consulta.bodegaNombre}", pero el primer rollo es de "${principal.bodegaNombre}". ` +
+                    'Escanee un rollo de la misma bodega.');
+  }
+  return consulta;
+}
+
+app.get('/api/selladora/orden/:idOrden/rollos-arranque', requireLogin, async (req, res) => {
+  try {
+    const lista = await rollosDelArranque(await getPool(), Number(req.params.idOrden));
+    if (!lista) return res.json({ ok: false, error: 'El arranque de esta orden ya terminó.' });
+    res.json({ ok: true, pistas: lista.pistas, principal: lista.principal, adicionales: lista.adicionales });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// Vista previa de un rollo adicional (no escribe).
+app.post('/api/selladora/orden/:idOrden/rollos-arranque/consultar', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  try {
+    const p = await getPool();
+    const consulta = await validarRolloAdicional(p, idOrden, req.body && req.body.serial, await rollosDelArranque(p, idOrden));
+    res.json(consulta);
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// Agrega el rollo adicional a la lista (ya con su chequeo 4.1/4.2 respondido).
+app.post('/api/selladora/orden/:idOrden/rollos-arranque', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  try {
+    const p = await getPool();
+    const lista = await rollosDelArranque(p, idOrden);
+    const consulta = await validarRolloAdicional(p, idOrden, req.body && req.body.serial, lista);
+    await p.request()
+      .input('idEjecucion', lista.idEjecucion).input('idOrden', idOrden)
+      .input('operario', req.session.usuario.codigoOperarioPRD || null)
+      .input('serial', String(consulta.serial).slice(0, 30))
+      .query(`
+        INSERT INTO SEL_ProtocoloArranque (id_ejecucion, IdOrden, Operario, Paso, Respuesta, Serial)
+        VALUES (@idEjecucion, @idOrden, @operario, 'rollo_adicional', 'Pendiente', @serial)
+      `);
+    res.json({ ok: true });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
 
 const webPort = Number(process.env.WEB_PORT || 3000);
 const server = http.createServer(app);

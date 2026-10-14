@@ -463,6 +463,15 @@ async function confirmarRollo(pool, { idOrden, idEjecucionActivo, serial, esNuev
             VALUES (@idOrden, @idEjecucion, @codOperario, @serial, @cantidad, @lote, @bolsasXGolpe, @generadoPor)
         `);
 
+      // 14/10/2026: si el operario cambia el primer rollo, la lista de rollos adicionales arranca de
+      // nuevo (vuelve a preguntar "¿Se monta otro rollo?" con las pistas nuevas). Asi nunca quedan
+      // mas rollos que pistas, ni el primero repetido entre los adicionales.
+      await tx.request().input('idEjecucion', nuevaIdEjecucion).query(`
+        IF OBJECT_ID('SEL_ProtocoloArranque', 'U') IS NOT NULL
+        UPDATE SEL_ProtocoloArranque SET Respuesta = 'Reemplazado'
+        WHERE id_ejecucion = @idEjecucion AND Paso = 'rollo_adicional' AND Respuesta = 'Pendiente'
+      `);
+
       idEjecucionDelRollo = nuevaIdEjecucion;
     }
 
@@ -608,6 +617,57 @@ async function materializarInicioOrden(pool, { idOrden, idEjecucion, codOperario
     .query(`SELECT TOP 1 Codigo FROM SISUsuarios WHERE Tercero = @tercero`).catch(() => null);
   const nUsuario = dtUsuario && dtUsuario.recordset.length > 0 ? Number(dtUsuario.recordset[0].Codigo) || null : null;
   await reanudarOTDeOrden(pool, { idOrden, usuario: nUsuario });
+
+  // 14/10/2026: los rollos adicionales que el operario monto en el arranque (mas de una pista).
+  await montarRollosAdicionales(pool, { idOrden, idEjecucion, codOperario, bolsasXGolpe, generadoPor });
+}
+
+// Rollos adicionales del arranque (14/10/2026, a pedido del usuario). Con mas de una pista la
+// maquina puede llevar mas de un rollo -- o no: a veces un rollo da dos pistas. En el paso del rollo
+// la tableta pregunta "¿Se monta otro rollo?" y los que se escanean quedan PENDIENTES en
+// SEL_ProtocoloArranque (Paso 'rollo_adicional', Respuesta 'Pendiente', con el serial): hasta que
+// termina el alistamiento no salen del inventario ('Reemplazado' si despues se cambio el primer
+// rollo, ver confirmarRollo). Aca, ya con la orden Activa y su bulto creado, cada uno entra por el
+// MISMO camino de "+ Rollo" (confirmarRollo con esNuevoRollo: salida de inventario, materia prima y
+// linea de tiempo del rollo) y queda 'Montado'. Maximo uno por pista contando el principal
+// (bolsasXGolpe guarda el numero de pistas). Uno que falle queda 'Error' con el motivo en
+// Observaciones y no frena a los demas ni el arranque: se puede volver a pitar con "+ Rollo".
+async function montarRollosAdicionales(pool, { idOrden, idEjecucion, codOperario, bolsasXGolpe, generadoPor }) {
+  let pendientes;
+  try {
+    const dt = await pool.request().input('idEjecucion', idEjecucion).query(`
+      SELECT Id, Serial FROM SEL_ProtocoloArranque
+      WHERE id_ejecucion = @idEjecucion AND Paso = 'rollo_adicional' AND Respuesta = 'Pendiente'
+      ORDER BY Id ASC
+    `);
+    pendientes = dt.recordset;
+  } catch (err) {
+    console.error('No se pudieron leer los rollos adicionales del arranque:', err.message);
+    return;
+  }
+  const maximo = Math.max(0, (Number(bolsasXGolpe) || 1) - 1);
+  for (let i = 0; i < pendientes.length; i++) {
+    const r = pendientes[i];
+    let respuesta = 'Montado', observacion = null;
+    if (i >= maximo) {
+      respuesta = 'Error';
+      observacion = `Hay más rollos que pistas (${Number(bolsasXGolpe) || 1}): no se montó.`;
+    } else {
+      try {
+        await confirmarRollo(pool, {
+          idOrden, idEjecucionActivo: idEjecucion, serial: r.Serial, esNuevoRollo: true,
+          codOperario, bolsasXGolpe, generadoPor
+        });
+      } catch (err) {
+        respuesta = 'Error';
+        observacion = String(err.message || err).slice(0, 255);
+        console.error(`No se pudo montar el rollo adicional ${r.Serial} de la orden ${idOrden}:`, observacion);
+      }
+    }
+    await pool.request().input('id', r.Id).input('respuesta', respuesta).input('obs', observacion)
+      .query(`UPDATE SEL_ProtocoloArranque SET Respuesta = @respuesta, Observaciones = @obs WHERE Id = @id`)
+      .catch(err => console.error('No se pudo marcar el rollo adicional:', err.message));
+  }
 }
 
 // Sellado en paralelo (08/09/2026 -- ver DISENO_SELLADO_PARALELO_08092026.md): alterna cuál

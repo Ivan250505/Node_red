@@ -220,6 +220,45 @@ La ventana de presentación trae "Cancelar", igual que en el arranque: la orden 
 no tiene sentido secuestrar la pantalla. Mientras la ronda no se termine, vuelve a salir en cada
 carga de la página.
 
+### 10.2 Pistas y rollos adicionales en el arranque (14/10/2026)
+
+**Número de pistas en vez de Bolsas x golpe.** Es un paso propio del protocolo: sale después del
+peligro químico y **antes de escanear el primer rollo** (*¿Con cuántas pistas va a trabajar?*). Queda en
+`SEL_ProtocoloArranque` (`Paso='pistas'`, `Respuesta` = el número) y al confirmar el rollo el servidor
+toma las pistas de ahí (`pistasDelArranque`); la ventana del rollo ya no las pide. Es el mismo dato
+que Bolsas x golpe (cada pista da una bolsa por golpe) y se guarda en la misma columna `BolsasxGolpe`,
+así que la base y los reportes del escritorio no cambian. "+ Rollo" lo muestra como "Pistas". Si la
+tableta se recarga sin haberlo respondido, el protocolo lo vuelve a pedir.
+
+**Orden del paso del rollo:** pistas → escaneo del primer rollo y su chequeo 4.1/4.2 (se registra
+directo, sin ventana intermedia) → *¿Se monta otro rollo?* (solo con más de una pista) → **Iniciar
+ejecución**.
+
+**¿Se monta otro rollo?** Dos pistas no siempre son dos rollos (a veces un rollo da dos pistas), así
+que el operario decide:
+
+- **Sí, montar otro rollo:** escanea el rollo, pasa por el chequeo 4.1/4.2 y se vuelve a preguntar.
+  Máximo **un rollo por pista**, contando el primero. Debe ser de la misma bodega que el primero y no
+  puede repetirse.
+- **Si tocó "Sí" por equivocación:** "Cancelar" en la ventana del serial (o en el chequeo) vuelve a la
+  pregunta sin agregar nada.
+- **No, continuar:** pasa a "Iniciar ejecución".
+
+**Iniciar ejecución** sale al final, también con una sola pista. Resume lo montado sin repetir datos:
+las pistas y la referencia (si todos los rollos son de la misma) una sola vez, y por rollo el serial,
+el peso y el lote, con el total. **▶ Iniciar** arranca el alistamiento. **Cancelar** no inicia: vuelve a
+preguntar las pistas (con el valor anterior ya escrito) y a escanear desde el primero; los adicionales
+que hubiera quedan `Reemplazado`.
+
+**Cuándo salen del inventario.** Los adicionales quedan pendientes en `SEL_ProtocoloArranque`
+(`Paso='rollo_adicional'`, `Respuesta='Pendiente'`, con el serial) y se descuentan al terminar el
+alistamiento, justo después del primero, por el mismo camino de "+ Rollo" (`montarRollosAdicionales`
+en `scan-rollo.js`). Ahí quedan `Montado`; uno que falle queda `Error` con el motivo en
+`Observaciones` y no frena el arranque (se puede pitar después con "+ Rollo").
+
+**Si la tableta se recarga** con el primer rollo ya escaneado y el alistamiento sin empezar, el
+protocolo vuelve a la lista de rollos, no a escanear de nuevo.
+
 ## 11. Volver a pesar un paquete (09/09/2026)
 
 En la página de **Bultos**, tocar un paquete ya no reimprime de una: sale un menú con dos opciones.
