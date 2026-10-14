@@ -372,8 +372,8 @@ con producción las rutas devuelven 404. Cada acción deja rastro `SIMULADOR_PLC
 | Estado | Etiqueta | Botón |
 |---|---|---|
 | `Pendiente` sin bultos (orden nueva) | Por iniciar | ▶ Iniciar (protocolo de arranque) |
-| `Pendiente` con bultos (Programación la devolvió a la cola) | Suspendida · por retomar | ▶ Retomar (sin protocolo, ver `/reanudar-suspendida`) |
-| `Suspendida` (antes no salía en la cola) | Suspendida | ⏯ Reanudar (dos firmas) |
+| `Pendiente` con bultos (Programación la devolvió a la cola) | Suspendida (morado) | ⏯ Reanudar (sin firmas ni protocolo, ver `/reanudar-suspendida`) |
+| `Suspendida` (antes no salía en la cola) | Suspendida (morado) | ⏯ Reanudar (dos firmas) |
 | `PendienteValidacion` | Pend. validación | ⏯ Reanudar (dos firmas) |
 
 **Finalizar con menos del 95 %.** Si alguna referencia que se va a finalizar (todo el grupo

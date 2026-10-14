@@ -685,10 +685,10 @@ function estilosBase() {
     .badge-activo { background: var(--verde-fondo); color: var(--verde); }
     .badge-temporal { background: var(--naranja-fondo); color: var(--naranja); }
     .badge-pendiente { background: #e0ecfb; color: #0b5ed7; }
-    /* 14/10/2026: orden suspendida (sin reanudar) y suspendida que Programacion devolvio a la cola
-       ("por retomar") -- en la cola se distinguen de una orden nueva ("Por iniciar"). */
-    .badge-suspendida { background: #fdecea; color: #c0392b; }
-    .badge-por-retomar { background: #f3e8ff; color: #7e22ce; }
+    /* 14/10/2026: orden suspendida -- la que sigue 'Suspendida' y la que Programacion devolvio a la
+       cola se ven igual (a pedido del usuario, "ambas estan suspendidas"): morado, distinta de una
+       orden nueva ("Por iniciar"). */
+    .badge-suspendida { background: #f3e8ff; color: #7e22ce; }
     .orden-cola {
       background: white; border-radius: 14px; padding: 14px 16px; margin-bottom: 12px;
       box-shadow: 0 1px 4px rgba(0,0,0,0.08); display: flex; flex-wrap: wrap; align-items: center;
@@ -1099,7 +1099,14 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
 </html>`;
 }
 
-const BADGE_POR_RETOMAR = `<span class="badge badge-por-retomar">Suspendida · por retomar</span>`;
+// La suspendida que Programacion devolvio a la cola ('Pendiente' con bultos) se ve igual que una
+// 'Suspendida': misma etiqueta y mismo boton morado "⏯ Reanudar" (14/10/2026, a pedido del usuario).
+// La diferencia esta solo en lo que hace el boton: esta ya la autorizo Programacion, asi que va por
+// iniciarProtocoloArranque -> retomarOrdenSuspendida, sin firmas; la 'Suspendida' pide las dos.
+const BADGE_POR_RETOMAR = `<span class="badge badge-suspendida">Suspendida</span>`;
+function botonRetomarSuspendida(idOrden) {
+  return `<button type="button" class="btn-accion" style="background:#7e22ce;" onclick="iniciarProtocoloArranque(${idOrden})">⏯ Reanudar</button>`;
+}
 
 // Boton "Reanudar" de una orden Suspendida o PendienteValidacion (finalizada por accidente) --
 // 14/10/2026, a pedido del usuario. Pide la firma del Lider de Sellado y la del Jefe de Planta (ver
@@ -1176,9 +1183,11 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
         // scriptProtocoloArranque): es un solo proceso fisico -- una sola limpieza, un solo
         // chequeo de peligro quimico, un solo rollo y un solo alistamiento para las 3 referencias.
         // El protocolo corre sobre la ANCLA, que es la orden que confirmarRollo usa para arrancar
-        // a los hermanos del grupo. Si es una suspendida por retomar, iniciarProtocoloArranque ya
-        // la desvia a "Retomar orden suspendida" -- solo cambia el texto del boton.
-        accionesGrupo = `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${ancla.IdOrden})">${grupoPorRetomar ? '▶ Retomar' : '▶ Iniciar'}</button>`;
+        // a los hermanos del grupo. Si es una suspendida que Programacion devolvio a la cola, el boton
+        // es el morado "⏯ Reanudar" (iniciarProtocoloArranque la desvia a retomarOrdenSuspendida).
+        accionesGrupo = grupoPorRetomar
+          ? botonRetomarSuspendida(ancla.IdOrden)
+          : `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${ancla.IdOrden})">▶ Iniciar</button>`;
       } else if (ancla.Estado === 'PendienteValidacion') {
         accionesGrupo = `<span class="label">Esperando validación del digitador</span>
           ${botonReanudarConFirmas(ancla, 'finalizada', `Pedido ${(ancla.NumeroPedido || '').trim() || '—'}`)}`;
@@ -1246,11 +1255,11 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
       // Iniciar ya no abre el escaneo del rollo de una: entra al protocolo de arranque
       // (limpieza -> peligro quimico -> rollo -> chequeo del rollo -> alistamiento -> temperatura),
       // ver scriptProtocoloArranque. El escaneo sigue estando, pero como paso 3.
-      // 14/10/2026: una suspendida por retomar dice "Retomar" (iniciarProtocoloArranque ya la
-      // desvia a retomarOrdenSuspendida, sin protocolo).
-      acciones += `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${o.IdOrden})">${o.EsPorRetomar ? '▶ Retomar' : '▶ Iniciar'}</button>`;
-      if (o.EsPorRetomar) infoFinalizada = `<div class="orden-elemento" style="color:#7e22ce;font-weight:600;">Ya tiene producción: se retoma sobre lo producido</div>`;
-    } else if (o.Estado === 'Suspendida') {
+      // 14/10/2026: una suspendida que Programacion devolvio a la cola lleva el morado "⏯ Reanudar"
+      // (iniciarProtocoloArranque la desvia a retomarOrdenSuspendida, sin protocolo ni firmas).
+      acciones += o.EsPorRetomar
+        ? botonRetomarSuspendida(o.IdOrden)
+        : `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${o.IdOrden})">▶ Iniciar</button>`;    } else if (o.Estado === 'Suspendida') {
       acciones += botonReanudarConFirmas(o, 'suspendida', `Pedido ${o.NumeroPedido || '—'} · ${o.Elemento}`);
     } else if (o.Estado === 'Activa') {
       // Sellado en paralelo (08/09/2026): "+Rollo" no aplica a una orden agrupada -- el rollo de
@@ -4836,7 +4845,7 @@ function scriptProtocoloArranque(maquinaCodigo) {
 
     function retomarOrdenSuspendida(idOrden, orden) {
       Swal.fire({
-        icon: 'question', title: 'Retomar orden suspendida',
+        icon: 'question', title: 'Reanudar pedido suspendido',
         html: (orden && orden.descripcion
                 ? '<div style="font-size:16px;font-weight:600;color:#006984;margin-bottom:10px;">Orden ' +
                     String(orden.descripcion).replace(/[&<>"]/g, function(c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }) +
@@ -4847,7 +4856,7 @@ function scriptProtocoloArranque(maquinaCodigo) {
                 'con el mismo rollo y sin protocolo de arranque: queda lista para producir.' +
               '</div>',
         showCancelButton: true,
-        confirmButtonText: '▶ Retomar', confirmButtonColor: '#71bf44',
+        confirmButtonText: '⏯ Reanudar', confirmButtonColor: '#7e22ce',
         cancelButtonText: 'Cancelar', cancelButtonColor: '#64748b',
         showLoaderOnConfirm: true,
         allowOutsideClick: function() { return !Swal.isLoading(); },
@@ -10734,7 +10743,7 @@ async function bloqueoArranquePorOrdenActiva(p, idOrden) {
     .query(`SELECT Estado FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
   if (dt.recordset.length === 0 || dt.recordset[0].Estado !== 'Pendiente') return null;
   if (await esOrdenSuspendidaReanudada(p, idOrden)) {
-    return 'Esta orden fue suspendida y ya tiene producción: se retoma con "▶ Retomar" desde la cola de la máquina, sin volver a arrancarla.';
+    return 'Esta orden fue suspendida y ya tiene producción: se reanuda con "⏯ Reanudar" desde la cola de la máquina, sin volver a arrancarla.';
   }
   return bloqueoPorOtraOrdenDeLaMaquina(p, idOrden);
 }
