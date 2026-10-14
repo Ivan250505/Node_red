@@ -11444,46 +11444,7 @@ app.post('/api/selladora/orden/:idOrden/observacion', requireLogin, async (req, 
 
   try {
     const p = await getPool();
-    const dtOrden = await p.request().input('idOrden', idOrden)
-      .query(`SELECT Maquina FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
-    if (dtOrden.recordset.length === 0) return res.json({ ok: false, error: 'Orden no encontrada.' });
-    const maquina = dtOrden.recordset[0].Maquina;
-
-    // Las tres son opcionales: si alguna falla, la observacion se guarda igual. Perder el texto que
-    // el operario acaba de escribir porque su maquina no tiene bitacora abierta seria absurdo.
-    let idEjecucion = null, idOrdenAncla = null, idBitacora = null;
-    try {
-      const dtEj = await p.request().input('idOrden', idOrden).query(
-        `SELECT TOP 1 IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden ORDER BY IdEjecucion ASC`
-      );
-      if (dtEj.recordset.length > 0) idEjecucion = dtEj.recordset[0].IdEjecucion;
-    } catch (e) { /* sin ejecucion todavia: la orden puede estar Pendiente */ }
-    try {
-      const ancla = await obtenerAnclaGrupoSellado(p, idOrden);
-      if (ancla) idOrdenAncla = ancla.IdOrden;
-    } catch (e) { /* orden suelta, sin grupo de sellado */ }
-    try {
-      const dtBi = await p.request().input('maquina', maquina).query(
-        `SELECT TOP 1 IdBitacora FROM SEL_BitacoraTurno WHERE Maquina = @maquina AND HoraCierre IS NULL`
-      );
-      if (dtBi.recordset.length > 0) idBitacora = dtBi.recordset[0].IdBitacora;
-    } catch (e) { /* maquina sin bitacora abierta -- ver la nota del script SQL */ }
-
-    await p.request()
-      .input('idOrden', idOrden)
-      .input('idOrdenAncla', idOrdenAncla)
-      .input('idEjecucion', idEjecucion)
-      .input('operario', req.session.usuario.codigoOperarioPRD || null)
-      .input('maquina', maquina)
-      .input('idBitacora', idBitacora)
-      .input('observacion', texto.slice(0, 500))
-      .input('origen', origen)
-      .query(`
-        INSERT INTO SEL_ObservacionOperario
-          (IdOrden, IdOrdenAncla, id_ejecucion, Operario, Maquina, IdBitacora, Observacion, Origen)
-        VALUES
-          (@idOrden, @idOrdenAncla, @idEjecucion, @operario, @maquina, @idBitacora, @observacion, @origen)
-      `);
+    await guardarObservacionOperario(p, { idOrden, operario: req.session.usuario.codigoOperarioPRD, texto, origen });
     res.json({ ok: true });
   } catch (err) {
     // Mismo criterio que /protocolo/respuesta y /ajustar-consumo: si falta correr el script, se
@@ -11497,6 +11458,51 @@ app.post('/api/selladora/orden/:idOrden/observacion', requireLogin, async (req, 
     });
   }
 });
+
+// Inserta la fila en SEL_ObservacionOperario. Sacada del endpoint de arriba el 14/10/2026 para
+// reusarla al suspender un pedido desde la tableta (Origen 'Suspension'). Revienta con el error.
+async function guardarObservacionOperario(p, { idOrden, operario, texto, origen }) {
+  const dtOrden = await p.request().input('idOrden', idOrden)
+    .query(`SELECT Maquina FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+  if (dtOrden.recordset.length === 0) throw new Error('Orden no encontrada.');
+  const maquina = dtOrden.recordset[0].Maquina;
+
+  // Las tres son opcionales: si alguna falla, la observacion se guarda igual. Perder el texto que
+  // el operario acaba de escribir porque su maquina no tiene bitacora abierta seria absurdo.
+  let idEjecucion = null, idOrdenAncla = null, idBitacora = null;
+  try {
+    const dtEj = await p.request().input('idOrden', idOrden).query(
+      `SELECT TOP 1 IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden ORDER BY IdEjecucion ASC`
+    );
+    if (dtEj.recordset.length > 0) idEjecucion = dtEj.recordset[0].IdEjecucion;
+  } catch (e) { /* sin ejecucion todavia: la orden puede estar Pendiente */ }
+  try {
+    const ancla = await obtenerAnclaGrupoSellado(p, idOrden);
+    if (ancla) idOrdenAncla = ancla.IdOrden;
+  } catch (e) { /* orden suelta, sin grupo de sellado */ }
+  try {
+    const dtBi = await p.request().input('maquina', maquina).query(
+      `SELECT TOP 1 IdBitacora FROM SEL_BitacoraTurno WHERE Maquina = @maquina AND HoraCierre IS NULL`
+    );
+    if (dtBi.recordset.length > 0) idBitacora = dtBi.recordset[0].IdBitacora;
+  } catch (e) { /* maquina sin bitacora abierta -- ver la nota del script SQL */ }
+
+  await p.request()
+    .input('idOrden', idOrden)
+    .input('idOrdenAncla', idOrdenAncla)
+    .input('idEjecucion', idEjecucion)
+    .input('operario', operario || null)
+    .input('maquina', maquina)
+    .input('idBitacora', idBitacora)
+    .input('observacion', texto.slice(0, 500))
+    .input('origen', origen)
+    .query(`
+      INSERT INTO SEL_ObservacionOperario
+        (IdOrden, IdOrdenAncla, id_ejecucion, Operario, Maquina, IdBitacora, Observacion, Origen)
+      VALUES
+        (@idOrden, @idOrdenAncla, @idEjecucion, @operario, @maquina, @idBitacora, @observacion, @origen)
+    `);
+}
 
 // La orden Activa a nombre de este operario, o null. La usa el "Cerrar sesión" para saber si vale
 // la pena preguntar por una observacion antes de salir.
@@ -12010,6 +12016,16 @@ async function suspenderOrdenDesdeTableta(p, req, idOrden, { terminarBulto, moti
              (esperaBulto ? 'Se suspende al cerrar el bulto en curso' : 'Suspendida de una vez') +
              `. Autorizó: ${textoFirma(firma)}`
   });
+  // 14/10/2026 (a pedido del usuario): tambien en observaciones, Origen 'Suspension'. Nunca revienta.
+  try {
+    await guardarObservacionOperario(p, {
+      idOrden, operario: req.session.usuario.codigoOperarioPRD, origen: 'Suspension',
+      texto: `Pedido suspendido ${esperaBulto ? 'al terminar el bulto en curso' : 'de una vez'}. ` +
+             `Motivo: ${motivo}. Autorizó: ${textoFirma(firma)}`
+    });
+  } catch (err) {
+    console.error(`No se pudo guardar la observacion de la suspension de la orden ${idOrden}:`, err.message);
+  }
   console.log(`Orden ${idOrden} suspendida desde la tableta por ${req.session.usuario.codigo} (${motivo}) -- ${textoFirma(firma)}`);
   return { esperaBulto };
 }

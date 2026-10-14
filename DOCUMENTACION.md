@@ -414,3 +414,5 @@ suspensión pedida por Programación:
   grupo entero. La cola muestra el grupo suspendido en una sola tarjeta.
 - No se puede suspender con una pausa abierta. Queda en `SISMovimientos` como `SUSPENDER`, con el motivo
   y quién autorizó.
+- También queda como observación en `SEL_ObservacionOperario`, con `Origen = 'Suspension'`: cómo se
+  suspendió, el motivo y quién autorizó.
