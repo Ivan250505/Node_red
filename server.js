@@ -1110,13 +1110,16 @@ function botonRetomarSuspendida(idOrden) {
 
 // Boton "Reanudar" de una orden Suspendida o PendienteValidacion (finalizada por accidente) --
 // 14/10/2026, a pedido del usuario. Pide la firma del Lider de Sellado y la del Jefe de Planta (ver
-// reanudarConFirmas en scriptConfirmarFinalizar y POST /reanudar-con-firmas).
+// reanudarConFirmas en scriptConfirmarFinalizar y POST /reanudar-con-firmas). En la cola solo sale
+// el de las Suspendidas; el de una finalizada por equivocacion, solo en Informacion (a pedido del
+// usuario, 14/10/2026).
 function botonReanudarConFirmas(o, tipo, descripcion) {
   const args = [o.IdOrden, jsString(tipo), jsString(descripcion)].join(', ').replace(/"/g, '&quot;');
   return `<button type="button" class="btn-accion" style="background:#7e22ce;" onclick="reanudarConFirmas(${args})">⏯ Reanudar</button>`;
 }
 
-// Boton "Suspender" de una orden Activa (14/10/2026) -- pide motivo y la firma del Lider de Sellado o
+// Boton "Suspender" de una orden Activa (14/10/2026), solo en Informacion y en la pagina del grupo,
+// no en la cola (a pedido del usuario) -- pide motivo y la firma del Lider de Sellado o
 // del Jefe de Planta (ver suspenderConFirma en scriptConfirmarFinalizar y POST /suspender).
 function botonSuspender(o, descripcion) {
   const args = [o.IdOrden, jsString(descripcion)].join(', ').replace(/"/g, '&quot;');
@@ -1189,15 +1192,15 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
           ? botonRetomarSuspendida(ancla.IdOrden)
           : `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${ancla.IdOrden})">▶ Iniciar</button>`;
       } else if (ancla.Estado === 'PendienteValidacion') {
-        accionesGrupo = `<span class="label">Esperando validación del digitador</span>
-          ${botonReanudarConFirmas(ancla, 'finalizada', `Pedido ${(ancla.NumeroPedido || '').trim() || '—'}`)}`;
+        // 14/10/2026: "⏯ Reanudar" (finalizada por equivocacion) solo en Informacion, no en la cola.
+        accionesGrupo = `<span class="label">Esperando validación del digitador</span>`;
         const horaFinGrupo = formatearFechaHora(ancla.HoraFinReal);
         if (horaFinGrupo) infoFinalizadaGrupo = `<div class="orden-elemento">Finalizada: ${horaFinGrupo}</div>`;
       } else if (ancla.Estado === 'Suspendida') {
         accionesGrupo = botonReanudarConFirmas(ancla, 'suspendida', `Pedido ${(ancla.NumeroPedido || '').trim() || '—'}`);
       } else {
-        accionesGrupo = `${botonSuspender(ancla, `Pedido ${(ancla.NumeroPedido || '').trim() || '—'}`)}
-           <form method="post" action="/api/selladora/orden/${ancla.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
+        // 14/10/2026: "⏹ Suspender" solo en Informacion, no en la cola.
+        accionesGrupo = `<form method="post" action="/api/selladora/orden/${ancla.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
              <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
            </form>`;
       }
@@ -1267,13 +1270,12 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
       // ancla, no hay "rollo adicional" que agregar por separado en cada una.
       acciones += `
         ${o.IdGrupoSellado == null ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${o.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>` : ''}
-        ${o.EstadoEjecucion === 'SuspensionEnCurso' ? '' : botonSuspender(o, `Pedido ${o.NumeroPedido || '—'} · ${o.Elemento}`)}
         <form method="post" action="/api/selladora/orden/${o.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
           <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
         </form>`;
     } else {
-      acciones += `<span class="label">Esperando validación del digitador</span>
-        ${botonReanudarConFirmas(o, 'finalizada', `Pedido ${o.NumeroPedido || '—'} · ${o.Elemento}`)}`;
+      // 14/10/2026: "⏯ Reanudar" (finalizada por equivocacion) solo en Informacion, no en la cola.
+      acciones += `<span class="label">Esperando validación del digitador</span>`;
       // FIX 01/09/2026: se muestra la hora en la que se finalizo (SEL_EjecucionOrden.HoraFinReal,
       // la pone finalizarOrden() al dar "Finalizar") -- a pedido del usuario, para saber desde
       // cuando esta orden quedo esperando validacion, no solo que esta esperando. Debajo de la
@@ -7862,6 +7864,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
 
   // Orden de izquierda a derecha: Rollo, Pausa, Finalizar. El boton Turno se quito de aca
   // (a pedido del usuario, 30/09/2026).
+  const miembroSuspendido = (miembros || []).find(m => m.Estado === 'Suspendida') || null;
   const accionesProduccion = sinControl ? '' : [
     miembroActivoAhora
       ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${miembroActivoAhora.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>`
@@ -7874,6 +7877,14 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
       ? `<form method="post" action="/api/selladora/orden/${miembroAncla.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
           <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
         </form>`
+      : '',
+    // 14/10/2026: sin referencia activa, "⏯ Reanudar" del grupo suspendido o finalizado por
+    // equivocacion (dos firmas) -- igual que en la pagina de una sola referencia.
+    !miembroAncla && miembroSuspendido
+      ? botonReanudarConFirmas(miembroSuspendido, 'suspendida', `Pedido ${(miembroSuspendido.NumeroPedido || '').trim() || '—'}`)
+      : '',
+    !miembroAncla && !miembroSuspendido && miembroParaAjuste
+      ? botonReanudarConFirmas(miembroParaAjuste, 'finalizada', `Pedido ${(miembroParaAjuste.NumeroPedido || '').trim() || '—'}`)
       : ''
   ].join('');
 

@@ -374,7 +374,7 @@ con producción las rutas devuelven 404. Cada acción deja rastro `SIMULADOR_PLC
 | `Pendiente` sin bultos (orden nueva) | Por iniciar | ▶ Iniciar (protocolo de arranque) |
 | `Pendiente` con bultos (Programación la devolvió a la cola) | Suspendida (morado) | ⏯ Reanudar (sin firmas ni protocolo, ver `/reanudar-suspendida`) |
 | `Suspendida` (antes no salía en la cola) | Suspendida (morado) | ⏯ Reanudar (dos firmas) |
-| `PendienteValidacion` | Pend. validación | ⏯ Reanudar (dos firmas) |
+| `PendienteValidacion` | Pend. validación | Ninguno: "⏯ Reanudar" (dos firmas) está solo en Información |
 
 **Finalizar con menos del 95 %.** Si alguna referencia que se va a finalizar (todo el grupo
 Activo, en sellado en paralelo) tiene meta y va por debajo de `PORCENTAJE_MINIMO_FINALIZAR` (95),
@@ -399,8 +399,8 @@ queda en la sesión del operario 10 minutos (`FIRMA_VIGENCIA_MS`), atada a la or
 La acción la exige y la consume. No hay tabla nueva: quién firmó queda en `SISMovimientos`
 (`FINALIZAR_BAJO_META`, `REANUDAR_SUSPENDIDA`, `REANUDAR_FINALIZADA`).
 
-**Suspender desde la tableta.** Botón "⏹ Suspender" en las órdenes Activas: en la cola, en Información
-y en la página del grupo. Pide un **motivo obligatorio** y la firma del **Líder de Sellado o del Jefe de
+**Suspender desde la tableta.** Botón "⏹ Suspender" en las órdenes Activas, solo en Información y en
+la página del grupo (no en la cola). Pide un **motivo obligatorio** y la firma del **Líder de Sellado o del Jefe de
 Planta** (rol `liderOJefe`, propósito `suspender`). `POST /suspender` tiene los mismos dos caminos que la
 suspensión pedida por Programación:
 
