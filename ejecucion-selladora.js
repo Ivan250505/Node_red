@@ -61,18 +61,10 @@ async function validarPuedeAnadirRollo(db, idOrden) {
   return { ok: true, idEjecucionActivo, bolsasActual };
 }
 
-// EjecucionSelladora.vb:379-444 (HandleFinalizar) -- deja la orden en 'PendienteValidacion',
-// exactamente igual que hoy; Residuos/Verificar/Cerrar Definitivo siguen siendo del escritorio.
-// operarioFinal: PRDOperarios.Codigo de quien finaliza (distinto del que inicio, ya guardado en
-// SEL_EjecucionOrden.Operario) -- mismo criterio que EjecucionSelladora.vb (HandleFinalizar,
-// linea ~389 en adelante): se resuelve de SISUsuarios.CodigoOperarioPRD del usuario logueado
-// (aca ya viene resuelto desde la sesion web, ver auth.js/accesos.js) y bloquea si no esta
-// configurado -- ver agregar_operariofinal_selejecucionorden.sql.
-async function finalizarOrden(pool, idOrden, generadoPor, operarioFinal) {
-  if (!operarioFinal || operarioFinal <= 0) {
-    throw new Error('Su usuario no tiene un operario de planta asignado (SISUsuarios.CodigoOperarioPRD) -- pida a un administrador que lo configure antes de finalizar.');
-  }
-
+// Las ordenes que se finalizan (o se reanudan) juntas con idOrden: todo su grupo SELLADORA, o solo
+// ella si no esta agrupada. Sacada de finalizarOrden el 14/10/2026 para reusarla al revisar el
+// avance antes de Finalizar y al reanudar un pedido finalizado por accidente.
+async function idsGrupoSelladoDeOrden(pool, idOrden) {
   // Sellado en paralelo (08/09/2026 -- ver DISENO_SELLADO_PARALELO_08092026.md): si esta orden
   // pertenece a un grupo SELLADORA, se finaliza TODO el grupo junto (confirmado con el usuario) --
   // es un solo rollo físico, cuando el operario termina, terminó para las 3 referencias, no solo
@@ -105,16 +97,36 @@ async function finalizarOrden(pool, idOrden, generadoPor, operarioFinal) {
     INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gm.Linea AND ord2.NumeroPedido = gm.Numero
     WHERE ord1.IdOrden = @idOrden
   `);
-  const idsGrupo = dtGrupo.recordset.length > 0
+  return dtGrupo.recordset.length > 0
     ? [...new Set(dtGrupo.recordset.map(r => r.IdOrden))]
     : [idOrden];
+}
+
+// Los de ids que estan en ese Estado de SEL_OrdenProduccion.
+async function idsConEstado(pool, ids, estado) {
+  const dtEstados = await pool.request().input('estado', estado).query(
+    `SELECT IdOrden FROM SEL_OrdenProduccion WHERE Estado = @estado AND IdOrden IN (${ids.map(Number).join(',')})`
+  );
+  return dtEstados.recordset.map(r => r.IdOrden);
+}
+
+// EjecucionSelladora.vb:379-444 (HandleFinalizar) -- deja la orden en 'PendienteValidacion',
+// exactamente igual que hoy; Residuos/Verificar/Cerrar Definitivo siguen siendo del escritorio.
+// operarioFinal: PRDOperarios.Codigo de quien finaliza (distinto del que inicio, ya guardado en
+// SEL_EjecucionOrden.Operario) -- mismo criterio que EjecucionSelladora.vb (HandleFinalizar,
+// linea ~389 en adelante): se resuelve de SISUsuarios.CodigoOperarioPRD del usuario logueado
+// (aca ya viene resuelto desde la sesion web, ver auth.js/accesos.js) y bloquea si no esta
+// configurado -- ver agregar_operariofinal_selejecucionorden.sql.
+async function finalizarOrden(pool, idOrden, generadoPor, operarioFinal) {
+  if (!operarioFinal || operarioFinal <= 0) {
+    throw new Error('Su usuario no tiene un operario de planta asignado (SISUsuarios.CodigoOperarioPRD) -- pida a un administrador que lo configure antes de finalizar.');
+  }
+
+  const idsGrupo = await idsGrupoSelladoDeOrden(pool, idOrden);
 
   // Solo se finalizan los miembros que de verdad llegaron a 'Activa' -- uno del grupo al que el
   // operario nunca alternó (nunca se llegó a producir nada) se queda tal cual, en 'Pendiente'.
-  const dtEstados = await pool.request().query(
-    `SELECT IdOrden, Estado FROM SEL_OrdenProduccion WHERE IdOrden IN (${idsGrupo.join(',')})`
-  );
-  const idsActivos = dtEstados.recordset.filter(r => r.Estado === 'Activa').map(r => r.IdOrden);
+  const idsActivos = await idsConEstado(pool, idsGrupo, 'Activa');
   if (idsActivos.length === 0) {
     throw new Error('Solo se puede finalizar una orden que esté Activa.');
   }
@@ -237,4 +249,4 @@ async function finalizarOrden(pool, idOrden, generadoPor, operarioFinal) {
   }
 }
 
-module.exports = { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden };
+module.exports = { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden, idsGrupoSelladoDeOrden, idsConEstado };

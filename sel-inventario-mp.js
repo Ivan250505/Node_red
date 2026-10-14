@@ -2023,6 +2023,37 @@ async function reanudarOTDeOrden(db, { idOrden, usuario, origen }) {
   }
 }
 
+// 14/10/2026 (a pedido del usuario): reanudar desde la tableta un pedido finalizado por accidente.
+// Deshace lo que finalizarControlParcialSellado le hizo a la OT: PRDOrdenesProduccion vuelve de
+// 'PendienteValidacion' a 'Activa' (sin HoraFinReal) y sus controles de 'PendienteValidacion' a
+// 'EnProceso'. A diferencia de suspenderOTDeOrden/reanudarOTDeOrden, SI revienta hacia afuera: corre
+// dentro de la transaccion de la reanudacion, y si el digitador ya cerro la OT o alguno de sus
+// controles ("Cerrar Definitivo", Merma ya calculada) no se puede reabrir desde la tableta.
+// Sin OT (orden sin bultos cerrados) no hay nada que reabrir. Devuelve la OT o null.
+async function reabrirOTDeOrden(db, { idOrden }) {
+  const r = await db.request().input('idOrden', idOrden).query(`
+    ${SQL_OT_DE_ORDEN}
+    SELECT @OT AS OT,
+           (SELECT Estado FROM PRDOrdenesProduccion WHERE OrdenProduccion = @OT) AS Estado,
+           (SELECT COUNT(*) FROM PRDExtrusionControl
+            WHERE Estado = 'Cerrado' AND IdExtrusionControl IN (${SQL_CONTROLES_DE_OT})) AS ControlesCerrados;
+  `);
+  const fila = r.recordset[0] || {};
+  if (!fila.OT) return null;
+  if (fila.ControlesCerrados > 0 || !['PendienteValidacion', 'Activa'].includes(fila.Estado)) {
+    throw new Error(`La orden de trabajo ${fila.OT} ya fue cerrada por el digitador (estado ${fila.Estado || 'desconocido'}): ` +
+                    'no se puede reanudar desde la tableta.');
+  }
+  await db.request().input('idOrden', idOrden).query(`
+    ${SQL_OT_DE_ORDEN}
+    UPDATE PRDOrdenesProduccion SET Estado = 'Activa', HoraFinReal = NULL
+    WHERE OrdenProduccion = @OT AND Estado = 'PendienteValidacion';
+    UPDATE PRDExtrusionControl SET Estado = 'EnProceso', FechaUltimaModificacion = GETDATE()
+    WHERE Estado = 'PendienteValidacion' AND IdExtrusionControl IN (${SQL_CONTROLES_DE_OT});
+  `);
+  return fila.OT;
+}
+
 // FIX 24/09/2026 (a pedido del usuario): la bitacora se cierra cuando TERMINA SU TURNO, no cuando
 // alguien abre la siguiente (antes una bitacora podia quedar abierta dias si nadie tomaba control).
 // El fin del turno sale del turno guardado en la bitacora (el que tiene asignado la maquina en
@@ -2834,6 +2865,7 @@ module.exports = {
   cerrarBitacorasPorFinTurno,
   suspenderOTDeOrden,
   reanudarOTDeOrden,
+  reabrirOTDeOrden,
   abrirOReanudarBitacora,
   obtenerSalidaRealSellado,
   obtenerMiembrosGrupoSellado,

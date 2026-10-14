@@ -8,16 +8,17 @@ const sql = require('mssql');
 const { desencriptar } = require('./crypto-mirane');
 const { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO,
         validarAutorizadorPedido, CARGOS_AUTORIZAN_PEDIDO, AUTORIZACION_LIDER_ACTIVA,
-        AUTORIZACION_LIDER_OBLIGATORIA } = require('./auth');
+        AUTORIZACION_LIDER_OBLIGATORIA, validarFirmaCargo, CARGOS_LIDER_SELLADO,
+        CARGOS_JEFE_PLANTA } = require('./auth');
 const { registrarEvento } = require('./accesos');
-const { consultarSerial, confirmarRollo, alternarReferenciaGrupo, materializarInicioOrden } = require('./scan-rollo');
-const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
+const { consultarSerial, confirmarRollo, alternarReferenciaGrupo, materializarInicioOrden, crearBultoInicial } = require('./scan-rollo');
+const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden, idsGrupoSelladoDeOrden, idsConEstado } = require('./ejecucion-selladora');
 const {
   obtenerLineaOriginalControlSellado, resolverTurnoMaquina, cerrarBitacora, cerrarBitacorasPorFinTurno,
   repararCoberturaTurnos, turnosParaLogin, sincronizarBitacoraAlEntrar, abrirBitacorasPendientes,
   franjasMaquinaOBase, turnoAJson, columnaExiste, esSupervisor,
   infoOTParaCorreccion, turnosParaCorregirOT, corregirTurnoOT,
-  abrirOReanudarBitacora, suspenderOTDeOrden, reanudarOTDeOrden, horaServidorBD,
+  abrirOReanudarBitacora, suspenderOTDeOrden, reanudarOTDeOrden, reabrirOTDeOrden, horaServidorBD,
   candidatosTurnoMaquina, activarTurnoMaquina, turnosParaCorregir, corregirTurnoMaquina,
   obtenerAnclaGrupoSellado, obtenerEstadoAjusteConsumo, ajustarConsumoRollo
 } = require('./sel-inventario-mp');
@@ -684,6 +685,10 @@ function estilosBase() {
     .badge-activo { background: var(--verde-fondo); color: var(--verde); }
     .badge-temporal { background: var(--naranja-fondo); color: var(--naranja); }
     .badge-pendiente { background: #e0ecfb; color: #0b5ed7; }
+    /* 14/10/2026: orden suspendida (sin reanudar) y suspendida que Programacion devolvio a la cola
+       ("por retomar") -- en la cola se distinguen de una orden nueva ("Por iniciar"). */
+    .badge-suspendida { background: #fdecea; color: #c0392b; }
+    .badge-por-retomar { background: #f3e8ff; color: #7e22ce; }
     .orden-cola {
       background: white; border-radius: 14px; padding: 14px 16px; margin-bottom: 12px;
       box-shadow: 0 1px 4px rgba(0,0,0,0.08); display: flex; flex-wrap: wrap; align-items: center;
@@ -1036,8 +1041,8 @@ function bloqueUsuarioHeader(usuario) {
 }
 
 function badgeEstadoOrden(estado) {
-  const clases = { Activa: 'badge-activo', Pendiente: 'badge-pendiente', PendienteValidacion: 'badge-temporal' };
-  const textos = { Activa: 'Activa', Pendiente: 'Por iniciar', PendienteValidacion: 'Pend. validación' };
+  const clases = { Activa: 'badge-activo', Pendiente: 'badge-pendiente', PendienteValidacion: 'badge-temporal', Suspendida: 'badge-suspendida' };
+  const textos = { Activa: 'Activa', Pendiente: 'Por iniciar', PendienteValidacion: 'Pend. validación', Suspendida: 'Suspendida' };
   return `<span class="badge ${clases[estado] || 'badge-temporal'}">${textos[estado] || estado}</span>`;
 }
 
@@ -1094,7 +1099,24 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
 </html>`;
 }
 
-// Cola de ordenes de la maquina (Activa/Pendiente/PendienteValidacion) con su boton de accion,
+const BADGE_POR_RETOMAR = `<span class="badge badge-por-retomar">Suspendida · por retomar</span>`;
+
+// Boton "Reanudar" de una orden Suspendida o PendienteValidacion (finalizada por accidente) --
+// 14/10/2026, a pedido del usuario. Pide la firma del Lider de Sellado y la del Jefe de Planta (ver
+// reanudarConFirmas en scriptConfirmarFinalizar y POST /reanudar-con-firmas).
+function botonReanudarConFirmas(o, tipo, descripcion) {
+  const args = [o.IdOrden, jsString(tipo), jsString(descripcion)].join(', ').replace(/"/g, '&quot;');
+  return `<button type="button" class="btn-accion" style="background:#7e22ce;" onclick="reanudarConFirmas(${args})">⏯ Reanudar</button>`;
+}
+
+// Boton "Suspender" de una orden Activa (14/10/2026) -- pide motivo y la firma del Lider de Sellado o
+// del Jefe de Planta (ver suspenderConFirma en scriptConfirmarFinalizar y POST /suspender).
+function botonSuspender(o, descripcion) {
+  const args = [o.IdOrden, jsString(descripcion)].join(', ').replace(/"/g, '&quot;');
+  return `<button type="button" class="btn-accion" style="background:#c0392b;" onclick="suspenderConFirma(${args})">⏹ Suspender</button>`;
+}
+
+// Cola de ordenes de la maquina (Activa/Pendiente/Suspendida/PendienteValidacion) con su boton de accion,
 // mismas reglas de habilitacion que EjecucionSelladora.vb (dgvEjecuciones_CellFormatting +
 // HandleIniciar/HandleAnadirRollo): Pendiente -> Iniciar, Activa -> +Rollo y Finalizar,
 // PendienteValidacion -> sin accion (Residuos/Verificar/Cerrar Definitivo quedan en el escritorio).
@@ -1130,7 +1152,8 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
   for (const [idGrupo, miembros] of gruposFusionables) {
     const estadoComun = miembros[0].Estado;
     const todosMismoEstado = miembros.every(m => m.Estado === estadoComun);
-    const estadoFusionable = estadoComun === 'Pendiente' || estadoComun === 'Activa' || estadoComun === 'PendienteValidacion';
+    // 14/10/2026: tambien 'Suspendida' -- la suspension desde la tableta suspende el grupo entero.
+    const estadoFusionable = ['Pendiente', 'Activa', 'Suspendida', 'PendienteValidacion'].includes(estadoComun);
     const algunoNecesitaControl = estadoComun === 'Activa' && miembros.some(necesitaTomarControlMiembro);
     if (!todosMismoEstado || !estadoFusionable || algunoNecesitaControl) gruposFusionables.delete(idGrupo);
   }
@@ -1147,19 +1170,25 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
       // ALIÑADO 70grs-P DEL FONCE") era ilegible en la tableta.
       const referencias = miembros.map(m => `<div>${m.Elemento}</div>`).join('');
       let accionesGrupo, infoFinalizadaGrupo = '';
+      const grupoPorRetomar = ancla.Estado === 'Pendiente' && miembros.some(m => m.EsPorRetomar);
       if (ancla.Estado === 'Pendiente') {
         // Iniciar un grupo entra por el mismo protocolo de arranque que una orden suelta (ver
         // scriptProtocoloArranque): es un solo proceso fisico -- una sola limpieza, un solo
         // chequeo de peligro quimico, un solo rollo y un solo alistamiento para las 3 referencias.
         // El protocolo corre sobre la ANCLA, que es la orden que confirmarRollo usa para arrancar
-        // a los hermanos del grupo.
-        accionesGrupo = `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${ancla.IdOrden})">▶ Iniciar</button>`;
+        // a los hermanos del grupo. Si es una suspendida por retomar, iniciarProtocoloArranque ya
+        // la desvia a "Retomar orden suspendida" -- solo cambia el texto del boton.
+        accionesGrupo = `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${ancla.IdOrden})">${grupoPorRetomar ? '▶ Retomar' : '▶ Iniciar'}</button>`;
       } else if (ancla.Estado === 'PendienteValidacion') {
-        accionesGrupo = `<span class="label">Esperando validación del digitador</span>`;
+        accionesGrupo = `<span class="label">Esperando validación del digitador</span>
+          ${botonReanudarConFirmas(ancla, 'finalizada', `Pedido ${(ancla.NumeroPedido || '').trim() || '—'}`)}`;
         const horaFinGrupo = formatearFechaHora(ancla.HoraFinReal);
         if (horaFinGrupo) infoFinalizadaGrupo = `<div class="orden-elemento">Finalizada: ${horaFinGrupo}</div>`;
+      } else if (ancla.Estado === 'Suspendida') {
+        accionesGrupo = botonReanudarConFirmas(ancla, 'suspendida', `Pedido ${(ancla.NumeroPedido || '').trim() || '—'}`);
       } else {
-        accionesGrupo = `<form method="post" action="/api/selladora/orden/${ancla.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
+        accionesGrupo = `${botonSuspender(ancla, `Pedido ${(ancla.NumeroPedido || '').trim() || '—'}`)}
+           <form method="post" action="/api/selladora/orden/${ancla.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
              <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
            </form>`;
       }
@@ -1167,7 +1196,7 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
       return `
         <div class="orden-cola">
           <div class="orden-info">
-            <div class="orden-pedido">🔗 Pedido ${pedidosFusion.join(' · ') || ancla.NumeroPedido || '—'} ${badgeEstadoOrden(ancla.Estado)}</div>
+            <div class="orden-pedido">🔗 Pedido ${pedidosFusion.join(' · ') || ancla.NumeroPedido || '—'} ${grupoPorRetomar ? BADGE_POR_RETOMAR : badgeEstadoOrden(ancla.Estado)}</div>
             <div class="orden-elemento">${referencias}</div>
             <div class="orden-elemento" style="color:var(--texto-suave);">Un solo proceso -- ${miembros.length} referencias de salida</div>
             ${ancla.OrdenProduccion ? `<div class="orden-elemento" style="color:var(--texto-suave);">OP: ${ancla.OrdenProduccion}</div>` : ''}
@@ -1217,18 +1246,25 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
       // Iniciar ya no abre el escaneo del rollo de una: entra al protocolo de arranque
       // (limpieza -> peligro quimico -> rollo -> chequeo del rollo -> alistamiento -> temperatura),
       // ver scriptProtocoloArranque. El escaneo sigue estando, pero como paso 3.
-      acciones += `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${o.IdOrden})">▶ Iniciar</button>`;
+      // 14/10/2026: una suspendida por retomar dice "Retomar" (iniciarProtocoloArranque ya la
+      // desvia a retomarOrdenSuspendida, sin protocolo).
+      acciones += `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${o.IdOrden})">${o.EsPorRetomar ? '▶ Retomar' : '▶ Iniciar'}</button>`;
+      if (o.EsPorRetomar) infoFinalizada = `<div class="orden-elemento" style="color:#7e22ce;font-weight:600;">Ya tiene producción: se retoma sobre lo producido</div>`;
+    } else if (o.Estado === 'Suspendida') {
+      acciones += botonReanudarConFirmas(o, 'suspendida', `Pedido ${o.NumeroPedido || '—'} · ${o.Elemento}`);
     } else if (o.Estado === 'Activa') {
       // Sellado en paralelo (08/09/2026): "+Rollo" no aplica a una orden agrupada -- el rollo de
       // entrada ya quedó registrado UNA sola vez para las 3 referencias al dar "Iniciar" en la
       // ancla, no hay "rollo adicional" que agregar por separado en cada una.
       acciones += `
         ${o.IdGrupoSellado == null ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${o.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>` : ''}
+        ${o.EstadoEjecucion === 'SuspensionEnCurso' ? '' : botonSuspender(o, `Pedido ${o.NumeroPedido || '—'} · ${o.Elemento}`)}
         <form method="post" action="/api/selladora/orden/${o.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
           <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
         </form>`;
     } else {
-      acciones += `<span class="label">Esperando validación del digitador</span>`;
+      acciones += `<span class="label">Esperando validación del digitador</span>
+        ${botonReanudarConFirmas(o, 'finalizada', `Pedido ${o.NumeroPedido || '—'} · ${o.Elemento}`)}`;
       // FIX 01/09/2026: se muestra la hora en la que se finalizo (SEL_EjecucionOrden.HoraFinReal,
       // la pone finalizarOrden() al dar "Finalizar") -- a pedido del usuario, para saber desde
       // cuando esta orden quedo esperando validacion, no solo que esta esperando. Debajo de la
@@ -1236,9 +1272,13 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
       const horaFin = formatearFechaHora(o.HoraFinReal);
       if (horaFin) infoFinalizada = `<div class="orden-elemento">Finalizada: ${horaFin}</div>`;
     }
+    // 14/10/2026: suspension pedida "al terminar el bulto" -- sigue Activa hasta que el PLC lo cierre.
+    if (o.Estado === 'Activa' && o.EstadoEjecucion === 'SuspensionEnCurso') {
+      infoFinalizada = `<div class="orden-elemento" style="color:#c0392b;font-weight:600;">Se suspende al cerrar el bulto en curso</div>`;
+    }
     const badge = necesitaTomarControl
       ? `<span class="badge badge-temporal">Pendiente de operador</span>`
-      : badgeEstadoOrden(o.Estado);
+      : (o.Estado === 'Pendiente' && o.EsPorRetomar ? BADGE_POR_RETOMAR : badgeEstadoOrden(o.Estado));
     return `
       <div class="orden-cola">
         <div class="orden-info">
@@ -3579,17 +3619,210 @@ function scriptConfirmarFinalizar() {
         return false;
       }
 
-      if (typeof exigirAutorizacion !== 'function') {
-        // Pagina sin el script de autorizacion cargado: igual que arriba, decide el servidor.
-        confirmarFinalizarPaso2(formulario);
-        return false;
-      }
-
-      exigirAutorizacion(idOrdenFin).then(function(autorizado) {
-        if (!autorizado) return;
-        confirmarFinalizarPaso2(formulario);
+      // 14/10/2026: primero el avance (menos del 95% pide la firma del Lider o del Jefe de Planta),
+      // despues la firma del turno de siempre.
+      revisarAvanceAntesDeFinalizar(idOrdenFin).then(function(sigue) {
+        if (!sigue) return;
+        if (typeof exigirAutorizacion !== 'function') {
+          // Pagina sin el script de autorizacion cargado: igual que arriba, decide el servidor.
+          confirmarFinalizarPaso2(formulario);
+          return;
+        }
+        exigirAutorizacion(idOrdenFin).then(function(autorizado) {
+          if (!autorizado) return;
+          confirmarFinalizarPaso2(formulario);
+        });
       });
       return false;
+    }
+
+    function escaparFirma(texto) {
+      return String(texto == null ? '' : texto).replace(/[&<>"]/g, function(c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+      });
+    }
+
+    // Firma de un cargo para una accion puntual del pedido (14/10/2026): finalizar con menos del 95%
+    // (rol liderOJefe) o reanudar (rol lider, luego rol jefe). El servidor la valida y la guarda unos
+    // minutos en la sesion; la accion la exige alla. Resuelve { nombre, cargo } o null si se cancela.
+    function pedirFirmaCargo(idOrden, proposito, rol, titulo, htmlArriba) {
+      return Swal.fire({
+        title: titulo,
+        html: '<div style="text-align:left;font-size:14px;">' + (htmlArriba || '') +
+                '<label style="display:block;font-weight:600;margin-bottom:4px;">Usuario</label>' +
+                '<input id="firma-usuario" class="swal2-input" style="margin:0 0 10px;width:100%;" ' +
+                  'autocapitalize="characters" autocomplete="off" spellcheck="false">' +
+                '<label style="display:block;font-weight:600;margin-bottom:4px;">Contraseña</label>' +
+                '<input id="firma-clave" type="password" class="swal2-input" style="margin:0;width:100%;" autocomplete="off">' +
+              '</div>',
+        width: 500,
+        showCancelButton: true,
+        confirmButtonText: 'Firmar',
+        confirmButtonColor: '#71bf44',
+        cancelButtonText: 'Cancelar',
+        cancelButtonColor: '#c0392b',
+        allowOutsideClick: false,
+        didOpen: function() {
+          var u = document.getElementById('firma-usuario');
+          if (u) u.focus();
+        },
+        preConfirm: function() {
+          var codigo = (document.getElementById('firma-usuario').value || '').trim();
+          var clave = document.getElementById('firma-clave').value || '';
+          if (!codigo || !clave) { Swal.showValidationMessage('Escriba usuario y contraseña.'); return false; }
+          Swal.showLoading();
+          return fetch('/api/selladora/orden/' + idOrden + '/firma', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ proposito: proposito, rol: rol, codigo: codigo, password: clave })
+          })
+            .then(function(r) { return r.json(); })
+            .then(function(resp) {
+              if (!resp.ok) { Swal.showValidationMessage(resp.error || 'No se pudo firmar.'); return false; }
+              return resp.firma;
+            })
+            .catch(function() { Swal.showValidationMessage('Error de conexión.'); return false; });
+        }
+      }).then(function(r) { return (r.isConfirmed && r.value) ? r.value : null; });
+    }
+
+    // Resuelve true si se puede seguir con el Finalizar: avance >= 95% (o sin meta), o ya firmado.
+    // Si la consulta falla se deja seguir -- el servidor tiene la misma regla y rechaza el POST.
+    function revisarAvanceAntesDeFinalizar(idOrden) {
+      return fetch('/api/selladora/orden/' + idOrden + '/finalizar/requisitos')
+        .then(function(r) { return r.json(); })
+        .then(function(datos) {
+          if (!datos.ok || !datos.bajas || datos.bajas.length === 0 || datos.firmado) return true;
+          var lista = datos.bajas.map(function(b) {
+            return '<li>' + escaparFirma(b.descripcion) + ': <b>' +
+                   b.porcentaje.toLocaleString('es-CO', { maximumFractionDigits: 1 }) + '%</b>' +
+                   ' <span style="color:#64748b;">(' + escaparFirma(b.producido) + ' de ' + escaparFirma(b.programado) + ')</span></li>';
+          }).join('');
+          var aviso = '<div style="background:#fdecea;border-left:5px solid #c0392b;padding:10px 12px;border-radius:8px;margin-bottom:14px;">' +
+                        'El porcentaje de avance <b>no ha completado el 100%</b>:' +
+                        '<ul style="margin:6px 0 0 18px;padding:0;">' + lista + '</ul>' +
+                        '<div style="margin-top:8px;">Para finalizar con menos del ' + datos.minimo + '% se necesita la firma del ' +
+                        '<b>Líder de Sellado</b> o del <b>Jefe de Planta</b>.</div>' +
+                      '</div>';
+          return pedirFirmaCargo(idOrden, 'finalizar', 'liderOJefe', '⚠ Avance incompleto', aviso)
+            .then(function(firma) { return !!firma; });
+        })
+        .catch(function() { return true; });
+    }
+
+    // Suspender un pedido desde la tableta (14/10/2026): motivo obligatorio, terminar el bulto en
+    // curso o suspender ya, firma del Lider de Sellado o del Jefe de Planta, y POST /suspender.
+    function suspenderConFirma(idOrden, descripcion) {
+      var cabecera = '<div style="font-size:16px;font-weight:600;color:#006984;margin-bottom:10px;">' + escaparFirma(descripcion) + '</div>';
+      function motivoValido() {
+        var v = (Swal.getInput().value || '').trim();
+        if (v.length < 3) { Swal.showValidationMessage('Escriba el motivo de la suspensión.'); return false; }
+        return v;
+      }
+      var terminarBulto = true;
+      Swal.fire({
+        icon: 'warning',
+        title: 'Suspender pedido',
+        html: cabecera +
+              '<div style="text-align:left;font-size:14px;color:#64748b;line-height:1.5;">' +
+                '<b>Terminar el bulto</b>: la máquina sigue hasta cerrar el bulto que está llenando y ahí se suspende.<br>' +
+                '<b>Suspender ya</b>: se corta ahora; el bulto queda guardado para cuando se reanude.<br><br>' +
+                'Se necesita la firma del <b>Líder de Sellado</b> o del <b>Jefe de Planta</b>.' +
+              '</div>',
+        input: 'textarea',
+        inputPlaceholder: 'Motivo de la suspensión (obligatorio)',
+        showDenyButton: true,
+        showCancelButton: true,
+        confirmButtonText: 'Terminar el bulto y suspender', confirmButtonColor: '#b46200',
+        denyButtonText: 'Suspender ya', denyButtonColor: '#c0392b',
+        cancelButtonText: 'Cancelar', cancelButtonColor: '#64748b',
+        returnInputValueOnDeny: true,
+        preConfirm: motivoValido,
+        preDeny: motivoValido
+      })
+        .then(function(r) {
+          if (!r.isConfirmed && !r.isDenied) return null;
+          terminarBulto = r.isConfirmed;
+          var motivo = String(r.value || '').trim();
+          return pedirFirmaCargo(idOrden, 'suspender', 'liderOJefe', '🔑 Firma para suspender', cabecera +
+            '<div style="background:#fff4e5;border-left:5px solid #f39c12;padding:8px 12px;border-radius:8px;margin-bottom:14px;">' +
+              (terminarBulto ? 'Al terminar el bulto' : 'Suspender ya') + ' — motivo: <b>' + escaparFirma(motivo) + '</b></div>')
+            .then(function(firma) { return firma ? motivo : null; });
+        })
+        .then(function(motivo) {
+          if (!motivo) return;
+          Swal.fire({ title: 'Suspendiendo…', allowOutsideClick: false, showConfirmButton: false, didOpen: function() { Swal.showLoading(); } });
+          return fetch('/api/selladora/orden/' + idOrden + '/suspender', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ terminarBulto: terminarBulto, motivo: motivo })
+          })
+            .then(function(r) { return r.json(); })
+            .then(function(datos) {
+              if (!datos.ok) {
+                Swal.fire({ icon: 'error', title: 'No se pudo suspender', text: datos.error || '', confirmButtonColor: '#71bf44' });
+                return;
+              }
+              Swal.fire({
+                icon: 'success',
+                title: datos.esperaBulto ? 'Suspensión en curso' : 'Pedido suspendido',
+                text: datos.esperaBulto ? 'Se suspende cuando la máquina cierre el bulto que está llenando.' : 'Quedó suspendido. Se puede reanudar desde la cola con dos firmas.',
+                confirmButtonColor: '#71bf44'
+              }).then(function() { location.reload(); });
+            });
+        })
+        .catch(function() {
+          Swal.fire({ icon: 'error', title: 'Sin conexión', text: 'Intente de nuevo.', confirmButtonColor: '#71bf44' });
+        });
+    }
+
+    // Reanudar un pedido Suspendido o finalizado por accidente (14/10/2026): dos firmas, primero el
+    // Lider de Sellado y luego el Jefe de Planta, y despues POST /reanudar-con-firmas.
+    // tipo: 'suspendida' | 'finalizada'.
+    function reanudarConFirmas(idOrden, tipo, descripcion) {
+      var cabecera = '<div style="font-size:16px;font-weight:600;color:#006984;margin-bottom:10px;">' + escaparFirma(descripcion) + '</div>';
+      var explicacion = tipo === 'finalizada'
+        ? 'Este pedido ya se finalizó y espera la validación del digitador. Al reanudarlo vuelve a quedar <b>Activo</b> en esta máquina, sobre lo ya producido, con un bulto nuevo para seguir pesando.'
+        : 'Este pedido está suspendido. Al reanudarlo vuelve a quedar <b>Activo</b> en esta máquina, sobre lo ya producido y sin protocolo de arranque.';
+      Swal.fire({
+        icon: 'question',
+        title: tipo === 'finalizada' ? 'Reanudar pedido finalizado' : 'Reanudar pedido suspendido',
+        html: cabecera +
+              '<div style="text-align:left;font-size:14px;color:#64748b;line-height:1.5;">' + explicacion +
+                '<br><br>Se necesitan <b>dos firmas</b>: primero el <b>Líder de Sellado</b> y luego el <b>Jefe de Planta</b>.' +
+              '</div>',
+        showCancelButton: true,
+        confirmButtonText: '🔑 Pedir firmas', confirmButtonColor: '#7e22ce',
+        cancelButtonText: 'Cancelar', cancelButtonColor: '#64748b'
+      })
+        .then(function(r) {
+          if (!r.isConfirmed) return null;
+          return pedirFirmaCargo(idOrden, 'reanudar', 'lider', '🔑 Firma 1 de 2: Líder de Sellado', cabecera);
+        })
+        .then(function(firmaLider) {
+          if (!firmaLider) return null;
+          return pedirFirmaCargo(idOrden, 'reanudar', 'jefe', '🔑 Firma 2 de 2: Jefe de Planta', cabecera +
+            '<div style="background:#eaf6e4;border-left:5px solid #4a9c2e;padding:8px 12px;border-radius:8px;margin-bottom:14px;">' +
+              'Ya firmó el Líder de Sellado: <b>' + escaparFirma(firmaLider.nombre) + '</b></div>');
+        })
+        .then(function(firmaJefe) {
+          if (!firmaJefe) return;
+          Swal.fire({ title: 'Reanudando…', allowOutsideClick: false, showConfirmButton: false, didOpen: function() { Swal.showLoading(); } });
+          return fetch('/api/selladora/orden/' + idOrden + '/reanudar-con-firmas', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+          })
+            .then(function(r) { return r.json(); })
+            .then(function(datos) {
+              if (!datos.ok) {
+                Swal.fire({ icon: 'error', title: 'No se pudo reanudar', text: datos.error || '', confirmButtonColor: '#71bf44' });
+                return;
+              }
+              Swal.fire({ icon: 'success', title: 'Pedido reanudado', text: 'Quedó activo en esta máquina.', timer: 2200, showConfirmButton: false })
+                .then(function() { location.reload(); });
+            });
+        })
+        .catch(function() {
+          Swal.fire({ icon: 'error', title: 'Sin conexión', text: 'Intente de nuevo.', confirmButtonColor: '#71bf44' });
+        });
     }
 
     function confirmarFinalizarPaso2(formulario) {
@@ -5125,6 +5358,10 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   if (orden.Estado === 'Pendiente') {
     // Mismo protocolo de arranque que el boton Iniciar de la cola, ver renderColaOrdenes.
     acciones = `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${orden.IdOrden})">▶ Iniciar</button>`;
+  } else if (orden.Estado === 'Suspendida' || orden.Estado === 'PendienteValidacion') {
+    // 14/10/2026: reanudar con la firma del Lider de Sellado y del Jefe de Planta (igual que en la cola).
+    acciones = botonReanudarConFirmas(orden, orden.Estado === 'Suspendida' ? 'suspendida' : 'finalizada',
+                                      `Pedido ${orden.NumeroPedido || '—'}`);
   } else if (activa && !sinControl) {
     // Sellado en paralelo (08/09/2026): "+Rollo" no aplica a una orden agrupada -- el rollo de
     // entrada ya quedó registrado UNA sola vez para las 3 referencias al dar "Iniciar" en la ancla.
@@ -5133,6 +5370,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     acciones = `
       ${grupoSelladoOtras.length === 0 ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${orden.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo, alAnadir: alistamientoMaterialRolloNuevo })">+ Rollo</button>` : ''}
       ${!pausaActiva ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>` : ''}
+      ${botonSuspender(orden, `Pedido ${orden.NumeroPedido || '—'}`)}
       <form method="post" action="/api/selladora/orden/${orden.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
         <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
       </form>`;
@@ -5290,7 +5528,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Especificaciones</h2>
     <div class="ejecucion-box"><div class="ejecucion-grid">${especificaciones}</div></div>
-    <h2 style="font-size:15px;margin:22px 0 10px;">Historial rollo</h2>
+    <h2 style="font-size:15px;margin:22px 0 10px;">Historial de consumo de rollos</h2>
     ${botonAjusteConsumo}
     <div class="ejecucion-box">${filasHistorial}</div>
     ${seccionOrdenTrabajo(otInfo, esSup)}
@@ -6440,6 +6678,12 @@ async function obtenerColaOrdenes(p, codigo) {
     SELECT ord.IdOrden, ord.Estado, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento,
            ej.Estado AS EstadoEjecucion, ej.Operario AS OperarioEjecucionCodigo, op.Nombre AS OperarioEjecucionNombre,
            ej.HoraFinReal,
+           -- 14/10/2026: 'Pendiente' con bultos = suspendida que Programación devolvió a la cola y
+           -- espera que la retomen (mismo criterio que esOrdenSuspendidaReanudada). La cola la
+           -- distingue de una orden nueva.
+           CASE WHEN ord.Estado = 'Pendiente' AND EXISTS (
+                  SELECT 1 FROM SEL_Bultos bs INNER JOIN SEL_EjecucionOrden es ON es.IdEjecucion = bs.id_ejecucion
+                  WHERE es.IdOrden = ord.IdOrden) THEN 1 ELSE 0 END AS EsPorRetomar,
            -- Orden de Trabajo (PRDProduccion.OrdenProduccion, redefinicion 15/09/2026): se resuelve
            -- por el primer bulto de esta ejecucion, igual patron que el endpoint de pausar. Null
            -- mientras la orden sigue 'Pendiente' (todavia no se ha dado Iniciar y no existe OT).
@@ -6466,8 +6710,10 @@ async function obtenerColaOrdenes(p, codigo) {
     INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
     LEFT JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
     LEFT JOIN PRDOperarios op ON op.Codigo = ej.Operario
-    WHERE ord.Maquina = @codigo AND ord.Estado IN ('Activa','Pendiente','PendienteValidacion')
-    ORDER BY CASE ord.Estado WHEN 'Activa' THEN 0 WHEN 'Pendiente' THEN 1 ELSE 2 END ASC,
+    -- 14/10/2026: tambien las 'Suspendida' -- desde la tableta se pueden reanudar con la firma del
+    -- Lider de Sellado y del Jefe de Planta (ver /reanudar-con-firmas).
+    WHERE ord.Maquina = @codigo AND ord.Estado IN ('Activa','Pendiente','Suspendida','PendienteValidacion')
+    ORDER BY CASE ord.Estado WHEN 'Activa' THEN 0 WHEN 'Pendiente' THEN 1 WHEN 'Suspendida' THEN 2 ELSE 3 END ASC,
              ISNULL(ord.Prioridad, 99999) ASC, ord.IdOrden ASC
   `);
   return colaResult.recordset;
@@ -7614,6 +7860,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
     (miembroAncla && !pausaActiva)
       ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>`
       : '',
+    miembroAncla ? botonSuspender(miembroAncla, `Pedido ${(miembroAncla.NumeroPedido || '').trim() || '—'}`) : '',
     miembroAncla
       ? `<form method="post" action="/api/selladora/orden/${miembroAncla.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
           <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
@@ -7705,7 +7952,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Referencias de salida</h2>
     ${tarjetasReferencia}
-    <h2 style="font-size:15px;margin:22px 0 10px;">Historial rollo (todo el grupo)</h2>
+    <h2 style="font-size:15px;margin:22px 0 10px;">Historial de consumo de rollos (todo el grupo)</h2>
     ${botonAjusteConsumo}
     <div class="ejecucion-box">${filasHistorial}</div>
     ${seccionOrdenTrabajo(otInfo, esSup)}
@@ -10487,7 +10734,7 @@ async function bloqueoArranquePorOrdenActiva(p, idOrden) {
     .query(`SELECT Estado FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
   if (dt.recordset.length === 0 || dt.recordset[0].Estado !== 'Pendiente') return null;
   if (await esOrdenSuspendidaReanudada(p, idOrden)) {
-    return 'Esta orden fue suspendida y ya tiene producción: se retoma con "▶ Iniciar" desde la cola de la máquina, sin volver a arrancarla.';
+    return 'Esta orden fue suspendida y ya tiene producción: se retoma con "▶ Retomar" desde la cola de la máquina, sin volver a arrancarla.';
   }
   return bloqueoPorOtraOrdenDeLaMaquina(p, idOrden);
 }
@@ -10587,56 +10834,103 @@ app.get('/api/selladora/orden/:idOrden/puede-iniciar', requireLogin, async (req,
 // operario la termina como cualquier pausa.
 app.post('/api/selladora/orden/:idOrden/reanudar-suspendida', requireLogin, async (req, res) => {
   const idOrden = Number(req.params.idOrden);
-  const miOperario = req.session.usuario.codigoOperarioPRD;
-  if (!miOperario || miOperario <= 0) return res.json({ ok: false, error: 'Su usuario no tiene un operario de planta asignado.' });
-  let tx;
   try {
     const p = await getPool();
     if (!(await esOrdenSuspendidaReanudada(p, idOrden))) {
       return res.json({ ok: false, error: 'Esta orden no es una orden suspendida pendiente de retomar.' });
     }
-    const bloqueo = await bloqueoPorOtraOrdenDeLaMaquina(p, idOrden);
-    if (bloqueo) return res.json({ ok: false, error: bloqueo });
+    const r = await retomarOrdenSuspendida(p, req, idOrden, {
+      estadoEsperado: 'Pendiente', motivo: 'Orden suspendida retomada desde la tableta'
+    });
+    res.json({ ok: true, maquina: r.maquina });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
 
-    tx = new sql.Transaction(p);
-    await tx.begin();
-    const dt = await tx.request().input('idOrden', idOrden).query(`
-      SELECT ord.Estado, ord.Maquina, ISNULL(ord.NumeroPedido, '') AS NumeroPedido, ord.Linea, ej.IdEjecucion, ej.Operario
-      FROM SEL_OrdenProduccion ord WITH (UPDLOCK)
-      INNER JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
-      WHERE ord.IdOrden = @idOrden ORDER BY ej.IdEjecucion ASC
-    `);
-    const o = dt.recordset[0];
-    if (!o || o.Estado !== 'Pendiente') throw new Error('La orden ya no está pendiente de retomar.');
+// El nucleo de /reanudar-suspendida, compartido desde el 14/10/2026 con /reanudar-con-firmas: alli la
+// orden sigue 'Suspendida' (Programacion no la ha devuelto a la cola) y la reanudacion la autorizan
+// el Lider de Sellado y el Jefe de Planta desde la tableta. estadoEsperado: 'Pendiente' o 'Suspendida'.
+// firmas: texto con quien firmo, para el movimiento (null sin firmas). Revienta con el error.
+async function retomarOrdenSuspendida(p, req, idOrden, { estadoEsperado, motivo, firmas = null }) {
+  const miOperario = req.session.usuario.codigoOperarioPRD;
+  if (!miOperario || miOperario <= 0) throw new Error('Su usuario no tiene un operario de planta asignado.');
+  const bloqueo = await bloqueoPorOtraOrdenDeLaMaquina(p, idOrden);
+  if (bloqueo) throw new Error(bloqueo);
 
-    // El bulto suspendido vuelve a la línea: 'Activo' si alcanzó a tener paquetes (suspensión sin
-    // terminar el bulto), 'Temporal' si es el reservado vacío (suspensión al terminar el bulto).
-    const dtBulto = await tx.request().input('idEjecucion', o.IdEjecucion).query(`
-      DECLARE @IdBulto INT = (SELECT TOP 1 id FROM SEL_Bultos
-                              WHERE id_ejecucion = @idEjecucion AND estado = 'Suspendido' ORDER BY id DESC);
-      UPDATE SEL_Bultos
-      SET estado = CASE WHEN EXISTS (SELECT 1 FROM SEL_PesajeElemento pe WHERE pe.id_bulto = @IdBulto)
-                        THEN 'Activo' ELSE 'Temporal' END
-      WHERE id = @IdBulto;
-      SELECT @IdBulto AS IdBulto, (SELECT estado FROM SEL_Bultos WHERE id = @IdBulto) AS Estado;
-    `);
-    await tx.request().input('idOrden', idOrden).query(`UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden = @idOrden`);
-    // Una pausa abierta se respeta (igual que tomar-control-ejecucion); si no, queda 'Activa'.
-    await tx.request().input('idEjecucion', o.IdEjecucion).input('operario', miOperario).query(`
-      UPDATE SEL_EjecucionOrden
-      SET Operario = @operario, Estado = CASE WHEN Estado = 'En pausa' THEN 'En pausa' ELSE 'Activa' END
-      WHERE IdEjecucion = @idEjecucion
-    `);
-    const bulto = dtBulto.recordset[0] || {};
+  // 14/10/2026: turno y bitacora tambien ANTES de la transaccion, por si hay que reservar un bulto
+  // (crearBultoReanudacion) -- mismo motivo que en reabrirOrdenFinalizada. Despues se vuelven a
+  // llamar como siempre; con la bitacora ya abierta solo la reutilizan.
+  const dtMaq = await p.request().input('idOrden', idOrden).query(`SELECT Maquina FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+  if (dtMaq.recordset[0]) {
+    await activarTurnoDeSesion(p, req, dtMaq.recordset[0].Maquina);
+    await abrirOReanudarBitacora(p, dtMaq.recordset[0].Maquina, miOperario);
+  }
+
+  let tx = new sql.Transaction(p);
+  await tx.begin();
+  try {
+    // 14/10/2026: una orden 'Suspendida' de un grupo de sellado en paralelo se reanuda con todo su
+    // grupo -- la suspension desde la tableta (POST /suspender) suspende el grupo entero, igual que
+    // Finalizar. La 'Pendiente' que devolvio Programacion sigue siendo una sola orden, como antes.
+    const ids = estadoEsperado === 'Suspendida'
+      ? await idsConEstado(tx, await idsGrupoSelladoDeOrden(tx, idOrden), 'Suspendida')
+      : [idOrden];
+    if (!ids.includes(idOrden)) ids.unshift(idOrden);
+    let o = null;
+    let bulto = {};
+    for (const id of ids) {
+      const dt = await tx.request().input('idOrden', id).query(`
+        SELECT ord.Estado, ord.Maquina, ISNULL(ord.NumeroPedido, '') AS NumeroPedido, ord.Linea, ej.IdEjecucion, ej.Operario
+        FROM SEL_OrdenProduccion ord WITH (UPDLOCK)
+        INNER JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
+        WHERE ord.IdOrden = @idOrden ORDER BY ej.IdEjecucion ASC
+      `);
+      const fila = dt.recordset[0];
+      if (!fila || fila.Estado !== estadoEsperado) throw new Error('La orden ya no está pendiente de retomar.');
+      if (id === idOrden) o = fila;
+
+      // El bulto suspendido vuelve a la línea: 'Activo' si alcanzó a tener paquetes (suspensión sin
+      // terminar el bulto), 'Temporal' si es el reservado vacío (suspensión al terminar el bulto).
+      // En un grupo solo uno tiene bulto suspendido (las hermanas esperan en 'EnEspera'); si
+      // apareciera un segundo, va a 'EnEspera' para que la máquina nunca vea dos a la vez.
+      const dtBulto = await tx.request().input('idEjecucion', fila.IdEjecucion).input('yaHayUno', bulto.IdBulto ? 1 : 0).query(`
+        DECLARE @IdBulto INT = (SELECT TOP 1 id FROM SEL_Bultos
+                                WHERE id_ejecucion = @idEjecucion AND estado = 'Suspendido' ORDER BY id DESC);
+        UPDATE SEL_Bultos
+        SET estado = CASE WHEN @yaHayUno = 1 THEN 'EnEspera'
+                          WHEN EXISTS (SELECT 1 FROM SEL_PesajeElemento pe WHERE pe.id_bulto = @IdBulto)
+                          THEN 'Activo' ELSE 'Temporal' END
+        WHERE id = @IdBulto;
+        SELECT @IdBulto AS IdBulto, (SELECT estado FROM SEL_Bultos WHERE id = @IdBulto) AS Estado;
+      `);
+      if (!bulto.IdBulto && dtBulto.recordset[0] && dtBulto.recordset[0].IdBulto) bulto = dtBulto.recordset[0];
+
+      await tx.request().input('idOrden', id).query(`UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden = @idOrden`);
+      // Una pausa abierta se respeta (igual que tomar-control-ejecucion); si no, queda 'Activa'.
+      await tx.request().input('idEjecucion', fila.IdEjecucion).input('operario', miOperario).query(`
+        UPDATE SEL_EjecucionOrden
+        SET Operario = @operario, Estado = CASE WHEN Estado = 'En pausa' THEN 'En pausa' ELSE 'Activa' END
+        WHERE IdEjecucion = @idEjecucion
+      `);
+    }
+    // 14/10/2026: sin bulto suspendido (ni uno Activo/Temporal) la máquina no tendría dónde pesar --
+    // se le reserva uno vacío, igual que al reanudar un pedido finalizado.
+    if (!bulto.IdBulto) {
+      const nuevo = await crearBultoReanudacion(tx, req, { idOrden, idEjecucion: o.IdEjecucion, estado: 'Temporal' });
+      if (nuevo) bulto = { IdBulto: nuevo, Estado: 'Temporal (nuevo)' };
+    }
     await tx.request()
       .input('idOrden', idOrden).input('ref', `Pedido ${o.NumeroPedido} línea ${o.Linea}`.slice(0, 40))
       .input('usuario', usuarioNumerico(req.session.usuario))
-      .input('resumen', (bulto.IdBulto ? `Bulto ${bulto.IdBulto} Suspendido -> ${bulto.Estado}` : 'Sin bulto suspendido') + `, operario ${miOperario}`)
+      .input('motivo', motivo)
+      .input('resumen', ((ids.length > 1 ? `Órdenes ${ids.join(', ')}. ` : '') +
+                         (bulto.IdBulto ? `Bulto ${bulto.IdBulto} Suspendido -> ${bulto.Estado}` : 'Sin bulto suspendido') +
+                         `, operario ${miOperario}` + (firmas ? `. ${firmas}` : '')).slice(0, 500))
       .query(`
         IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
           INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
-          VALUES ('SELLADORA', 'REANUDAR_SUSPENDIDA', @idOrden, @ref, GETDATE(), @usuario, 'Tableta',
-                  'Orden suspendida retomada desde la tableta', @resumen);
+          VALUES ('SELLADORA', 'REANUDAR_SUSPENDIDA', @idOrden, @ref, GETDATE(), @usuario, 'Tableta', @motivo, @resumen);
       `);
     await tx.commit();
     tx = null;
@@ -10654,13 +10948,14 @@ app.post('/api/selladora/orden/:idOrden/reanudar-suspendida', requireLogin, asyn
     // Mismo criterio de usuario que materializarInicioOrden al reanudar la OT.
     await reanudarOTDeOrden(p, { idOrden, usuario: Number(req.session.usuario.codigo) || null });
 
-    console.log(`Orden suspendida ${idOrden} (pedido ${o.NumeroPedido} línea ${o.Linea}) retomada por ${req.session.usuario.codigo}`);
-    res.json({ ok: true, maquina: o.Maquina });
+    console.log(`Orden suspendida ${idOrden} (pedido ${o.NumeroPedido} línea ${o.Linea}) retomada por ${req.session.usuario.codigo}` +
+                (firmas ? ` -- ${firmas}` : ''));
+    return { maquina: o.Maquina };
   } catch (err) {
     try { if (tx) await tx.rollback(); } catch (e) { /* ya abortada */ }
-    res.json({ ok: false, error: err.message });
+    throw err;
   }
-});
+}
 
 // 06/10/2026 (a pedido del usuario): "Cancelar arranque" -- deshace un protocolo de arranque que
 // quedó a medias (orden equivocada, se arrepintió) y deja la orden Pendiente como si nunca hubiera
@@ -11003,6 +11298,16 @@ app.post('/api/selladora/orden/:idOrden/finalizar', requireLogin, async (req, re
     const retoma = await retomaPendiente(p, idOrden, usuario.codigoOperarioPRD);
     if (retoma) throw new Error(mensajeRetomaPendiente(retoma));
 
+    // 14/10/2026: con menos del PORCENTAJE_MINIMO_FINALIZAR de avance no se finaliza sin la firma del
+    // Lider de Sellado o del Jefe de Planta (ver "Firmas especiales de un pedido"). Va en el servidor
+    // por lo mismo que la firma del turno de abajo: Finalizar es un form POST normal.
+    const bajas = await referenciasBajoMinimo(p, idOrden);
+    const firmaBajoMeta = bajas.length > 0 ? firmaVigente(req, idOrden, 'finalizar', 'liderOJefe') : null;
+    if (bajas.length > 0 && !firmaBajoMeta) {
+      throw new Error(`El porcentaje de avance no ha completado el 100% (${textoBajas(bajas)}). ` +
+                      `Para finalizar con menos del ${PORCENTAJE_MINIMO_FINALIZAR}% se necesita la firma del Líder de Sellado o del Jefe de Planta.`);
+    }
+
     // Sin la firma de un lider no se finaliza (22/09/2026). La comprobacion va EN EL SERVIDOR y no
     // solo en el modal: Finalizar es un form POST normal, asi que un navegador que no corra el
     // script -- o alguien que mande el POST a mano -- se saltaria un bloqueo que viviera solo en
@@ -11027,6 +11332,14 @@ app.post('/api/selladora/orden/:idOrden/finalizar', requireLogin, async (req, re
     // OperarioFinal (distinto del que inicio) -- mismo bloqueo que EjecucionSelladora.vb si el
     // usuario logueado no tiene SISUsuarios.CodigoOperarioPRD configurado.
     await finalizarOrden(p, idOrden, usuario.generadoPor, usuario.codigoOperarioPRD);
+    if (firmaBajoMeta) {
+      consumirFirmas(req, idOrden, 'finalizar');
+      await registrarMovimientoSelladora(p, req, {
+        idOrden, subtipo: 'FINALIZAR_BAJO_META',
+        motivo: `Finalizada con avance menor al ${PORCENTAJE_MINIMO_FINALIZAR}%`,
+        resumen: `${textoBajas(bajas)}. Autorizó: ${textoFirma(firmaBajoMeta)}`
+      });
+    }
     res.redirect(`/selladora/${maquinaCodigo}`);
   } catch (err) {
     res.status(400).send(renderErrorSimple(err.message, maquinaCodigo ? `/selladora/${maquinaCodigo}` : '/'));
@@ -11436,6 +11749,366 @@ app.post('/api/selladora/orden/:idOrden/autorizacion', requireLogin, async (req,
     });
   }
 });
+
+// ---------------- Firmas especiales de un pedido (14/10/2026, a pedido del usuario) ----------------
+// Dos reglas nuevas:
+//  - Finalizar con un avance de produccion menor a PORCENTAJE_MINIMO_FINALIZAR pide la firma del
+//    Lider de Sellado O del Jefe de Planta (rol 'liderOJefe').
+//  - Reanudar desde la tableta un pedido Suspendido o finalizado por accidente (PendienteValidacion)
+//    pide las DOS firmas: primero el Lider de Sellado y luego el Jefe de Planta.
+// Cada firma se valida sola (POST /firma, usuario+clave+cargo) y queda guardada en la SESION del
+// operario por FIRMA_VIGENCIA_MS, atada a la orden y al proposito; la accion (Finalizar o
+// /reanudar-con-firmas) la exige en el servidor y la consume. Asi la contrasena del lider viaja una
+// sola vez y no hay forma de saltarse la firma mandando el POST a mano. Sin tabla nueva: quien firmo
+// queda en SISMovimientos (FINALIZAR_BAJO_META, REANUDAR_SUSPENDIDA, REANUDAR_FINALIZADA).
+const PORCENTAJE_MINIMO_FINALIZAR = 95;
+const FIRMA_VIGENCIA_MS = 10 * 60 * 1000;
+const ROLES_FIRMA = {
+  lider: { cargos: CARGOS_LIDER_SELLADO, nombre: 'Líder de Sellado' },
+  jefe: { cargos: CARGOS_JEFE_PLANTA, nombre: 'Jefe de Planta' },
+  liderOJefe: { cargos: [...CARGOS_LIDER_SELLADO, ...CARGOS_JEFE_PLANTA], nombre: 'Líder de Sellado o Jefe de Planta' }
+};
+const ROLES_POR_PROPOSITO = { finalizar: ['liderOJefe'], suspender: ['liderOJefe'], reanudar: ['lider', 'jefe'] };
+
+function firmasDeOrden(req, idOrden, proposito) {
+  if (!req.session.firmasPedido) req.session.firmasPedido = {};
+  const clave = `${Number(idOrden)}:${proposito}`;
+  if (!req.session.firmasPedido[clave]) req.session.firmasPedido[clave] = {};
+  return req.session.firmasPedido[clave];
+}
+
+function firmaVigente(req, idOrden, proposito, rol) {
+  const f = firmasDeOrden(req, idOrden, proposito)[rol];
+  return f && f.expira > Date.now() ? f : null;
+}
+
+function consumirFirmas(req, idOrden, proposito) {
+  if (req.session.firmasPedido) delete req.session.firmasPedido[`${Number(idOrden)}:${proposito}`];
+}
+
+function textoFirma(f) {
+  return `${f.nombre} (${f.cargo}, usuario ${f.codigo})`;
+}
+
+// Nunca revienta: el movimiento es rastro, no puede deshacer la accion ya hecha.
+async function registrarMovimientoSelladora(p, req, { idOrden, subtipo, motivo, resumen }) {
+  try {
+    const o = await datosOrdenParaAviso(p, idOrden);
+    await p.request()
+      .input('idOrden', idOrden)
+      .input('ref', (o ? `Pedido ${o.NumeroPedido} línea ${o.Linea}` : `Orden ${idOrden}`).slice(0, 40))
+      .input('usuario', usuarioNumerico(req.session.usuario))
+      .input('subtipo', subtipo).input('motivo', motivo).input('resumen', String(resumen).slice(0, 500))
+      .query(`
+        IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
+          INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
+          VALUES ('SELLADORA', @subtipo, @idOrden, @ref, GETDATE(), @usuario, 'Tableta', @motivo, @resumen);
+      `);
+  } catch (err) {
+    console.error(`No se pudo registrar el movimiento ${subtipo} de la orden ${idOrden}:`, err.message);
+  }
+}
+
+// Las referencias que se finalizarian juntas con idOrden (todo su grupo Activo) y que van por debajo
+// del minimo. Una orden sin meta configurada (ver obtenerAvanceProduccion) no cuenta.
+async function referenciasBajoMinimo(p, idOrden) {
+  const ids = await idsConEstado(p, await idsGrupoSelladoDeOrden(p, idOrden), 'Activa');
+  const bajas = [];
+  for (const id of ids) {
+    const a = await obtenerAvanceProduccion(p, id);
+    if (!a.tipo || a.porcentaje >= PORCENTAJE_MINIMO_FINALIZAR) continue;
+    const o = await datosOrdenParaAviso(p, id);
+    bajas.push({
+      idOrden: id,
+      descripcion: o ? `Pedido ${o.NumeroPedido} · ${o.Referencia || ''}`.trim() : `Orden ${id}`,
+      porcentaje: Math.round(a.porcentaje * 10) / 10,
+      producido: formatearCantidadAvance(a.producido, a.tipo),
+      programado: formatearCantidadAvance(a.programado, a.tipo)
+    });
+  }
+  return bajas;
+}
+
+function textoBajas(bajas) {
+  return bajas.map(b => `${b.descripcion}: ${b.porcentaje.toLocaleString('es-CO')}% (${b.producido} de ${b.programado})`).join('; ');
+}
+
+// Lo consulta confirmarFinalizar antes de preguntar nada: si hay referencias por debajo del minimo
+// y todavia no hay firma, la tableta avisa y pide la firma.
+app.get('/api/selladora/orden/:idOrden/finalizar/requisitos', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  try {
+    const p = await getPool();
+    const bajas = await referenciasBajoMinimo(p, idOrden);
+    res.json({
+      ok: true, minimo: PORCENTAJE_MINIMO_FINALIZAR, bajas,
+      firmado: !!firmaVigente(req, idOrden, 'finalizar', 'liderOJefe')
+    });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// Una firma: valida usuario+clave+cargo para el rol pedido y la guarda en la sesion.
+app.post('/api/selladora/orden/:idOrden/firma', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  const { proposito, rol, codigo, password } = req.body || {};
+  try {
+    if (!(ROLES_POR_PROPOSITO[proposito] || []).includes(rol)) {
+      return res.json({ ok: false, error: 'Firma no reconocida.' });
+    }
+    const p = await getPool();
+    const intento = await validarFirmaCargo(p, codigo, password, ROLES_FIRMA[rol].cargos);
+    if (!intento.ok) return res.json({ ok: false, error: intento.error });
+
+    const firmas = firmasDeOrden(req, idOrden, proposito);
+    // Las dos firmas de la reanudacion son de dos personas distintas (cada usuario tiene un solo
+    // cargo, asi que en la practica ya lo son -- esto es por si algun dia cambia).
+    const otra = Object.entries(firmas).find(([r, f]) => r !== rol && f.expira > Date.now() && f.codigo === intento.usuario.codigo);
+    if (otra) return res.json({ ok: false, error: `${intento.usuario.nombre} ya firmó como ${ROLES_FIRMA[otra[0]].nombre}. La otra firma debe ser de otra persona.` });
+
+    firmas[rol] = {
+      codigo: intento.usuario.codigo,
+      nombre: intento.usuario.nombre,
+      cargo: intento.usuario.cargoAutorizado,
+      expira: Date.now() + FIRMA_VIGENCIA_MS
+    };
+    res.json({ ok: true, firma: { nombre: intento.usuario.nombre, cargo: intento.usuario.cargoAutorizado } });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// Reanudar con las dos firmas un pedido Suspendido (sin esperar a que Programacion lo devuelva a la
+// cola) o uno finalizado por accidente que el digitador todavia no ha cerrado.
+app.post('/api/selladora/orden/:idOrden/reanudar-con-firmas', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  try {
+    const lider = firmaVigente(req, idOrden, 'reanudar', 'lider');
+    const jefe = firmaVigente(req, idOrden, 'reanudar', 'jefe');
+    if (!lider || !jefe) {
+      return res.json({ ok: false, error: 'Faltan las firmas del Líder de Sellado y del Jefe de Planta (o ya vencieron). Vuelva a pedirlas.' });
+    }
+    const firmas = `Firmaron: ${textoFirma(lider)} y ${textoFirma(jefe)}`;
+    const p = await getPool();
+    const dt = await p.request().input('idOrden', idOrden).query(`SELECT Estado FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+    const estado = dt.recordset[0] && dt.recordset[0].Estado;
+    let r;
+    if (estado === 'Suspendida') {
+      r = await retomarOrdenSuspendida(p, req, idOrden, {
+        estadoEsperado: 'Suspendida', motivo: 'Orden suspendida reanudada desde la tableta con firmas', firmas
+      });
+    } else if (estado === 'PendienteValidacion') {
+      r = await reabrirOrdenFinalizada(p, req, idOrden, firmas);
+    } else {
+      return res.json({ ok: false, error: 'Solo se puede reanudar un pedido suspendido o finalizado (pendiente de validación).' });
+    }
+    consumirFirmas(req, idOrden, 'reanudar');
+    res.json({ ok: true, maquina: r.maquina });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// Suspender un pedido desde la tableta (14/10/2026, a pedido del usuario). Hasta ahora solo lo podia
+// pedir Programacion (bandera 'PendienteSuspension', ver /responder-suspension). Pide la firma del
+// Lider de Sellado o del Jefe de Planta y un motivo. Los mismos dos caminos de siempre:
+//  terminarBulto=true  -> la ejecucion que la maquina esta llenando pasa a 'SuspensionEnCurso' y
+//                         trg_SEL_Bultos_SuspenderTemporal la suspende cuando el PLC cierre el bulto
+//                         (con la OT incluida). Si el bulto en curso no tiene paquetes no hay nada
+//                         que terminar y se suspende de una vez.
+//  terminarBulto=false -> se suspende ya: los bultos Activo y Temporal pasan a 'Suspendido' (el
+//                         Temporal tambien, a diferencia de /responder-suspension: si se queda
+//                         Temporal el PLC lo seguiria llenando con la orden suspendida).
+// Sellado en paralelo: se suspende todo el grupo Activo, igual que Finalizar; las hermanas que
+// esperan en 'EnEspera' quedan suspendidas de una vez (la maquina no las esta llenando).
+app.post('/api/selladora/orden/:idOrden/suspender', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  const terminarBulto = !!(req.body && req.body.terminarBulto);
+  const motivo = String((req.body && req.body.motivo) || '').trim().slice(0, 150);
+  try {
+    if (motivo.length < 3) return res.json({ ok: false, error: 'Escriba el motivo de la suspensión.' });
+    const firma = firmaVigente(req, idOrden, 'suspender', 'liderOJefe');
+    if (!firma) {
+      return res.json({ ok: false, error: 'Falta la firma del Líder de Sellado o del Jefe de Planta (o ya venció). Vuelva a pedirla.' });
+    }
+    const p = await getPool();
+    const retoma = await retomaPendiente(p, idOrden, req.session.usuario.codigoOperarioPRD);
+    if (retoma) return res.json({ ok: false, error: mensajeRetomaPendiente(retoma) });
+
+    const r = await suspenderOrdenDesdeTableta(p, req, idOrden, { terminarBulto, motivo, firma });
+    consumirFirmas(req, idOrden, 'suspender');
+    res.json({ ok: true, esperaBulto: r.esperaBulto });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+async function suspenderOrdenDesdeTableta(p, req, idOrden, { terminarBulto, motivo, firma }) {
+  const ids = await idsConEstado(p, await idsGrupoSelladoDeOrden(p, idOrden), 'Activa');
+  if (!ids.includes(idOrden)) throw new Error('Solo se puede suspender un pedido que esté Activo.');
+
+  const dt = await p.request().query(`
+    SELECT ej.IdOrden, ej.IdEjecucion, ej.Estado,
+           (SELECT COUNT(*) FROM SEL_Bultos b
+            WHERE b.id_ejecucion = ej.IdEjecucion AND b.estado IN ('Activo', 'Temporal')) AS EnLinea,
+           (SELECT COUNT(*) FROM SEL_PesajeElemento pe INNER JOIN SEL_Bultos b ON b.id = pe.id_bulto
+            WHERE b.id_ejecucion = ej.IdEjecucion AND b.estado = 'Activo') AS PaquetesEnCurso
+    FROM SEL_EjecucionOrden ej
+    WHERE ej.IdOrden IN (${ids.map(Number).join(',')}) AND ej.HoraFinReal IS NULL
+  `);
+  const ejecuciones = dt.recordset;
+  if (ejecuciones.length === 0) throw new Error('No se encontró la ejecución de esta orden.');
+  if (ejecuciones.some(e => e.Estado === 'En pausa')) {
+    throw new Error('La orden está en pausa: termine la pausa antes de suspender.');
+  }
+  const esperaBulto = terminarBulto && ejecuciones.some(e => e.EnLinea > 0 && e.PaquetesEnCurso > 0);
+
+  let tx = new sql.Transaction(p);
+  await tx.begin();
+  try {
+    for (const e of ejecuciones) {
+      if (esperaBulto && e.EnLinea > 0) {
+        await tx.request().input('idEjecucion', e.IdEjecucion)
+          .query(`UPDATE SEL_EjecucionOrden SET Estado = 'SuspensionEnCurso' WHERE IdEjecucion = @idEjecucion`);
+        continue;
+      }
+      await tx.request().input('idEjecucion', e.IdEjecucion).query(`
+        UPDATE SEL_Bultos SET estado = 'Suspendido' WHERE id_ejecucion = @idEjecucion AND estado IN ('Activo', 'Temporal');
+        UPDATE SEL_EjecucionOrden SET Estado = 'Suspendida' WHERE IdEjecucion = @idEjecucion;
+      `);
+      await tx.request().input('idOrden', e.IdOrden)
+        .query(`UPDATE SEL_OrdenProduccion SET Estado = 'Suspendida' WHERE IdOrden = @idOrden`);
+    }
+    await tx.commit();
+    tx = null;
+  } catch (err) {
+    try { if (tx) await tx.rollback(); } catch (e) { /* ya abortada */ }
+    throw err;
+  }
+
+  // Esperando el bulto, la OT la suspende el trigger al cerrarlo; si no, se suspende ya (como en
+  // /responder-suspension). Nunca revienta.
+  if (!esperaBulto) {
+    await suspenderOTDeOrden(p, {
+      idOrden, usuario: Number(req.session.usuario && req.session.usuario.codigo) || null,
+      motivo: `Suspendida desde la tableta: ${motivo}`
+    });
+  }
+  await registrarMovimientoSelladora(p, req, {
+    idOrden, subtipo: 'SUSPENDER', motivo,
+    resumen: (ids.length > 1 ? `Órdenes ${ids.join(', ')}. ` : '') +
+             (esperaBulto ? 'Se suspende al cerrar el bulto en curso' : 'Suspendida de una vez') +
+             `. Autorizó: ${textoFirma(firma)}`
+  });
+  console.log(`Orden ${idOrden} suspendida desde la tableta por ${req.session.usuario.codigo} (${motivo}) -- ${textoFirma(firma)}`);
+  return { esperaBulto };
+}
+
+// Bulto vacio para que la maquina tenga donde pesar al reanudar. No hace nada si la ejecucion ya
+// tiene uno abierto. Sin materia prima (el rollo ya se registro al iniciar) y con la OT que ya tiene
+// la orden. Devuelve el id del bulto nuevo o null.
+async function crearBultoReanudacion(tx, req, { idOrden, idEjecucion, estado }) {
+  const dt = await tx.request().input('idEjecucion', idEjecucion).input('idOrden', idOrden).query(`
+    SELECT (SELECT COUNT(*) FROM SEL_Bultos WHERE id_ejecucion = @idEjecucion
+            AND estado IN ('Activo', 'Temporal', 'EnEspera')) AS Abiertos,
+           (SELECT BolsasxGolpe FROM SEL_EjecucionOrden WHERE IdEjecucion = @idEjecucion) AS BolsasxGolpe,
+           (SELECT TOP 1 pp.OrdenProduccion FROM SEL_Bultos b
+            INNER JOIN PRDProduccion pp ON pp.Detalle = b.serialPadre
+            INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+            WHERE ej.IdOrden = @idOrden AND pp.OrdenProduccion IS NOT NULL ORDER BY b.id DESC) AS OT
+  `);
+  const f = dt.recordset[0];
+  if (f.Abiertos > 0) return null;
+  await crearBultoInicial(tx, {
+    idOrden, idEjecucion, codOperario: req.session.usuario.codigoOperarioPRD,
+    serial: null, cantidad: null, lote: null, bolsasXGolpe: f.BolsasxGolpe != null ? f.BolsasxGolpe : 0,
+    generadoPor: req.session.usuario.generadoPor, sinMateriaPrima: true, estadoInicial: estado,
+    ordenProduccion: f.OT || null
+  });
+  const dtNuevo = await tx.request().input('idEjecucion', idEjecucion)
+    .query(`SELECT TOP 1 id FROM SEL_Bultos WHERE id_ejecucion = @idEjecucion ORDER BY id DESC`);
+  return dtNuevo.recordset[0] ? dtNuevo.recordset[0].id : null;
+}
+
+// Deshace un Finalizar (ver finalizarOrden en ejecucion-selladora.js) mientras el digitador no haya
+// cerrado la orden: todas las referencias del grupo que se finalizaron juntas vuelven a 'Activa' sobre
+// su MISMA ejecucion (sin HoraFinReal ni OperarioFinal, a nombre de quien reanuda), la OT y sus
+// controles vuelven a 'Activa'/'EnProceso' (reabrirOTDeOrden) y se reserva un bulto vacio: 'Temporal'
+// en la referencia que se reanudo, 'EnEspera' en las hermanas del grupo -- igual que al Iniciar. Lo
+// ya producido y lo que el digitador ya haya validado bulto a bulto no se toca. Sin protocolo.
+async function reabrirOrdenFinalizada(p, req, idOrden, firmas) {
+  const miOperario = req.session.usuario.codigoOperarioPRD;
+  if (!miOperario || miOperario <= 0) throw new Error('Su usuario no tiene un operario de planta asignado.');
+  const ids = await idsConEstado(p, await idsGrupoSelladoDeOrden(p, idOrden), 'PendienteValidacion');
+  if (!ids.includes(idOrden)) throw new Error('Esta orden no está finalizada (pendiente de validación).');
+
+  const dtOtra = await p.request().input('idOrden', idOrden).query(`
+    SELECT TOP 1 ord2.IdOrden, ISNULL(ord2.NumeroPedido, '') AS NumeroPedido, ord2.Linea, ie.Referencia, ie.Nombre
+    FROM SEL_OrdenProduccion ord1
+    INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Maquina = ord1.Maquina AND ord2.IdOrden <> ord1.IdOrden AND ord2.Estado = 'Activa'
+    LEFT JOIN INVElementos ie ON ie.Codigo = ord2.Elemento
+    WHERE ord1.IdOrden = @idOrden
+  `);
+  if (dtOtra.recordset.length > 0) {
+    throw new Error(`La máquina ya está trabajando la orden ${describirOrden(dtOtra.recordset[0])}. Finalícela antes de reanudar esta.`);
+  }
+  const aMedias = await ordenConProtocoloAMedias(p, idOrden);
+  if (aMedias) throw new Error(`La orden ${describirOrden(aMedias)} ya empezó el protocolo de arranque. Continúelo o cancélelo antes de reanudar esta.`);
+
+  // Turno y bitacora ANTES de la transaccion: crearBultoInicial abre la bitacora con otra conexion,
+  // y si tuviera que cerrar la de otro turno (cerrarBitacora lee SEL_EjecucionOrden/SEL_Bultos/
+  // PRDProduccion) se quedaria esperando las filas que esta transaccion tiene bloqueadas. Abierta
+  // aqui, adentro solo se reutiliza.
+  const maquina = (await p.request().input('idOrden', idOrden)
+    .query(`SELECT Maquina FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`)).recordset[0].Maquina;
+  await activarTurnoDeSesion(p, req, maquina);
+  await abrirOReanudarBitacora(p, maquina, miOperario);
+
+  let tx = new sql.Transaction(p);
+  await tx.begin();
+  try {
+    const ejecuciones = [];
+    for (const id of ids) {
+      const dt = await tx.request().input('idOrden', id).query(`
+        SELECT TOP 1 ej.IdEjecucion, ord.Estado
+        FROM SEL_OrdenProduccion ord WITH (UPDLOCK)
+        INNER JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
+        WHERE ord.IdOrden = @idOrden ORDER BY ej.IdEjecucion DESC
+      `);
+      const e = dt.recordset[0];
+      if (!e || e.Estado !== 'PendienteValidacion') throw new Error('La orden ya no está pendiente de validación.');
+      await tx.request().input('idEjecucion', e.IdEjecucion).input('operario', miOperario).query(`
+        UPDATE SEL_EjecucionOrden SET HoraFinReal = NULL, OperarioFinal = NULL, Operario = @operario, Estado = 'Activa'
+        WHERE IdEjecucion = @idEjecucion
+      `);
+      await tx.request().input('idOrden', id).query(`UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden = @idOrden`);
+      ejecuciones.push({ idOrden: id, idEjecucion: e.IdEjecucion });
+    }
+
+    const ot = await reabrirOTDeOrden(tx, { idOrden });
+    const bultos = [];
+    for (const e of ejecuciones) {
+      const nuevo = await crearBultoReanudacion(tx, req, {
+        idOrden: e.idOrden, idEjecucion: e.idEjecucion, estado: e.idOrden === idOrden ? 'Temporal' : 'EnEspera'
+      });
+      if (nuevo) bultos.push(nuevo);
+    }
+    await tx.commit();
+    tx = null;
+
+    await registrarMovimientoSelladora(p, req, {
+      idOrden, subtipo: 'REANUDAR_FINALIZADA', motivo: 'Pedido finalizado por accidente, reanudado desde la tableta',
+      resumen: `Órdenes ${ids.join(', ')} de PendienteValidacion a Activa` + (ot ? `, OT ${ot}` : '') +
+               (bultos.length ? `, bulto(s) nuevo(s) ${bultos.join(', ')}` : '') + `, operario ${miOperario}. ${firmas}`
+    });
+    console.log(`Orden finalizada ${idOrden} reanudada por ${req.session.usuario.codigo} -- ${firmas}`);
+    return { maquina };
+  } catch (err) {
+    try { if (tx) await tx.rollback(); } catch (e) { /* ya abortada */ }
+    throw err;
+  }
+}
 
 const webPort = Number(process.env.WEB_PORT || 3000);
 const server = http.createServer(app);

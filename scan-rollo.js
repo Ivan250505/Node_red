@@ -122,7 +122,10 @@ async function consultarSerial(db, { idOrden, serial, esNuevoRollo }) {
 // máquina está llenando en este momento, se le pasa 'EnEspera' -- así el PLC (que resuelve el
 // bulto por `id_maquina` + estado IN ('Activo','Temporal'), sin mirar la referencia) nunca ve más
 // de un bulto de la misma máquina a la vez.
-async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial, cantidad, lote, bolsasXGolpe, generadoPor, sinMateriaPrima = false, estadoInicial = 'Activo' }) {
+// ordenProduccion (14/10/2026): OT ya conocida de la orden -- la usa la reanudacion de un pedido
+// finalizado por accidente (server.js, reabrirOrdenFinalizada). Sin ella, obtenerOCrearOrdenProduccion
+// busca la OT con la fecha de HOY, y reanudando otro dia crearia una OT nueva para el mismo proceso.
+async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial, cantidad, lote, bolsasXGolpe, generadoPor, sinMateriaPrima = false, estadoInicial = 'Activo', ordenProduccion = null }) {
   const datosOrden = await obtenerDatosOrden(tx, idOrden);
   if (!datosOrden) throw new Error('Orden no encontrada.');
   const { elemento: nElemento, maquina: nMaquina, numeroPedido: tNumeroPedido } = datosOrden;
@@ -239,7 +242,7 @@ async function crearBultoInicial(tx, { idOrden, idEjecucion, codOperario, serial
   if (nTurnoBulto <= 0) {
     throw new Error('No se encontró un turno activo configurado para esta máquina a esta hora en TURHorariosMaquinas.\nTurno es un campo obligatorio en PRDProduccion -- corrija la configuración de turnos antes de continuar.');
   }
-  const tOrdenProduccion = tOrdenProduccionAncla || await obtenerOCrearOrdenProduccion(tx, {
+  const tOrdenProduccion = ordenProduccion || tOrdenProduccionAncla || await obtenerOCrearOrdenProduccion(tx, {
     elemento: nElementoParaOP, fecha: fFechaSolo, lineaAncla: nLineaAnclaParaOP, lote: tLote,
     codigoDestino: nCodDestinoBulto, maquina: nMaquina, turno: nTurnoBulto, generadoPor, idEjecucion
   });
@@ -675,4 +678,4 @@ async function alternarReferenciaGrupo(pool, { idOrdenDestino, codOperario, bols
   }
 }
 
-module.exports = { obtenerDatosOrden, consultarSerial, confirmarRollo, alternarReferenciaGrupo, materializarInicioOrden };
+module.exports = { obtenerDatosOrden, consultarSerial, confirmarRollo, alternarReferenciaGrupo, materializarInicioOrden, crearBultoInicial };

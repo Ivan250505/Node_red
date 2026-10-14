@@ -364,3 +364,53 @@ con producción las rutas devuelven 404. Cada acción deja rastro `SIMULADOR_PLC
   otro Temporal — limpiar con "Eliminar bulto vacío" de la tableta.
 - El flag viejo `SIMULADOR_PLC_VISIBLE` se retiró: con BD de producción el simulador ya
   no aparece aunque el `.env` lo tenga.
+
+## 15. Suspendidas en la cola, avance mínimo y reanudar con firmas (14/10/2026)
+
+**Cola de la máquina.** Ahora distingue la orden nueva de la suspendida, y muestra las suspendidas (antes no salían):
+
+| Estado | Etiqueta | Botón |
+|---|---|---|
+| `Pendiente` sin bultos (orden nueva) | Por iniciar | ▶ Iniciar (protocolo de arranque) |
+| `Pendiente` con bultos (Programación la devolvió a la cola) | Suspendida · por retomar | ▶ Retomar (sin protocolo, ver `/reanudar-suspendida`) |
+| `Suspendida` (antes no salía en la cola) | Suspendida | ⏯ Reanudar (dos firmas) |
+| `PendienteValidacion` | Pend. validación | ⏯ Reanudar (dos firmas) |
+
+**Finalizar con menos del 95 %.** Si alguna referencia que se va a finalizar (todo el grupo
+Activo, en sellado en paralelo) tiene meta y va por debajo de `PORCENTAJE_MINIMO_FINALIZAR` (95),
+la tableta avisa que el avance no ha completado el 100 % y pide la firma del **Líder de Sellado o
+del Jefe de Planta**. `POST /finalizar` aplica la misma regla en el servidor. Entre 95 % y 100 %
+no se pide nada. Una orden sin meta configurada no cuenta.
+
+**Reanudar un pedido suspendido o finalizado por accidente.** Firman los **dos**: primero el
+Líder de Sellado y luego el Jefe de Planta (`CARGOS_LIDER_SELLADO`, `CARGOS_JEFE_PLANTA` en
+`auth.js`; el Director de Calidad no firma esto). Después, `POST /reanudar-con-firmas`:
+
+- `Suspendida`: lo mismo que "Retomar" (`retomarOrdenSuspendida`), sin esperar a Programación.
+- `PendienteValidacion`: `reabrirOrdenFinalizada` devuelve a `Activa` la orden (y su grupo), su
+  ejecución (sin `HoraFinReal`/`OperarioFinal`), la OT y sus controles (`reabrirOTDeOrden`), y
+  reserva un bulto vacío (`Temporal`; `EnEspera` en las hermanas). Lo ya producido y validado
+  no se toca. **No se puede** si el digitador ya cerró la OT o algún control (`Cerrado`): eso
+  se corrige desde el escritorio.
+- La máquina debe estar libre (sin otra orden `Activa` ni un arranque a medias).
+
+**Cómo viajan las firmas.** Cada firma se valida sola (`POST /firma`, usuario + clave + cargo) y
+queda en la sesión del operario 10 minutos (`FIRMA_VIGENCIA_MS`), atada a la orden y al motivo.
+La acción la exige y la consume. No hay tabla nueva: quién firmó queda en `SISMovimientos`
+(`FINALIZAR_BAJO_META`, `REANUDAR_SUSPENDIDA`, `REANUDAR_FINALIZADA`).
+
+**Suspender desde la tableta.** Botón "⏹ Suspender" en las órdenes Activas: en la cola, en Información
+y en la página del grupo. Pide un **motivo obligatorio** y la firma del **Líder de Sellado o del Jefe de
+Planta** (rol `liderOJefe`, propósito `suspender`). `POST /suspender` tiene los mismos dos caminos que la
+suspensión pedida por Programación:
+
+- **Terminar el bulto y suspender:** la ejecución pasa a `SuspensionEnCurso` y
+  `trg_SEL_Bultos_SuspenderTemporal` la suspende (con la OT) cuando el PLC cierra el bulto. La cola
+  muestra "Se suspende al cerrar el bulto en curso". Si el bulto en curso no tiene paquetes, se
+  suspende de una vez.
+- **Suspender ya:** los bultos `Activo` **y** `Temporal` pasan a `Suspendido`, y la orden, la ejecución y
+  la OT a `Suspendida`.
+- En sellado en paralelo se suspende todo el grupo Activo (como Finalizar), y "Reanudar" reanuda el
+  grupo entero. La cola muestra el grupo suspendido en una sola tarjeta.
+- No se puede suspender con una pausa abierta. Queda en `SISMovimientos` como `SUSPENDER`, con el motivo
+  y quién autorizó.
