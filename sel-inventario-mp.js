@@ -2270,20 +2270,44 @@ async function abrirOReanudarBitacora(p, maquinaCodigo, operarioCodigo) {
 // de las tres juntas. Comparar C contra la salida de una sola referencia dejaria pasar ajustes
 // imposibles (devolver kilos que en realidad ya se convirtieron en bultos de una hermana).
 async function obtenerSalidaRealSellado(db, idsOrdenes) {
-  if (!idsOrdenes || idsOrdenes.length === 0) return 0;
+  const s = await obtenerSalidaDetalladaSellado(db, idsOrdenes);
+  return s.bultos + s.residuos;
+}
+
+// La misma salida, partida en bultos y residuos (16/10/2026, aviso de "salida supera la materia
+// prima" al Finalizar). Los residuos son las columnas espejo del bulto padre que escribe
+// 03_residuo_insertar.sql cuando el operario los registra en la tableta (las filas hijo no se
+// suman: no tienen bulto, asi que no entran por el JOIN y no se cuentan dos veces).
+// Un bulto que todavia no esta Cerrado tiene su PRDProduccion reservada en Cantidad = 0 hasta que
+// trg_SEL_Bultos_CierreBulto le escribe SUM(PesoPaqueGr); para el es esa misma suma desde ya. Asi el
+// Finalizar ve los 'EnEspera' de un grupo (que finalizarOrden cierra recien dentro de su
+// transaccion) y el bulto en curso. Con todo cerrado (ajuste de consumo) el resultado no cambia.
+async function obtenerSalidaDetalladaSellado(db, idsOrdenes) {
+  if (!idsOrdenes || idsOrdenes.length === 0) return { bultos: 0, residuos: 0 };
   const dt = await db.request().query(`
-    SELECT ISNULL(SUM(
-      (ISNULL(p.Cantidad, 0) - ISNULL(p.PesoCono, 0))
-      + ISNULL(p.Torta, 0) + ISNULL(p.NuevoRetal, 0)
-      + ISNULL(p.ResiduoTroquelado, 0) + ISNULL(p.ResiduoRefilado, 0)
-      + ISNULL(p.ResiduoNoConforme, 0)
-    ), 0) AS Salida
+    SELECT
+      ISNULL(SUM(
+        CASE WHEN b.estado = 'Cerrado' THEN ISNULL(p.Cantidad, 0) ELSE ISNULL(pe.Peso, 0) END
+        - ISNULL(p.PesoCono, 0)
+      ), 0) AS Bultos,
+      ISNULL(SUM(
+        ISNULL(p.Torta, 0) + ISNULL(p.NuevoRetal, 0)
+        + ISNULL(p.ResiduoTroquelado, 0) + ISNULL(p.ResiduoRefilado, 0)
+        + ISNULL(p.ResiduoNoConforme, 0)
+      ), 0) AS Residuos
     FROM PRDProduccion p
     INNER JOIN SEL_Bultos b ON b.serialPadre = p.Detalle
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+    OUTER APPLY (
+      SELECT SUM(x.PesoPaqueGr) AS Peso FROM SEL_PesajeElemento x
+      WHERE x.id_bulto = b.id AND b.estado <> 'Cerrado'
+    ) pe
     WHERE ej.IdOrden IN (${idsOrdenes.join(',')})
   `);
-  return Number(dt.recordset[0].Salida) || 0;
+  return {
+    bultos: Number(dt.recordset[0].Bultos) || 0,
+    residuos: Number(dt.recordset[0].Residuos) || 0
+  };
 }
 
 // Todos los miembros del grupo de sellado (incluida la orden pedida), de este y de otros
@@ -2602,6 +2626,26 @@ async function obtenerEstadoAjusteConsumo(pool, idOrden) {
   };
 }
 
+// Balance materia prima vs salida de una orden (o de su grupo de sellado), para el aviso al Finalizar
+// de la tableta (16/10/2026). Mismo calculo que el tope de Produccion.vb al guardar parciales:
+// (Cantidad - cono) + residuos contra la MP del historial. Entrada: la MP escaneada en el ancla,
+// leida en el momento (PRDExtrusionControl.MaterialTotalKg se calcula una sola vez al crear el
+// control y no ve los rollos de +Rollo). Devuelve null si no hay como calcularla (orden sin bultos
+// todavia): el que llama no avisa nada.
+async function obtenerBalanceMPSellado(db, idOrden) {
+  let listado;
+  try {
+    listado = await listarRollosOrden(db, idOrden);
+  } catch (err) {
+    return null;
+  }
+  const entrada = listado.rollos.reduce((acc, r) => acc + (Number(r.CantidadActual) || 0), 0);
+  const idsGrupo = await obtenerMiembrosGrupoSellado(db, listado.ancla.idOrdenAncla);
+  const { bultos, residuos } = await obtenerSalidaDetalladaSellado(db, idsGrupo);
+  const salida = bultos + residuos;
+  return { entrada, bultos, residuos, salida, diferencia: salida - entrada };
+}
+
 // El ajuste completo, en UNA sola transaccion (seccion 5 del documento).
 //
 // Que se toca y en que orden:
@@ -2873,5 +2917,6 @@ module.exports = {
   listarRollosOrden,
   recalcularControlSellado,
   obtenerEstadoAjusteConsumo,
+  obtenerBalanceMPSellado,
   ajustarConsumoRollo
 };

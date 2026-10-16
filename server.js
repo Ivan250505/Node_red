@@ -20,7 +20,8 @@ const {
   infoOTParaCorreccion, turnosParaCorregirOT, corregirTurnoOT,
   abrirOReanudarBitacora, suspenderOTDeOrden, reanudarOTDeOrden, reabrirOTDeOrden, horaServidorBD,
   candidatosTurnoMaquina, activarTurnoMaquina, turnosParaCorregir, corregirTurnoMaquina,
-  obtenerAnclaGrupoSellado, obtenerEstadoAjusteConsumo, ajustarConsumoRollo, obtenerLoteRollo
+  obtenerAnclaGrupoSellado, obtenerEstadoAjusteConsumo, ajustarConsumoRollo, obtenerLoteRollo,
+  obtenerBalanceMPSellado
 } = require('./sel-inventario-mp');
 
 const dbConfig = {
@@ -1359,7 +1360,7 @@ function scriptPesoEnVivo() {
             // peso null = el servidor perdio la conexion con Node-RED (ver conectarNodeRed).
             if (json && json.peso === null) window.ultimoPesoBascula = null;
             if (json && typeof json.peso === 'number') {
-              texto = json.peso.toFixed(2);
+              texto = json.peso.toFixed(3);
               // Ultimo peso recibido, en window para que lo pueda CAPTURAR la verificacion de
               // bascula del protocolo (14/09/2026). Hasta ahora este numero solo se pintaba en el
               // HTML y no quedaba en ninguna variable, asi que no habia forma de leerlo desde otro
@@ -1437,7 +1438,7 @@ function scriptResumenBultoActivo(idOrden, maquinaCodigo) {
           const datos = await resp.json();
           if (!datos.ok) return;
           elPaquetes.textContent = datos.paquetes;
-          elPeso.textContent = datos.pesoTotalKg.toFixed(2);
+          elPeso.textContent = datos.pesoTotalKg.toFixed(3);
           // Se guarda en window (no en una var local del IIFE) para que confirmarPesoYEnviar, que
           // vive en otro <script> (scriptComandos), pueda leer cual es el bulto Activo ahora mismo
           // al marcar un residuo/salida no conforme (01/09/2026, a pedido del usuario).
@@ -1485,6 +1486,259 @@ function scriptActualizarCola(maquinaCodigo) {
   `;
 }
 
+// Pizarra / muro de observaciones de la maquina (16/10/2026, a pedido del usuario). Notas tipo
+// post-it que se quedan en la pantalla de la selladora para todos los turnos, con color por tipo y
+// la opcion de fijarlas arriba. No se borran desde la tableta. Tabla: SEL_MuroMaquina, script
+// sql/pendientes/20261016_agregar_muro_maquina.sql.
+const TIPOS_MURO = {
+  Nota: { label: 'Nota', fondo: '#fff8c5', borde: '#b89a00' },
+  Aviso: { label: 'Aviso', fondo: '#ffe0e0', borde: '#c0392b' },
+  Mantenimiento: { label: 'Mantenimiento', fondo: '#dceeff', borde: '#2f7fd1' },
+  Calidad: { label: 'Calidad', fondo: '#e3f6d8', borde: '#4a9c2e' }
+};
+const SCRIPT_MURO = 'sql/pendientes/20261016_agregar_muro_maquina.sql';
+
+// Todas las fijadas y las 40 mas recientes sin fijar. null si la tabla todavia no existe.
+async function obtenerMuroMaquina(p, codigo) {
+  try {
+    const r = await p.request().input('maquina', codigo).query(`
+      SELECT Id, Texto, Tipo, Fijada, NombreUsuario, FechaHora FROM SEL_MuroMaquina
+      WHERE Maquina = @maquina AND Fijada = 1
+      UNION ALL
+      SELECT * FROM (
+        SELECT TOP 40 Id, Texto, Tipo, Fijada, NombreUsuario, FechaHora FROM SEL_MuroMaquina
+        WHERE Maquina = @maquina AND Fijada = 0
+        ORDER BY FechaHora DESC
+      ) recientes
+      ORDER BY Fijada DESC, FechaHora DESC
+    `);
+    return r.recordset;
+  } catch (err) {
+    if (/Invalid object name|SEL_MuroMaquina/i.test(err.message || '')) return null;
+    throw err;
+  }
+}
+
+function renderMuroNotas(notas) {
+  const esc = t => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  if (notas === null) return `<div class="vacio">Falta correr el script ${SCRIPT_MURO} contra esta base.</div>`;
+  if (notas.length === 0) return `<div class="vacio">La pizarra está vacía. Escriba la primera observación.</div>`;
+  return `<div class="muro-grid">${notas.map(n => {
+    const tipo = TIPOS_MURO[n.Tipo] || TIPOS_MURO.Nota;
+    return `
+      <div class="muro-nota${n.Fijada ? ' muro-fijada' : ''}" style="background:${tipo.fondo};border-top-color:${tipo.borde};">
+        <div class="muro-nota-top">
+          <span class="muro-tipo" style="color:${tipo.borde};">${n.Fijada ? '📌 ' : ''}${tipo.label}</span>
+          <button type="button" class="muro-btn-fijar" onclick="fijarNotaMuro(${n.Id}, ${n.Fijada ? 'false' : 'true'})">${n.Fijada ? 'Desfijar' : 'Fijar arriba'}</button>
+        </div>
+        <div class="muro-texto">${esc(n.Texto)}</div>
+        <div class="muro-pie">${esc(n.NombreUsuario || '')} · ${formatearFechaHora(n.FechaHora)}</div>
+      </div>`;
+  }).join('')}</div>`;
+}
+
+function estilosMuro() {
+  return `
+    /* Boton de la pizarra en la cola de pedidos (16/10/2026): columna del medio del encabezado, entre
+       el titulo de la maquina y la campana/Cerrar sesion. */
+    .btn-pizarra {
+      display: inline-block; background: #fff8c5; color: #6b5a00; font-size: 16px; font-weight: 700;
+      text-decoration: none; padding: 12px 26px; border-radius: 10px; justify-self: center;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+    }
+    .btn-pizarra:active { transform: translateY(1px); }
+    .muro { margin-top: 6px; }
+    .muro h2 { font-size: 16px; margin: 0 0 10px; }
+    .muro-form { background: white; border-radius: 14px; padding: 14px 16px; margin-bottom: 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+    .muro-form textarea { width: 100%; min-height: 70px; font-size: 16px; padding: 10px; border-radius: 10px; border: 1px solid #d0d7de; font-family: inherit; resize: vertical; }
+    .muro-form-fila { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
+    .muro-tipos { display: flex; gap: 6px; flex-wrap: wrap; flex: 1 1 auto; }
+    .muro-tipos label { display: inline-flex; align-items: center; margin: 0; padding: 8px 14px; border-radius: 999px; border: 2px solid transparent; cursor: pointer; font-size: 14px; }
+    .muro-tipos input { display: none; }
+    .muro-tipos label.elegido { border-color: currentColor; font-weight: 700; }
+    .muro-form .muro-publicar { width: auto; background: var(--verde-marca); color: white; padding: 10px 26px; }
+    .muro-form .muro-publicar:disabled { opacity: 0.6; }
+    .muro-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+    .muro-nota { border-radius: 10px; border-top: 6px solid; padding: 12px 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.12); display: flex; flex-direction: column; gap: 8px; }
+    .muro-fijada { box-shadow: 0 3px 12px rgba(0,0,0,0.25); }
+    .muro-nota-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .muro-tipo { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }
+    .muro-nota .muro-btn-fijar { width: auto; font-size: 12px; padding: 6px 10px; box-shadow: none; background: rgba(255,255,255,0.75); color: var(--texto); border-radius: 8px; }
+    .muro-texto { font-size: 15px; white-space: pre-wrap; word-break: break-word; color: var(--texto); }
+    .muro-pie { font-size: 12px; color: var(--texto-suave); margin-top: auto; }
+  `;
+}
+
+function seccionMuro(notas) {
+  const tipos = Object.entries(TIPOS_MURO).map(([clave, t], i) =>
+    `<label class="${i === 0 ? 'elegido' : ''}" style="color:${t.borde};background:${t.fondo};"><input type="radio" name="muroTipo" value="${clave}"${i === 0 ? ' checked' : ''}>${t.label}</label>`
+  ).join('');
+  return `
+    <section class="muro">
+      <h2>📝 Pizarra de la máquina</h2>
+      <div class="muro-form">
+        <textarea id="muro-texto" maxlength="500" placeholder="Escriba una observación para todos los turnos…"></textarea>
+        <div class="muro-form-fila">
+          <div class="muro-tipos">${tipos}</div>
+          <button type="button" class="muro-publicar" onclick="publicarNotaMuro(this)">Publicar</button>
+        </div>
+      </div>
+      <div id="muro-notas">${renderMuroNotas(notas)}</div>
+    </section>`;
+}
+
+function scriptMuroMaquina(maquinaCodigo) {
+  return `
+    (function() {
+      var codigo = ${jsString(maquinaCodigo)};
+      var contenedor = document.getElementById('muro-notas');
+      if (!contenedor) return;
+
+      function error(titulo, texto) {
+        Swal.fire({ icon: 'error', title: titulo, text: texto || '', confirmButtonColor: '#71bf44' });
+      }
+
+      // Resalta el tipo escogido (los radio van ocultos, se ve solo la pastilla de color).
+      document.querySelectorAll('input[name="muroTipo"]').forEach(function(r) {
+        r.addEventListener('change', function() {
+          document.querySelectorAll('.muro-tipos label').forEach(function(l) {
+            l.classList.toggle('elegido', l.querySelector('input').checked);
+          });
+        });
+      });
+
+      async function recargar() {
+        try {
+          var resp = await fetch('/selladora/' + encodeURIComponent(codigo) + '/muro-fragmento');
+          if (resp.ok) contenedor.innerHTML = await resp.text();
+        } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
+      }
+
+      window.publicarNotaMuro = async function(btn) {
+        var caja = document.getElementById('muro-texto');
+        var texto = (caja.value || '').trim();
+        if (!texto) { error('Escriba la observación'); return; }
+        var sel = document.querySelector('input[name="muroTipo"]:checked');
+        btn.disabled = true;
+        try {
+          var r = await fetch('/api/selladora/' + encodeURIComponent(codigo) + '/muro', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ texto: texto, tipo: sel ? sel.value : 'Nota' })
+          });
+          var d = await r.json();
+          if (!d.ok) { error('No se publicó la nota', d.error); return; }
+          caja.value = '';
+          await recargar();
+        } catch (e) {
+          error('Sin conexión', 'No se publicó la nota. Intente de nuevo.');
+        } finally {
+          btn.disabled = false;
+        }
+      };
+
+      window.fijarNotaMuro = async function(id, fijar) {
+        try {
+          var r = await fetch('/api/selladora/muro/' + id + '/fijar', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fijar: fijar })
+          });
+          var d = await r.json();
+          if (!d.ok) { error('No se pudo ' + (fijar ? 'fijar' : 'desfijar') + ' la nota', d.error); return; }
+          await recargar();
+        } catch (e) {
+          error('Sin conexión', 'Intente de nuevo.');
+        }
+      };
+
+      // Las notas que escriben desde otra tableta u otro turno aparecen solas. No se redibuja con
+      // una ventana abierta, mismo criterio que scriptActualizarCola.
+      setInterval(function() {
+        if (typeof Swal !== 'undefined' && Swal.isVisible()) return;
+        recargar();
+      }, 15000);
+    })();
+  `;
+}
+
+// Pagina propia de la pizarra (16/10/2026): se entra con el boton "Pizarra" de debajo del logo en
+// la cola de pedidos.
+function renderPizarra(usuario, maquinaNombre, maquinaCodigo, notas) {
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pizarra — ${maquinaNombre}</title>
+  <style>${estilosBase()}${estilosMuro()}</style>
+</head>
+<body>
+  <header>
+    <div class="header-top">
+      <div class="logo-wrap"><img class="logo" src="/logo-carlixplast.png" alt="Carlixplast"></div>
+    </div>
+    <div class="header-inner">
+      <div class="header-fila">
+        <div class="header-info">
+          <h1>📝 Pizarra · ${maquinaNombre}</h1>
+          <div class="sub">Observaciones para todos los turnos</div>
+          <a class="volver" href="/selladora/${encodeURIComponent(maquinaCodigo)}">‹ Cola de pedidos</a>
+        </div>
+        ${bloqueUsuarioHeader(usuario)}
+      </div>
+    </div>
+  </header>
+  <main>
+    ${seccionMuro(notas)}
+  </main>
+  <script src="/sweetalert2.min.js"></script>
+  <script>${scriptNotificaciones(maquinaCodigo)}</script>
+  <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPizarra(maquinaCodigo)}</script>
+  <script>${scriptMuroMaquina(maquinaCodigo)}</script>
+</body>
+</html>`;
+}
+
+// Aviso de "alguien escribio en la pizarra" (16/10/2026). Va en todas las paginas de una maquina,
+// igual que el de pedido nuevo, y solo anota en el panel de notificaciones lo que escriben OTROS
+// usuarios (el servidor filtra por SISUsuarios.Codigo). Guarda en localStorage, por base y por
+// maquina, el Id de la ultima nota vista: sin Id guardado se toma la foto en silencio, para no
+// soltar de golpe todo el muro la primera vez.
+function scriptAvisoPizarra(maquinaCodigo) {
+  if (!maquinaCodigo) return '';
+  return `
+    (function() {
+      var MAQUINA = ${jsString(maquinaCodigo)};
+      var CLAVE = 'carlixplast.pizarra.vista.' + ${jsString(CLAVE_BASE_DATOS)} + '.' + MAQUINA;
+      function leer() { try { var v = localStorage.getItem(CLAVE); return v == null ? null : Number(v) || 0; } catch (e) { return null; } }
+      function guardar(id) { try { localStorage.setItem(CLAVE, String(id)); } catch (e) {} }
+
+      async function revisar() {
+        var desde = leer();
+        try {
+          var r = await fetch('/api/selladora/' + encodeURIComponent(MAQUINA) + '/muro/novedades' + (desde != null ? '?desde=' + desde : ''));
+          if (!r.ok) return;
+          var d = await r.json();
+          if (!d.ok) return;
+          // Otra pestana pudo adelantarse mientras llegaba la respuesta: ella ya las anoto.
+          var actual = leer();
+          if (desde != null && actual != null && actual > desde) return;
+          if (desde != null && typeof registrarNotificacion === 'function') {
+            (d.nuevas || []).slice().reverse().forEach(function(n) {
+              registrarNotificacion('pizarra',
+                (n.nombreUsuario || 'Alguien') + ' escribió en la pizarra' + (n.tipo && n.tipo !== 'Nota' ? ' (' + n.tipo + ')' : ''),
+                n.texto.length > 140 ? n.texto.slice(0, 140) + '…' : n.texto, 'pizarra:' + n.id);
+            });
+          }
+          guardar(d.ultimoId || 0);
+        } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
+      }
+      revisar();
+      setInterval(revisar, 15000);
+    })();
+  `;
+}
+
 // Aviso de "Programación pidió suspender esta orden" (a pedido del usuario, 07/09/2026 -- reunión
 // Germán/Ángela/Carlos, alternativa A: la decisión de reprorizar es de Programación/escritorio, el
 // operario solo decide el detalle físico de terminar o no el bulto en curso).
@@ -1504,8 +1758,9 @@ function scriptActualizarCola(maquinaCodigo) {
 // Apartado de notificaciones (18/09/2026, a pedido del usuario: "al lado del nombre de usuario
 // quiero un boton donde pueda acceder a un apartado de notificaciones").
 //
-// QUE GUARDA: los avisos que la tableta ya mostraba y se perdian al cerrarse -- pedido nuevo en la
-// cola, suspension pedida por Programacion, chequeo de calidad y protocolo de arranque a medias.
+// QUE GUARDA: desde el 16/10/2026 (a pedido del usuario) solo dos cosas -- pedido nuevo en la cola
+// y lo que otros usuarios escriben en la pizarra de la maquina (scriptAvisoPizarra). Antes tambien
+// anotaba la suspension pedida por Programacion, el chequeo de calidad y el protocolo a medias.
 // El operario que cerro sin querer el aviso, o que no estaba mirando la tableta, puede volver a
 // leerlo. Los avisos siguen saliendo igual que siempre: esto es el historial, no los reemplaza.
 //
@@ -1548,9 +1803,10 @@ function scriptNotificaciones(maquinaCodigo) {
       }
     } catch (e) {}
 
-    var NOTIF_ICONOS = {
-      pedido: '📦', suspension: '⏸', calidad: '✅', calidad_alerta: '⚠️', protocolo: '⚙️'
-    };
+    // 16/10/2026 (a pedido del usuario): las unicas notificaciones son los pedidos nuevos y lo que
+    // otros usuarios escriben en la pizarra de la maquina. Lo anotado antes de otros tipos
+    // (suspension, calidad, protocolo) se descarta al leer.
+    var NOTIF_ICONOS = { pedido: '📦', pizarra: '📝' };
 
     function notifEscapar(texto) {
       return String(texto == null ? '' : texto)
@@ -1558,7 +1814,10 @@ function scriptNotificaciones(maquinaCodigo) {
     }
 
     function leerNotificaciones() {
-      try { var v = JSON.parse(localStorage.getItem(NOTIF_CLAVE)); return Array.isArray(v) ? v : []; }
+      try {
+        var v = JSON.parse(localStorage.getItem(NOTIF_CLAVE));
+        return Array.isArray(v) ? v.filter(function(n) { return n && NOTIF_ICONOS[n.tipo]; }) : [];
+      }
       catch (e) { return []; }
     }
 
@@ -1574,6 +1833,7 @@ function scriptNotificaciones(maquinaCodigo) {
     // dentro de la ultima media hora no se anota otra vez; si no, el panel se llenaria del mismo
     // renglon repetido y el contador no pararia de subir.
     window.registrarNotificacion = function(tipo, titulo, detalle, clave) {
+      if (!NOTIF_ICONOS[tipo]) return;
       try {
         var lista = leerNotificaciones();
         if (clave) {
@@ -1628,7 +1888,7 @@ function scriptNotificaciones(maquinaCodigo) {
       }
       cuerpo.innerHTML = lista.map(function(n) {
         return '<div class="notif-item' + (n.leida ? '' : ' no-leida') + '">' +
-                 '<div class="notif-icono">' + (NOTIF_ICONOS[n.tipo] || '🔔') + '</div>' +
+                 '<div class="notif-icono">' + NOTIF_ICONOS[n.tipo] + '</div>' +
                  '<div class="notif-cuerpo">' +
                    '<div class="notif-titulo">' + notifEscapar(n.titulo) + '</div>' +
                    (n.detalle ? '<div class="notif-detalle">' + notifEscapar(n.detalle) + '</div>' : '') +
@@ -1784,13 +2044,6 @@ function scriptAvisoSuspension(maquinaCodigo) {
         if (Swal.isVisible()) { setTimeout(function() { revisar(); }, 5000); return; }
 
         idPreguntado = datos.idOrden;
-        // Historial de notificaciones (18/09/2026). Con clave: el sondeo corre cada 5s y la
-        // pregunta puede volver a salir al recargar la tableta -- sin ella se anotaria en bucle.
-        if (typeof registrarNotificacion === 'function') {
-          registrarNotificacion('suspension',
-            'Programación pidió suspender el pedido ' + (datos.numeroPedido || '—'),
-            datos.elemento || '', 'suspension:' + datos.idOrden);
-        }
         pitar();
         if (navigator.vibrate) { try { navigator.vibrate([200, 100, 200, 100, 200]); } catch (e) {} }
         Swal.fire({
@@ -2868,20 +3121,6 @@ function abrirCalidad() {
     }
 
     function guardarCalidad(respuestas) {
-      // Historial de notificaciones (18/09/2026): se anota el RESULTADO, que es lo que despues se
-      // quiere volver a mirar. La ventana del chequeo es bloqueante, no se puede perder de vista;
-      // lo que se pierde es en que quedo, sobre todo si salio algo no conforme.
-      if (typeof registrarNotificacion === 'function') {
-        var noConformes = Object.keys(respuestas).filter(function(k) {
-          return respuestas[k] === 'no_conforme';
-        }).length;
-        registrarNotificacion(
-          noConformes > 0 ? 'calidad_alerta' : 'calidad',
-          noConformes > 0
-            ? 'Chequeo de calidad con ' + noConformes + ' no conforme(s)'
-            : 'Chequeo de calidad conforme',
-          window.idBultoActivo ? 'Bulto ' + window.idBultoActivo : '');
-      }
       // calidadEnPantalla se libera cuando el POST termina, no cuando se cierra la ventana: si se
       // liberara antes, el sondeo de 5s podria alcanzar al guardado a medio camino (el servidor
       // todavia no ha escrito el chequeo, /calidad-pendiente sigue diciendo que si) y volveria a
@@ -3631,7 +3870,8 @@ function scriptConfirmarFinalizar() {
       }
 
       // 14/10/2026: primero el avance (menos del 95% pide la firma del Lider o del Jefe de Planta),
-      // despues la firma del turno de siempre.
+      // despues la firma del turno de siempre. 16/10/2026: antes de las firmas, el aviso de salida
+      // por encima de la materia prima escaneada (revisarAvanceAntesDeFinalizar lo muestra primero).
       revisarAvanceAntesDeFinalizar(idOrdenFin).then(function(sigue) {
         if (!sigue) return;
         if (typeof exigirAutorizacion !== 'function') {
@@ -3705,26 +3945,69 @@ function scriptConfirmarFinalizar() {
 
     // Resuelve true si se puede seguir con el Finalizar: avance >= 95% (o sin meta), o ya firmado.
     // Si la consulta falla se deja seguir -- el servidor tiene la misma regla y rechaza el POST.
+    // Antes del avance, el aviso de salida contra materia prima (avisarExcesoMP).
     function revisarAvanceAntesDeFinalizar(idOrden) {
       return fetch('/api/selladora/orden/' + idOrden + '/finalizar/requisitos')
         .then(function(r) { return r.json(); })
         .then(function(datos) {
-          if (!datos.ok || !datos.bajas || datos.bajas.length === 0 || datos.firmado) return true;
-          var lista = datos.bajas.map(function(b) {
-            return '<li>' + escaparFirma(b.descripcion) + ': <b>' +
-                   b.porcentaje.toLocaleString('es-CO', { maximumFractionDigits: 1 }) + '%</b>' +
-                   ' <span style="color:#64748b;">(' + escaparFirma(b.producido) + ' de ' + escaparFirma(b.programado) + ')</span></li>';
-          }).join('');
-          var aviso = '<div style="background:#fdecea;border-left:5px solid #c0392b;padding:10px 12px;border-radius:8px;margin-bottom:14px;">' +
-                        'El porcentaje de avance <b>no ha completado el 100%</b>:' +
-                        '<ul style="margin:6px 0 0 18px;padding:0;">' + lista + '</ul>' +
-                        '<div style="margin-top:8px;">Para finalizar con menos del ' + datos.minimo + '% se necesita la firma del ' +
-                        '<b>Líder de Sellado</b> o del <b>Jefe de Planta</b>.</div>' +
-                      '</div>';
-          return pedirFirmaCargo(idOrden, 'finalizar', 'liderOJefe', '⚠ Avance incompleto', aviso)
-            .then(function(firma) { return !!firma; });
+          if (!datos.ok) return true;
+          return avisarExcesoMP(datos.balance).then(function(sigue) {
+            if (!sigue) return false;
+            return revisarAvance(idOrden, datos);
+          });
         })
         .catch(function() { return true; });
+    }
+
+    // Salida (bultos + residuos registrados) por encima de la materia prima escaneada (16/10/2026).
+    // Es un AVISO, no un bloqueo: "Finalizar de todas formas" sigue; "Volver a escanear rollo"
+    // cierra sin finalizar para que el operario use + Rollo en la tarjeta. Resuelve true si sigue.
+    function avisarExcesoMP(b) {
+      if (!b || !b.excede) return Promise.resolve(true);
+      var kg = function(n) {
+        return Number(n).toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' kg';
+      };
+      var fila = function(etiqueta, valor, estilo) {
+        return '<tr><td style="padding:3px 10px 3px 0;color:#64748b;">' + etiqueta + '</td>' +
+               '<td style="padding:3px 0;text-align:right;' + (estilo || '') + '">' + valor + '</td></tr>';
+      };
+      return Swal.fire({
+        icon: 'warning',
+        title: 'La salida supera la materia prima escaneada',
+        html: '<table style="margin:0 auto 12px;font-size:15px;border-collapse:collapse;">' +
+                fila('Materia prima escaneada', '<b>' + kg(b.entrada) + '</b>') +
+                fila('Bultos', kg(b.bultos)) +
+                fila('Residuos registrados', kg(b.residuos)) +
+                fila('Salida total', '<b>' + kg(b.salida) + '</b>') +
+                fila('Diferencia', '<b>' + kg(b.diferencia) + '</b>', 'color:#c0392b;') +
+              '</table>' +
+              '<div style="font-size:15px;">¿Falta escanear un rollo?</div>',
+        width: 520,
+        showDenyButton: true,
+        confirmButtonText: 'Volver a escanear rollo',
+        confirmButtonColor: '#71bf44',
+        denyButtonText: 'Finalizar de todas formas',
+        denyButtonColor: '#c0392b',
+        allowOutsideClick: false
+      }).then(function(r) { return r.isDenied; });
+    }
+
+    // El avance con los datos de /finalizar/requisitos ya consultados: true o la firma del cargo.
+    function revisarAvance(idOrden, datos) {
+      if (!datos.bajas || datos.bajas.length === 0 || datos.firmado) return true;
+      var lista = datos.bajas.map(function(b) {
+        return '<li>' + escaparFirma(b.descripcion) + ': <b>' +
+               b.porcentaje.toLocaleString('es-CO', { maximumFractionDigits: 1 }) + '%</b>' +
+               ' <span style="color:#64748b;">(' + escaparFirma(b.producido) + ' de ' + escaparFirma(b.programado) + ')</span></li>';
+      }).join('');
+      var aviso = '<div style="background:#fdecea;border-left:5px solid #c0392b;padding:10px 12px;border-radius:8px;margin-bottom:14px;">' +
+                    'El porcentaje de avance <b>no ha completado el 100%</b>:' +
+                    '<ul style="margin:6px 0 0 18px;padding:0;">' + lista + '</ul>' +
+                    '<div style="margin-top:8px;">Para finalizar con menos del ' + datos.minimo + '% se necesita la firma del ' +
+                    '<b>Líder de Sellado</b> o del <b>Jefe de Planta</b>.</div>' +
+                  '</div>';
+      return pedirFirmaCargo(idOrden, 'finalizar', 'liderOJefe', '⚠ Avance incompleto', aviso)
+        .then(function(firma) { return !!firma; });
     }
 
     // Suspender un pedido desde la tableta (14/10/2026): motivo obligatorio, terminar el bulto en
@@ -3940,6 +4223,28 @@ function scriptEscanearRollo(maquinaCodigo) {
              '<span style="color:#64748b;">' + etiqueta + '</span><strong>' + valor + '</strong></div>';
     }
 
+    // 16/10/2026 (a pedido del usuario): si el rollo es de otro pedido u otro cliente que la orden,
+    // se avisa y se sigue -- no es una restriccion, el operario solo debe enterarse (ver
+    // avisoPedidoClienteRollo en scan-rollo.js). Sin aviso, sigue directo. Cancelar (por si escaneo
+    // el rollo equivocado) llama a reescanear: vuelve a pedir el serial, sin registrar nada.
+    function avisoPedidoRollo(rollo, seguir, reescanear) {
+      var a = rollo && rollo.avisoPedido;
+      if (!a) { seguir(); return; }
+      var html = '<div style="text-align:left;">' +
+        (a.mismoPedido ? '' : '<div style="margin-bottom:10px;">Este rollo es del pedido <b>' + a.pedidoRollo + '</b>, pero la orden es del pedido <b>' + a.pedidoOrden + '</b>.</div>') +
+        (a.clienteDistinto ? '<div style="margin-bottom:10px;">Cliente del rollo: <b>' + a.clienteRollo + '</b><br>Cliente de la orden: <b>' + a.clienteOrden + '</b></div>' : '') +
+        '<div style="font-size:13px;color:#64748b;">Puede continuar si es correcto.</div></div>';
+      Swal.fire({
+        icon: 'warning',
+        title: a.clienteDistinto ? 'El rollo es de otro cliente' : 'El rollo es de otro pedido',
+        html: html,
+        showCancelButton: true,
+        confirmButtonText: 'Entendido, continuar', confirmButtonColor: '#71bf44',
+        cancelButtonText: 'Cancelar, escanear otro', cancelButtonColor: '#c0392b',
+        allowOutsideClick: false
+      }).then(function(r) { if (r.isConfirmed) seguir(); else reescanear(); });
+    }
+
     // El parametro ganchos (09/09/2026) es opcional y solo lo manda el protocolo de arranque -- ver
     // scriptProtocoloArranque. Sin el, esta pantalla se comporta exactamente como siempre:
     //   antesDeConfirmar(idOrden, rollo, seguir) : corre con el rollo ya consultado y ANTES de la
@@ -4000,14 +4305,16 @@ function scriptEscanearRollo(maquinaCodigo) {
       }).then(function(resultado) {
         if (!resultado.isConfirmed) return;
         var rollo = resultado.value;
-        if (ganchos && ganchos.antesDeConfirmar) {
-          ganchos.antesDeConfirmar(idOrden, rollo, function(decision) {
-            if (decision === 'confirmar') confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, rollo, ganchos);
-            else if (decision === 'reescanear') pedirSerialRollo(idOrden, esNuevoRollo, titulo, bolsasActual, ganchos);
-          });
-          return;
-        }
-        confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, rollo, ganchos);
+        avisoPedidoRollo(rollo, function() {
+          if (ganchos && ganchos.antesDeConfirmar) {
+            ganchos.antesDeConfirmar(idOrden, rollo, function(decision) {
+              if (decision === 'confirmar') confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, rollo, ganchos);
+              else if (decision === 'reescanear') pedirSerialRollo(idOrden, esNuevoRollo, titulo, bolsasActual, ganchos);
+            });
+            return;
+          }
+          confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, rollo, ganchos);
+        }, function() { pedirSerialRollo(idOrden, esNuevoRollo, titulo, bolsasActual, ganchos); });
       });
     }
 
@@ -4771,14 +5078,16 @@ function scriptProtocoloArranque(maquinaCodigo) {
       }).then(function(resultado) {
         if (!resultado.isConfirmed) { volver(); return; }
         var rollo = resultado.value;
-        chequeoRollo(idOrden, rollo, function(decision) {
-          if (decision === 'reescanear') { montarRolloAdicional(idOrden, volver); return; }
-          if (decision !== 'confirmar') { volver(); return; }
-          protocoloPost('/api/selladora/orden/' + idOrden + '/rollos-arranque', { serial: rollo.serial }).then(function(datos) {
-            if (datos.ok) { volver(); return; }
-            Swal.fire({ icon: 'error', title: 'No se pudo agregar el rollo', text: datos.error || '', confirmButtonColor: '#71bf44' }).then(volver);
-          });
-        }, false);
+        avisoPedidoRollo(rollo, function() {
+          chequeoRollo(idOrden, rollo, function(decision) {
+            if (decision === 'reescanear') { montarRolloAdicional(idOrden, volver); return; }
+            if (decision !== 'confirmar') { volver(); return; }
+            protocoloPost('/api/selladora/orden/' + idOrden + '/rollos-arranque', { serial: rollo.serial }).then(function(datos) {
+              if (datos.ok) { volver(); return; }
+              Swal.fire({ icon: 'error', title: 'No se pudo agregar el rollo', text: datos.error || '', confirmButtonColor: '#71bf44' }).then(volver);
+            });
+          }, false);
+        }, function() { montarRolloAdicional(idOrden, volver); });
       });
     }
 
@@ -5170,14 +5479,6 @@ function scriptProtocoloArranque(maquinaCodigo) {
         else pasoEscanearRolloProtocolo(idOrden, pendiente.pistas);
       };
       if (pedido) { continuar(); return; }
-      // Historial de notificaciones (18/09/2026). Con clave porque este aviso vuelve a salir en
-      // CADA carga de pagina mientras el protocolo siga a medias: sin ella, el panel se llenaria
-      // del mismo renglon cada vez que el operario cambia de pantalla.
-      if (typeof registrarNotificacion === 'function') {
-        registrarNotificacion('protocolo',
-          relevo ? 'Protocolo de relevo sin terminar' : 'Protocolo de arranque sin terminar',
-          textos[pendiente.paso] || '', 'protocolo:' + idOrden + ':' + pendiente.paso);
-      }
       // 06/10/2026: el arranque (no el relevo, que corre con la orden ya Activa) se puede cancelar.
       Swal.fire({
         icon: 'info',
@@ -5205,7 +5506,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Órdenes — ${maquinaNombre}</title>
-  <style>${estilosBase()}</style>
+  <style>${estilosBase()}${estilosMuro()}</style>
 </head>
 <body>
   <header>
@@ -5219,6 +5520,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
           <div class="sub">Programación máquina</div>
           <a class="volver" href="/">‹ Selladoras</a>
         </div>
+        <a class="btn-pizarra" href="/selladora/${encodeURIComponent(maquinaCodigo)}/pizarra">📝 Pizarra</a>
         ${bloqueUsuarioHeader(usuario)}
       </div>
     </div>
@@ -5243,6 +5545,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPizarra(maquinaCodigo)}</script>
   <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
@@ -5774,6 +6077,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPizarra(maquinaCodigo)}</script>
   <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
@@ -6256,7 +6560,7 @@ function scriptReimprimir(idOrden, maquinaCodigo) {
               var json = JSON.parse(evento.data);
               if (json && typeof json.peso === 'number') {
                 ultimoPeso = json.peso;
-                elPeso.textContent = json.peso.toFixed(2);
+                elPeso.textContent = json.peso.toFixed(3);
               }
             } catch (e) { /* mensaje no valido -- se ignora, se queda la ultima lectura buena */ }
           };
@@ -6270,7 +6574,7 @@ function scriptReimprimir(idOrden, maquinaCodigo) {
             return false;
           }
           if (!(ultimoPeso > 0)) {
-            Swal.showValidationMessage('La báscula marca ' + ultimoPeso.toFixed(2) + ' kg. Ponga el paquete en la báscula.');
+            Swal.showValidationMessage('La báscula marca ' + ultimoPeso.toFixed(3) + ' kg. Ponga el paquete en la báscula.');
             return false;
           }
           var pesoNuevo = ultimoPeso;
@@ -6622,6 +6926,7 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, usu
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPizarra(maquinaCodigo)}</script>
   <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptReimprimir(orden.IdOrden, maquinaCodigo)}</script>
   <script>${scriptTraslado(orden.IdOrden, maquinaCodigo)}</script>
@@ -7032,6 +7337,105 @@ app.get('/selladora/:codigo/cola-fragmento', requireLogin, async (req, res) => {
     res.type('html').send(renderColaOrdenes(ordenes, codigo, req.session.usuario.codigoOperarioPRD));
   } catch (err) {
     res.status(500).type('html').send('');
+  }
+});
+
+// Pizarra / muro de la maquina (16/10/2026) -- ver obtenerMuroMaquina. El fragmento lo pide el
+// sondeo de scriptMuroMaquina y lo vuelve a pedir despues de publicar o fijar.
+app.get('/selladora/:codigo/muro-fragmento', requireLogin, async (req, res) => {
+  try {
+    const p = await getPool();
+    res.type('html').send(renderMuroNotas(await obtenerMuroMaquina(p, req.params.codigo)));
+  } catch (err) {
+    res.status(500).type('html').send('');
+  }
+});
+
+app.get('/selladora/:codigo/pizarra', requireLogin, async (req, res) => {
+  const codigo = req.params.codigo;
+  try {
+    const p = await getPool();
+    const maquina = await p.request().input('codigo', codigo).query(`SELECT Nombre FROM PRDMaquinas WHERE Codigo = @codigo`);
+    const nombre = maquina.recordset[0] ? maquina.recordset[0].Nombre : 'Selladora';
+    res.send(renderPizarra(req.session.usuario.nombre, nombre, codigo, await obtenerMuroMaquina(p, codigo)));
+  } catch (err) {
+    res.status(500).send(renderPizarra(req.session.usuario.nombre, 'Selladora', codigo, []));
+  }
+});
+
+// Para scriptAvisoPizarra: el Id mas alto del muro de la maquina y, si viene ?desde, las notas
+// posteriores escritas por OTROS usuarios. Sin la tabla contesta ok:false y el aviso no hace nada.
+app.get('/api/selladora/:codigo/muro/novedades', requireLogin, async (req, res) => {
+  const conDesde = req.query.desde != null && req.query.desde !== '';
+  const desde = Number(req.query.desde) || 0;
+  try {
+    const p = await getPool();
+    const ult = await p.request().input('maquina', req.params.codigo)
+      .query(`SELECT ISNULL(MAX(Id), 0) AS UltimoId FROM SEL_MuroMaquina WHERE Maquina = @maquina`);
+    let nuevas = [];
+    if (conDesde) {
+      const r = await p.request()
+        .input('maquina', req.params.codigo)
+        .input('desde', desde)
+        .input('usuario', String(req.session.usuario.codigo || ''))
+        .query(`
+          SELECT TOP 20 Id, Texto, Tipo, NombreUsuario FROM SEL_MuroMaquina
+          WHERE Maquina = @maquina AND Id > @desde AND ISNULL(Usuario, '') <> @usuario
+          ORDER BY Id DESC
+        `);
+      nuevas = r.recordset.map(n => ({ id: n.Id, texto: n.Texto, tipo: n.Tipo, nombreUsuario: n.NombreUsuario }));
+    }
+    res.json({ ok: true, ultimoId: ult.recordset[0].UltimoId, nuevas });
+  } catch (err) {
+    res.json({ ok: false });
+  }
+});
+
+app.post('/api/selladora/:codigo/muro', requireLogin, async (req, res) => {
+  const maquina = Number(req.params.codigo);
+  const texto = String(req.body.texto || '').trim();
+  const tipo = TIPOS_MURO[req.body.tipo] ? req.body.tipo : 'Nota';
+  if (!maquina) return res.json({ ok: false, error: 'Máquina inválida.' });
+  if (!texto) return res.json({ ok: false, error: 'La observación está vacía.' });
+  const u = req.session.usuario;
+  try {
+    const p = await getPool();
+    await p.request()
+      .input('maquina', maquina)
+      .input('texto', texto.slice(0, 500))
+      .input('tipo', tipo)
+      .input('usuario', String(u.codigo || '').slice(0, 20) || null)
+      .input('nombre', String(u.nombre || '').slice(0, 100) || null)
+      .input('operario', u.codigoOperarioPRD || null)
+      .query(`
+        INSERT INTO SEL_MuroMaquina (Maquina, Texto, Tipo, Usuario, NombreUsuario, Operario)
+        VALUES (@maquina, @texto, @tipo, @usuario, @nombre, @operario)
+      `);
+    res.json({ ok: true });
+  } catch (err) {
+    const falta = /Invalid object name|SEL_MuroMaquina/i.test(err.message || '');
+    res.json({ ok: false, error: falta ? `Falta correr el script ${SCRIPT_MURO} contra esta base.` : err.message });
+  }
+});
+
+app.post('/api/selladora/muro/:id/fijar', requireLogin, async (req, res) => {
+  const id = Number(req.params.id);
+  const fijar = req.body.fijar === true || req.body.fijar === 'true';
+  try {
+    const p = await getPool();
+    const r = await p.request()
+      .input('id', id)
+      .input('fijada', fijar ? 1 : 0)
+      .input('por', String(req.session.usuario.nombre || '').slice(0, 100) || null)
+      .query(`
+        UPDATE SEL_MuroMaquina SET Fijada = @fijada, FijadaPor = @por, FechaFijada = GETDATE()
+        WHERE Id = @id
+      `);
+    if (r.rowsAffected[0] === 0) return res.json({ ok: false, error: 'La nota ya no existe.' });
+    res.json({ ok: true });
+  } catch (err) {
+    const falta = /Invalid object name|SEL_MuroMaquina/i.test(err.message || '');
+    res.json({ ok: false, error: falta ? `Falta correr el script ${SCRIPT_MURO} contra esta base.` : err.message });
   }
 });
 
@@ -7704,7 +8108,7 @@ function scriptTarjetasReferencia(maquinaCodigo) {
           const datos = await resp.json();
           if (!datos.ok) return;
           fijar(tarjeta, '.ref-paquetes', datos.paquetes);
-          fijar(tarjeta, '.ref-peso-acumulado', datos.pesoTotalKg.toFixed(2));
+          fijar(tarjeta, '.ref-peso-acumulado', datos.pesoTotalKg.toFixed(3));
           window.resumenPorOrden[idOrden] = {
             idBulto: datos.idBulto,
             ultimo: (datos.ultimoConsecutivo != null) ? { consecutivo: datos.ultimoConsecutivo, pesoKg: datos.ultimoPesoKg } : null
@@ -8214,6 +8618,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPizarra(maquinaCodigo)}</script>
   <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptConfirmarFinalizar()}</script>
@@ -8322,6 +8727,7 @@ function renderBultosGrupo(idGrupo, numeroPedido, maquinaCodigo, datosPorReferen
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPizarra(maquinaCodigo)}</script>
   <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <!-- El idOrden que reciben estos dos es solo el de respaldo: cada tarjeta de bulto y cada
        seccion de traslado traen el IdOrden de SU referencia, y ese es el que se usa. -->
@@ -10136,7 +10542,7 @@ function renderBitacora(datos, recientes, maquinaCodigo, usuario) {
         <td>${esc(r.SerialesRollo) || '—'}</td>
         <td class="cen">${r.number_paqu || 0}</td>
         <td class="num">${unidadesDe(r).toLocaleString('es-CO')}</td>
-        <td class="num">${r.PesoPaquetes != null ? Number(r.PesoPaquetes).toFixed(2) : '—'}</td>
+        <td class="num">${r.PesoPaquetes != null ? Number(r.PesoPaquetes).toFixed(3) : '—'}</td>
         <td class="cen">${esc(r.estado)}</td>
       </tr>`).join('')
     : `<tr><td colspan="10" class="bit-vacio">Todavía no hay bultos en este turno.</td></tr>`;
@@ -10236,7 +10642,7 @@ function renderBitacora(datos, recientes, maquinaCodigo, usuario) {
       <div class="bit-dato">
         <div class="label">Producido</div>
         <div class="valor">${totalUnidades.toLocaleString('es-CO')} und</div>
-        <div class="bit-sub">${renglones.length} bulto(s) · ${totalPaquetes} paquete(s) · ${totalKg.toFixed(2)} kg</div>
+        <div class="bit-sub">${renglones.length} bulto(s) · ${totalPaquetes} paquete(s) · ${totalKg.toFixed(3)} kg</div>
       </div>
     </div>
 
@@ -10262,7 +10668,7 @@ function renderBitacora(datos, recientes, maquinaCodigo, usuario) {
             <td colspan="6">Total del turno</td>
             <td class="cen">${totalPaquetes}</td>
             <td class="num">${totalUnidades.toLocaleString('es-CO')}</td>
-            <td class="num">${totalKg.toFixed(2)}</td>
+            <td class="num">${totalKg.toFixed(3)}</td>
             <td></td>
           </tr>
         </tfoot>` : ''}
@@ -11607,9 +12013,20 @@ app.post('/api/selladora/orden/:idOrden/finalizar', requireLogin, async (req, re
       }
     }
 
+    // Salida contra MP (16/10/2026): no bloquea, solo deja rastro si se finaliza con exceso. Se
+    // calcula ANTES de finalizarOrden, con los bultos todavia como los vio el operario en el aviso.
+    const balanceMP = await balanceMPParaFinalizar(p, idOrden);
+
     // OperarioFinal (distinto del que inicio) -- mismo bloqueo que EjecucionSelladora.vb si el
     // usuario logueado no tiene SISUsuarios.CodigoOperarioPRD configurado.
     await finalizarOrden(p, idOrden, usuario.generadoPor, usuario.codigoOperarioPRD);
+    if (balanceMP && balanceMP.excede) {
+      await registrarMovimientoSelladora(p, req, {
+        idOrden, subtipo: 'FINALIZAR_EXCESO_MP',
+        motivo: 'Finalizada con la salida por encima de la materia prima escaneada',
+        resumen: textoBalanceMP(balanceMP)
+      });
+    }
     if (firmaBajoMeta) {
       consumirFirmas(req, idOrden, 'finalizar');
       await registrarMovimientoSelladora(p, req, {
@@ -12117,8 +12534,32 @@ function textoBajas(bajas) {
   return bajas.map(b => `${b.descripcion}: ${b.porcentaje.toLocaleString('es-CO')}% (${b.producido} de ${b.programado})`).join('; ');
 }
 
+// Salida contra materia prima al Finalizar (16/10/2026): igual que el tope de Produccion.vb al
+// guardar parciales -- (Cantidad - cono) + residuos <= MP del historial --, pero en la tableta es
+// solo un AVISO (se puede finalizar igual). Sin tolerancia: lo que entra es el maximo (decision del
+// usuario), asi que avisa con cualquier exceso. Se compara a centesimas para que un residuo de coma
+// flotante no dispare el aviso. Sin MP escaneada (entrada 0) no se avisa, como Produccion.vb.
+
+// Nunca revienta: si no se puede calcular, devuelve null y el Finalizar sigue como siempre.
+async function balanceMPParaFinalizar(p, idOrden) {
+  try {
+    const b = await obtenerBalanceMPSellado(p, idOrden);
+    if (!b || !(b.entrada > 0)) return null;
+    return { ...b, excede: Math.round(b.diferencia * 100) > 0 };
+  } catch (err) {
+    console.error(`No se pudo calcular el balance de MP de la orden ${idOrden}:`, err.message);
+    return null;
+  }
+}
+
+function textoBalanceMP(b) {
+  const kg = n => `${n.toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} kg`;
+  return `MP escaneada ${kg(b.entrada)}; salida ${kg(b.salida)} (bultos ${kg(b.bultos)} + residuos ${kg(b.residuos)}); exceso ${kg(b.diferencia)}`;
+}
+
 // Lo consulta confirmarFinalizar antes de preguntar nada: si hay referencias por debajo del minimo
-// y todavia no hay firma, la tableta avisa y pide la firma.
+// y todavia no hay firma, la tableta avisa y pide la firma. Tambien trae el balance de MP para el
+// aviso de "la salida supera la materia prima escaneada".
 app.get('/api/selladora/orden/:idOrden/finalizar/requisitos', requireLogin, async (req, res) => {
   const idOrden = Number(req.params.idOrden);
   try {
@@ -12126,7 +12567,8 @@ app.get('/api/selladora/orden/:idOrden/finalizar/requisitos', requireLogin, asyn
     const bajas = await referenciasBajoMinimo(p, idOrden);
     res.json({
       ok: true, minimo: PORCENTAJE_MINIMO_FINALIZAR, bajas,
-      firmado: !!firmaVigente(req, idOrden, 'finalizar', 'liderOJefe')
+      firmado: !!firmaVigente(req, idOrden, 'finalizar', 'liderOJefe'),
+      balance: await balanceMPParaFinalizar(p, idOrden)
     });
   } catch (err) {
     res.json({ ok: false, error: err.message });

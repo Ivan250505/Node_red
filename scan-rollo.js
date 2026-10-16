@@ -33,6 +33,52 @@ async function obtenerDatosOrden(db, idOrden) {
   return { elemento: r.Elemento, maquina: r.Maquina, numeroPedido: r.NumeroPedido != null ? String(r.NumeroPedido).trim() : '' };
 }
 
+// 16/10/2026 (a pedido del usuario): aviso si el rollo viene de OTRO pedido o de OTRO cliente que
+// la orden. Solo informa, nunca bloquea -- el operario decide. El pedido del rollo es el que quedo
+// en su PRDProduccion (Detalle = serial, desde extrusion); ClienteProduccion casi nunca viene
+// lleno ahi, asi que el cliente de cada lado se resuelve por su pedido (VENMovimientos). Un rollo
+// sin pedido (MP comprada, etc.) no se compara. Cualquier error aca se traga: no frena el escaneo.
+async function avisoPedidoClienteRollo(db, serial, idOrden, numeroPedidoOrden) {
+  try {
+    const dtRollo = await db.request().input('serial', serial)
+      .query(`SELECT TOP 1 NumeroPedido FROM PRDProduccion WHERE Detalle = @serial`);
+    const tPedidoRollo = dtRollo.recordset.length > 0 && dtRollo.recordset[0].NumeroPedido != null
+      ? String(dtRollo.recordset[0].NumeroPedido).trim() : '';
+    if (!tPedidoRollo || !numeroPedidoOrden) return null;
+
+    const { codCliente: nClienteRollo } = await resolverClienteDestino(db, tPedidoRollo);
+    let { codCliente: nClienteOrden } = await resolverClienteDestino(db, numeroPedidoOrden);
+    if (!nClienteOrden) {
+      const dtCli = await db.request().input('idOrden', idOrden)
+        .query(`SELECT Cliente FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+      nClienteOrden = dtCli.recordset.length > 0 ? Number(dtCli.recordset[0].Cliente) || 0 : 0;
+    }
+
+    const mismoPedido = tPedidoRollo.toUpperCase() === numeroPedidoOrden.toUpperCase();
+    const clienteDistinto = nClienteRollo > 0 && nClienteOrden > 0 && nClienteRollo !== nClienteOrden;
+    if (mismoPedido && !clienteDistinto) return null;
+
+    let nombreClienteRollo = '', nombreClienteOrden = '';
+    if (clienteDistinto) {
+      const dtNombres = await db.request().input('c1', nClienteRollo).input('c2', nClienteOrden)
+        .query(`SELECT Codigo, Nombre FROM VISTerceros WHERE Sucursal = 0 AND Codigo IN (@c1, @c2)`);
+      const nombreDe = (codigo) => {
+        const fila = dtNombres.recordset.find(r => Number(r.Codigo) === codigo);
+        return fila && fila.Nombre ? String(fila.Nombre).trim() : String(codigo);
+      };
+      nombreClienteRollo = nombreDe(nClienteRollo);
+      nombreClienteOrden = nombreDe(nClienteOrden);
+    }
+    return {
+      pedidoRollo: tPedidoRollo, pedidoOrden: numeroPedidoOrden,
+      mismoPedido, clienteDistinto, clienteRollo: nombreClienteRollo, clienteOrden: nombreClienteOrden
+    };
+  } catch (err) {
+    console.error('No se pudo comparar pedido/cliente del rollo:', err.message);
+    return null;
+  }
+}
+
 // frmScanRollo.vb:57-139 (ConsultarSerial) -- validacion previa a confirmar, no escribe nada.
 async function consultarSerial(db, { idOrden, serial, esNuevoRollo }) {
   const tSerial = (serial || '').trim();
@@ -106,7 +152,8 @@ async function consultarSerial(db, { idOrden, serial, esNuevoRollo }) {
     lote: await obtenerLoteRollo(db, tSerial),
     bodega: tBodegaRollo,
     bodegaNombre: tBodegaNombre || tBodegaRollo || '-',
-    referencia: tReferencia
+    referencia: tReferencia,
+    avisoPedido: await avisoPedidoClienteRollo(db, tSerial, idOrden, datosOrden.numeroPedido)
   };
 }
 
