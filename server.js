@@ -3681,20 +3681,26 @@ function scriptConfirmarFinalizar() {
           var codigo = (document.getElementById('firma-usuario').value || '').trim();
           var clave = document.getElementById('firma-clave').value || '';
           if (!codigo || !clave) { Swal.showValidationMessage('Escriba usuario y contraseña.'); return false; }
-          Swal.showLoading();
-          return fetch('/api/selladora/orden/' + idOrden + '/firma', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ proposito: proposito, rol: rol, codigo: codigo, password: clave })
-          })
-            .then(function(r) { return r.json(); })
-            .then(function(resp) {
-              if (!resp.ok) { Swal.showValidationMessage(resp.error || 'No se pudo firmar.'); return false; }
-              return resp.firma;
-            })
-            .catch(function() { Swal.showValidationMessage('Error de conexión.'); return false; });
+          return enviarFirmaCargo(idOrden, proposito, rol, codigo, clave);
         }
       }).then(function(r) { return (r.isConfirmed && r.value) ? r.value : null; });
+    }
+
+    // POST de la firma desde dentro de un Swal abierto (preConfirm/preDeny): resuelve la firma o
+    // false, dejando el error como mensaje de validacion para que la ventana siga abierta.
+    function enviarFirmaCargo(idOrden, proposito, rol, codigo, clave) {
+      Swal.showLoading();
+      return fetch('/api/selladora/orden/' + idOrden + '/firma', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proposito: proposito, rol: rol, codigo: codigo, password: clave })
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(resp) {
+          if (!resp.ok) { Swal.showValidationMessage(resp.error || 'No se pudo firmar.'); return false; }
+          return resp.firma;
+        })
+        .catch(function() { Swal.showValidationMessage('Error de conexión.'); return false; });
     }
 
     // Resuelve true si se puede seguir con el Finalizar: avance >= 95% (o sin meta), o ya firmado.
@@ -3723,45 +3729,54 @@ function scriptConfirmarFinalizar() {
 
     // Suspender un pedido desde la tableta (14/10/2026): motivo obligatorio, terminar el bulto en
     // curso o suspender ya, firma del Lider de Sellado o del Jefe de Planta, y POST /suspender.
+    // 15/10/2026: motivo y firma en una sola ventana (antes eran dos), a pedido del usuario.
     function suspenderConFirma(idOrden, descripcion) {
       var cabecera = '<div style="font-size:16px;font-weight:600;color:#006984;margin-bottom:10px;">' + escaparFirma(descripcion) + '</div>';
-      function motivoValido() {
-        var v = (Swal.getInput().value || '').trim();
-        if (v.length < 3) { Swal.showValidationMessage('Escriba el motivo de la suspensión.'); return false; }
-        return v;
+      var motivo = '';
+      function motivoYFirma() {
+        motivo = (document.getElementById('suspender-motivo').value || '').trim();
+        var codigo = (document.getElementById('firma-usuario').value || '').trim();
+        var clave = document.getElementById('firma-clave').value || '';
+        if (motivo.length < 3) { Swal.showValidationMessage('Escriba el motivo de la suspensión.'); return false; }
+        if (!codigo || !clave) { Swal.showValidationMessage('Escriba usuario y contraseña de quien autoriza.'); return false; }
+        return enviarFirmaCargo(idOrden, 'suspender', 'liderOJefe', codigo, clave);
       }
-      var terminarBulto = true;
       Swal.fire({
         icon: 'warning',
         title: 'Suspender pedido',
         html: cabecera +
-              '<div style="text-align:left;font-size:14px;color:#64748b;line-height:1.5;">' +
-                '<b>Terminar el bulto</b>: la máquina sigue hasta cerrar el bulto que está llenando y ahí se suspende.<br>' +
-                '<b>Suspender ya</b>: se corta ahora; el bulto queda guardado para cuando se reanude.<br><br>' +
-                'Se necesita la firma del <b>Líder de Sellado</b> o del <b>Jefe de Planta</b>.' +
+              '<div style="text-align:left;font-size:14px;">' +
+                '<div style="color:#64748b;line-height:1.5;margin-bottom:12px;">' +
+                  '<b>Terminar el bulto</b>: la máquina sigue hasta cerrar el bulto que está llenando y ahí se suspende.<br>' +
+                  '<b>Suspender ya</b>: se corta ahora; el bulto queda guardado para cuando se reanude.' +
+                '</div>' +
+                '<label style="display:block;font-weight:600;margin-bottom:4px;">Motivo de la suspensión</label>' +
+                '<textarea id="suspender-motivo" class="swal2-textarea" style="margin:0 0 12px;width:100%;" ' +
+                  'placeholder="Obligatorio"></textarea>' +
+                '<div style="color:#64748b;margin-bottom:8px;">Firma del <b>Líder de Sellado</b> o del <b>Jefe de Planta</b>:</div>' +
+                '<label style="display:block;font-weight:600;margin-bottom:4px;">Usuario</label>' +
+                '<input id="firma-usuario" class="swal2-input" style="margin:0 0 10px;width:100%;" ' +
+                  'autocapitalize="characters" autocomplete="off" spellcheck="false">' +
+                '<label style="display:block;font-weight:600;margin-bottom:4px;">Contraseña</label>' +
+                '<input id="firma-clave" type="password" class="swal2-input" style="margin:0;width:100%;" autocomplete="off">' +
               '</div>',
-        input: 'textarea',
-        inputPlaceholder: 'Motivo de la suspensión (obligatorio)',
+        width: 560,
         showDenyButton: true,
         showCancelButton: true,
         confirmButtonText: 'Terminar el bulto y suspender', confirmButtonColor: '#b46200',
         denyButtonText: 'Suspender ya', denyButtonColor: '#c0392b',
         cancelButtonText: 'Cancelar', cancelButtonColor: '#64748b',
-        returnInputValueOnDeny: true,
-        preConfirm: motivoValido,
-        preDeny: motivoValido
+        allowOutsideClick: false,
+        didOpen: function() {
+          var m = document.getElementById('suspender-motivo');
+          if (m) m.focus();
+        },
+        preConfirm: motivoYFirma,
+        preDeny: motivoYFirma
       })
         .then(function(r) {
-          if (!r.isConfirmed && !r.isDenied) return null;
-          terminarBulto = r.isConfirmed;
-          var motivo = String(r.value || '').trim();
-          return pedirFirmaCargo(idOrden, 'suspender', 'liderOJefe', '🔑 Firma para suspender', cabecera +
-            '<div style="background:#fff4e5;border-left:5px solid #f39c12;padding:8px 12px;border-radius:8px;margin-bottom:14px;">' +
-              (terminarBulto ? 'Al terminar el bulto' : 'Suspender ya') + ' — motivo: <b>' + escaparFirma(motivo) + '</b></div>')
-            .then(function(firma) { return firma ? motivo : null; });
-        })
-        .then(function(motivo) {
-          if (!motivo) return;
+          if ((!r.isConfirmed && !r.isDenied) || !r.value) return;
+          var terminarBulto = r.isConfirmed;
           Swal.fire({ title: 'Suspendiendo…', allowOutsideClick: false, showConfirmButton: false, didOpen: function() { Swal.showLoading(); } });
           return fetch('/api/selladora/orden/' + idOrden + '/suspender', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
