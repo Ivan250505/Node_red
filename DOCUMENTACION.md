@@ -412,8 +412,8 @@ con producción las rutas devuelven 404. Cada acción deja rastro `SIMULADOR_PLC
 |---|---|---|
 | `Pendiente` sin bultos (orden nueva) | Por iniciar | ▶ Iniciar (protocolo de arranque) |
 | `Pendiente` con bultos (Programación la devolvió a la cola) | Suspendida (morado) | ⏯ Reanudar (sin firmas ni protocolo, ver `/reanudar-suspendida`) |
-| `Suspendida` (antes no salía en la cola) | Suspendida (morado) | ⏯ Reanudar (dos firmas) |
-| `PendienteValidacion` | Pend. validación | Ninguno: "⏯ Reanudar" (dos firmas) está solo en Información |
+| `Suspendida` (antes no salía en la cola) | Suspendida (morado) | ⏯ Reanudar (firma del líder o del jefe) |
+| `PendienteValidacion` | Pend. validación | Ninguno: "⏯ Reanudar" (firma del líder o del jefe) está solo en Información |
 
 **Finalizar con menos del 95 %.** Si alguna referencia que se va a finalizar (todo el grupo
 Activo, en sellado en paralelo) tiene meta y va por debajo de `PORCENTAJE_MINIMO_FINALIZAR` (95),
@@ -421,9 +421,9 @@ la tableta avisa que el avance no ha completado el 100 % y pide la firma del **L
 del Jefe de Planta**. `POST /finalizar` aplica la misma regla en el servidor. Entre 95 % y 100 %
 no se pide nada. Una orden sin meta configurada no cuenta.
 
-**Reanudar un pedido suspendido o finalizado por accidente.** Firman los **dos**: primero el
-Líder de Sellado y luego el Jefe de Planta (`CARGOS_LIDER_SELLADO`, `CARGOS_JEFE_PLANTA` en
-`auth.js`; el Director de Calidad no firma esto). Después, `POST /reanudar-con-firmas`:
+**Reanudar un pedido suspendido o finalizado por accidente.** Firma el **Líder de Sellado o el
+Jefe de Planta**, uno solo (`CARGOS_LIDER_SELLADO`, `CARGOS_JEFE_PLANTA` en `auth.js`; el Director
+de Calidad no firma esto; hasta el 17/10/2026 se pedían los dos). Después, `POST /reanudar-con-firmas`:
 
 - `Suspendida`: lo mismo que "Retomar" (`retomarOrdenSuspendida`), sin esperar a Programación.
 - `PendienteValidacion`: `reabrirOrdenFinalizada` devuelve a `Activa` la orden (y su grupo), su

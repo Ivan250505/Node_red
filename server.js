@@ -1110,7 +1110,7 @@ function botonRetomarSuspendida(idOrden) {
 }
 
 // Boton "Reanudar" de una orden Suspendida o PendienteValidacion (finalizada por accidente) --
-// 14/10/2026, a pedido del usuario. Pide la firma del Lider de Sellado y la del Jefe de Planta (ver
+// 14/10/2026, a pedido del usuario. Pide la firma del Lider de Sellado o la del Jefe de Planta (ver
 // reanudarConFirmas en scriptConfirmarFinalizar y POST /reanudar-con-firmas). En la cola solo sale
 // el de las Suspendidas; el de una finalizada por equivocacion, solo en Informacion (a pedido del
 // usuario, 14/10/2026).
@@ -4074,7 +4074,7 @@ function scriptConfirmarFinalizar() {
               Swal.fire({
                 icon: 'success',
                 title: datos.esperaBulto ? 'Suspensión en curso' : 'Pedido suspendido',
-                text: datos.esperaBulto ? 'Se suspende cuando la máquina cierre el bulto que está llenando.' : 'Quedó suspendido. Se puede reanudar desde la cola con dos firmas.',
+                text: datos.esperaBulto ? 'Se suspende cuando la máquina cierre el bulto que está llenando.' : 'Quedó suspendido. Se puede reanudar desde la cola con la firma del Líder de Sellado o del Jefe de Planta.',
                 confirmButtonColor: '#71bf44'
               }).then(function() { location.reload(); });
             });
@@ -4084,8 +4084,8 @@ function scriptConfirmarFinalizar() {
         });
     }
 
-    // Reanudar un pedido Suspendido o finalizado por accidente (14/10/2026): dos firmas, primero el
-    // Lider de Sellado y luego el Jefe de Planta, y despues POST /reanudar-con-firmas.
+    // Reanudar un pedido Suspendido o finalizado por accidente (14/10/2026): la firma del Lider de
+    // Sellado O del Jefe de Planta (17/10/2026, antes las dos), y despues POST /reanudar-con-firmas.
     // tipo: 'suspendida' | 'finalizada'.
     function reanudarConFirmas(idOrden, tipo, descripcion) {
       var cabecera = '<div style="font-size:16px;font-weight:600;color:#006984;margin-bottom:10px;">' + escaparFirma(descripcion) + '</div>';
@@ -4097,24 +4097,18 @@ function scriptConfirmarFinalizar() {
         title: tipo === 'finalizada' ? 'Reanudar pedido finalizado' : 'Reanudar pedido suspendido',
         html: cabecera +
               '<div style="text-align:left;font-size:14px;color:#64748b;line-height:1.5;">' + explicacion +
-                '<br><br>Se necesitan <b>dos firmas</b>: primero el <b>Líder de Sellado</b> y luego el <b>Jefe de Planta</b>.' +
+                '<br><br>Se necesita la firma del <b>Líder de Sellado</b> o del <b>Jefe de Planta</b>.' +
               '</div>',
         showCancelButton: true,
-        confirmButtonText: '🔑 Pedir firmas', confirmButtonColor: '#7e22ce',
+        confirmButtonText: '🔑 Pedir firma', confirmButtonColor: '#7e22ce',
         cancelButtonText: 'Cancelar', cancelButtonColor: '#64748b'
       })
         .then(function(r) {
           if (!r.isConfirmed) return null;
-          return pedirFirmaCargo(idOrden, 'reanudar', 'lider', '🔑 Firma 1 de 2: Líder de Sellado', cabecera);
+          return pedirFirmaCargo(idOrden, 'reanudar', 'liderOJefe', '🔑 Firma: Líder de Sellado o Jefe de Planta', cabecera);
         })
-        .then(function(firmaLider) {
-          if (!firmaLider) return null;
-          return pedirFirmaCargo(idOrden, 'reanudar', 'jefe', '🔑 Firma 2 de 2: Jefe de Planta', cabecera +
-            '<div style="background:#eaf6e4;border-left:5px solid #4a9c2e;padding:8px 12px;border-radius:8px;margin-bottom:14px;">' +
-              'Ya firmó el Líder de Sellado: <b>' + escaparFirma(firmaLider.nombre) + '</b></div>');
-        })
-        .then(function(firmaJefe) {
-          if (!firmaJefe) return;
+        .then(function(firma) {
+          if (!firma) return;
           Swal.fire({ title: 'Reanudando…', allowOutsideClick: false, showConfirmButton: false, didOpen: function() { Swal.showLoading(); } });
           return fetch('/api/selladora/orden/' + idOrden + '/reanudar-con-firmas', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
@@ -7252,7 +7246,7 @@ async function obtenerColaOrdenes(p, codigo) {
     LEFT JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
     LEFT JOIN PRDOperarios op ON op.Codigo = ej.Operario
     -- 14/10/2026: tambien las 'Suspendida' -- desde la tableta se pueden reanudar con la firma del
-    -- Lider de Sellado y del Jefe de Planta (ver /reanudar-con-firmas).
+    -- Lider de Sellado o del Jefe de Planta (ver /reanudar-con-firmas).
     WHERE ord.Maquina = @codigo AND ord.Estado IN ('Activa','Pendiente','Suspendida','PendienteValidacion')
     ORDER BY CASE ord.Estado WHEN 'Activa' THEN 0 WHEN 'Pendiente' THEN 1 WHEN 'Suspendida' THEN 2 ELSE 3 END ASC,
              ISNULL(ord.Prioridad, 99999) ASC, ord.IdOrden ASC
@@ -8510,7 +8504,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
         </form>`
       : '',
     // 14/10/2026: sin referencia activa, "⏯ Reanudar" del grupo suspendido o finalizado por
-    // equivocacion (dos firmas) -- igual que en la pagina de una sola referencia.
+    // equivocacion (firma del lider o del jefe) -- igual que en la pagina de una sola referencia.
     !miembroAncla && miembroSuspendido
       ? botonReanudarConFirmas(miembroSuspendido, 'suspendida', `Pedido ${(miembroSuspendido.NumeroPedido || '').trim() || '—'}`)
       : '',
@@ -12456,7 +12450,7 @@ app.post('/api/selladora/orden/:idOrden/autorizacion', requireLogin, async (req,
 //  - Finalizar con un avance de produccion menor a PORCENTAJE_MINIMO_FINALIZAR pide la firma del
 //    Lider de Sellado O del Jefe de Planta (rol 'liderOJefe').
 //  - Reanudar desde la tableta un pedido Suspendido o finalizado por accidente (PendienteValidacion)
-//    pide las DOS firmas: primero el Lider de Sellado y luego el Jefe de Planta.
+//    pide la firma del Lider de Sellado O del Jefe de Planta (17/10/2026; antes pedia las dos).
 // Cada firma se valida sola (POST /firma, usuario+clave+cargo) y queda guardada en la SESION del
 // operario por FIRMA_VIGENCIA_MS, atada a la orden y al proposito; la accion (Finalizar o
 // /reanudar-con-firmas) la exige en el servidor y la consume. Asi la contrasena del lider viaja una
@@ -12469,7 +12463,7 @@ const ROLES_FIRMA = {
   jefe: { cargos: CARGOS_JEFE_PLANTA, nombre: 'Jefe de Planta' },
   liderOJefe: { cargos: [...CARGOS_LIDER_SELLADO, ...CARGOS_JEFE_PLANTA], nombre: 'Líder de Sellado o Jefe de Planta' }
 };
-const ROLES_POR_PROPOSITO = { finalizar: ['liderOJefe'], suspender: ['liderOJefe'], reanudar: ['lider', 'jefe'] };
+const ROLES_POR_PROPOSITO = { finalizar: ['liderOJefe'], suspender: ['liderOJefe'], reanudar: ['liderOJefe'] };
 
 function firmasDeOrden(req, idOrden, proposito) {
   if (!req.session.firmasPedido) req.session.firmasPedido = {};
@@ -12605,17 +12599,17 @@ app.post('/api/selladora/orden/:idOrden/firma', requireLogin, async (req, res) =
   }
 });
 
-// Reanudar con las dos firmas un pedido Suspendido (sin esperar a que Programacion lo devuelva a la
-// cola) o uno finalizado por accidente que el digitador todavia no ha cerrado.
+// Reanudar con la firma del Lider de Sellado o del Jefe de Planta un pedido Suspendido (sin esperar a
+// que Programacion lo devuelva a la cola) o uno finalizado por accidente que el digitador todavia no
+// ha cerrado.
 app.post('/api/selladora/orden/:idOrden/reanudar-con-firmas', requireLogin, async (req, res) => {
   const idOrden = Number(req.params.idOrden);
   try {
-    const lider = firmaVigente(req, idOrden, 'reanudar', 'lider');
-    const jefe = firmaVigente(req, idOrden, 'reanudar', 'jefe');
-    if (!lider || !jefe) {
-      return res.json({ ok: false, error: 'Faltan las firmas del Líder de Sellado y del Jefe de Planta (o ya vencieron). Vuelva a pedirlas.' });
+    const firma = firmaVigente(req, idOrden, 'reanudar', 'liderOJefe');
+    if (!firma) {
+      return res.json({ ok: false, error: 'Falta la firma del Líder de Sellado o del Jefe de Planta (o ya venció). Vuelva a pedirla.' });
     }
-    const firmas = `Firmaron: ${textoFirma(lider)} y ${textoFirma(jefe)}`;
+    const firmas = `Firmó: ${textoFirma(firma)}`;
     const p = await getPool();
     const dt = await p.request().input('idOrden', idOrden).query(`SELECT Estado FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
     const estado = dt.recordset[0] && dt.recordset[0].Estado;
