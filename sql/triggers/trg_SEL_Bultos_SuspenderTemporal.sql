@@ -18,6 +18,16 @@
 -- PRDOrdenesProduccionPausas y (si ya existe la tabla) un movimiento PAUSA en SISMovimientos. La OT es
 -- la del bulto mas reciente de la orden que ya tiene PRDProduccion. Va en TRY/CATCH con XACT_ABORT OFF:
 -- un fallo aca NUNCA puede tumbar el cierre del bulto que dispara este trigger.
+--
+-- TARJETA #11 (08/10/2026, rev Iván): grupo SELLADORA completo. Si la ejecución pertenece a un
+-- grupo (misma máquina, mismo pedido, líneas + pedidos extra), se suspende TODO el grupo --
+-- INCLUIDA la orden que pidió la suspensión (el filtro anterior la dejaba fuera: solo
+-- suspendía a los hermanos). Sin grupo, mismo comportamiento de antes (solo la orden).
+-- No se agrega 'Suspendida' al filtro de captura: al reanudar, la ejecución vuelve a 'Activa'
+-- ANTES de crear el Temporal siguiente (reanudarOTDeOrden), así no se re-suspende al instante.
+--
+-- FIX 08/10/2026 (rev Iván): sin filtro SubEmpresa/Tipo/Fecha en PRDGrupoEtapasPedidosExtra --
+-- Fecha es la del pedido EXTRA, no la del grupo; basta IdGrupo.
 
 CREATE OR ALTER TRIGGER trg_SEL_Bultos_SuspenderTemporal
 ON SEL_Bultos
@@ -39,31 +49,68 @@ BEGIN
 
     IF EXISTS (SELECT 1 FROM @ASuspender)
     BEGIN
+        -- TARJETA #11: grupo SELLADORA completo (misma máquina, mismo pedido, líneas +
+        -- pedidos extra), INCLUIDA la solicitante. Sin grupo, solo ella (igual que antes).
+        DECLARE @GrupoIds TABLE (IdOrden INT NOT NULL, IdEjecucion INT NOT NULL, PRIMARY KEY (IdOrden, IdEjecucion));
+        INSERT INTO @GrupoIds (IdOrden, IdEjecucion)
+        SELECT IdOrden, IdEjecucion FROM @ASuspender;
+        INSERT INTO @GrupoIds (IdOrden, IdEjecucion)
+        SELECT DISTINCT ord2.IdOrden, ej2.IdEjecucion
+        FROM @ASuspender s
+        INNER JOIN SEL_OrdenProduccion ord1 ON ord1.IdOrden = s.IdOrden
+        INNER JOIN PRDGrupoEtapasCompartidas g ON g.CategoriaMaquina = 'SELLADORA'
+          -- FIX 08/10/2026 (rev Iván): sin filtro SubEmpresa/Tipo/Fecha en PedidosExtra --
+          -- Fecha es la del pedido EXTRA (fFechaB de Liberación), no la del grupo.
+          AND (EXISTS (SELECT 1 FROM PRDGrupoEtapasCompartidasLineas gl
+                      WHERE gl.IdGrupo = g.IdGrupo AND gl.Linea = ord1.Linea AND g.Numero = ord1.NumeroPedido)
+            OR EXISTS (SELECT 1 FROM PRDGrupoEtapasPedidosExtra pe
+                      WHERE pe.IdGrupo = g.IdGrupo
+                        AND pe.Numero = ord1.NumeroPedido AND pe.Linea = ord1.Linea))
+        INNER JOIN (
+          SELECT gl2.Linea AS Linea, g2.Numero AS Numero, gl2.IdGrupo AS IdGrupo
+          FROM PRDGrupoEtapasCompartidasLineas gl2
+          INNER JOIN PRDGrupoEtapasCompartidas g2 ON g2.IdGrupo = gl2.IdGrupo
+          UNION
+          SELECT pe2.Linea AS Linea, pe2.Numero AS Numero, pe2.IdGrupo AS IdGrupo
+          FROM PRDGrupoEtapasPedidosExtra pe2
+          INNER JOIN PRDGrupoEtapasCompartidas g3 ON g3.IdGrupo = pe2.IdGrupo
+        ) gm ON gm.IdGrupo = g.IdGrupo
+        INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Linea = gm.Linea AND ord2.NumeroPedido = gm.Numero
+          AND ord2.Maquina = ord1.Maquina
+        INNER JOIN SEL_EjecucionOrden ej2 ON ej2.IdOrden = ord2.IdOrden
+        WHERE NOT EXISTS (SELECT 1 FROM @GrupoIds x WHERE x.IdOrden = ord2.IdOrden AND x.IdEjecucion = ej2.IdEjecucion)
+          AND ord2.Estado IN ('Pendiente', 'Activa', 'PendienteSuspension', 'SuspensionEnCurso')
+          AND ej2.Estado IN ('Pendiente', 'Activa', 'PendienteSuspension', 'SuspensionEnCurso');
+
         UPDATE b SET b.estado = 'Suspendido'
         FROM SEL_Bultos b
-        INNER JOIN @ASuspender s ON s.IdBulto = b.id;
+        INNER JOIN @GrupoIds g ON g.IdEjecucion = b.id_ejecucion
+        WHERE b.estado IN ('Activo', 'Temporal');
 
         UPDATE eo SET eo.Estado = 'Suspendida'
         FROM SEL_EjecucionOrden eo
-        INNER JOIN @ASuspender s ON s.IdEjecucion = eo.IdEjecucion;
+        INNER JOIN @GrupoIds g ON g.IdEjecucion = eo.IdEjecucion
+        WHERE eo.Estado <> 'Suspendida';
 
         UPDATE op SET op.Estado = 'Suspendida'
         FROM SEL_OrdenProduccion op
-        INNER JOIN @ASuspender s ON s.IdOrden = op.IdOrden;
+        INNER JOIN @GrupoIds g ON g.IdOrden = op.IdOrden
+        WHERE op.Estado <> 'Suspendida';
 
         -- 24/09/2026: Orden de Trabajo suspendida + pausa + movimiento (ver encabezado).
+        -- Tarjeta #11: se resuelve para TODAS las órdenes del grupo (comparten la misma OT).
         SET XACT_ABORT OFF;
         BEGIN TRY
             DECLARE @OTs TABLE (OT VARCHAR(20), IdOT INT);
             INSERT INTO @OTs (OT, IdOT)
             SELECT DISTINCT x.OT, o.IdOrdenProduccion
-            FROM @ASuspender s
+            FROM @GrupoIds g
             CROSS APPLY (
                 SELECT TOP 1 p.OrdenProduccion AS OT
                 FROM PRDProduccion p
                 INNER JOIN SEL_Bultos b2 ON b2.serialPadre = p.Detalle
                 INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b2.id_ejecucion
-                WHERE ej.IdOrden = s.IdOrden AND p.OrdenProduccion IS NOT NULL
+                WHERE ej.IdOrden = g.IdOrden AND p.OrdenProduccion IS NOT NULL
                 ORDER BY b2.id DESC
             ) x
             INNER JOIN PRDOrdenesProduccion o ON o.OrdenProduccion = x.OT AND o.Estado = 'Activa';
