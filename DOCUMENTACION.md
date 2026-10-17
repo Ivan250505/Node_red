@@ -220,6 +220,45 @@ La ventana de presentación trae "Cancelar", igual que en el arranque: la orden 
 no tiene sentido secuestrar la pantalla. Mientras la ronda no se termine, vuelve a salir en cada
 carga de la página.
 
+### 10.2 Pistas y rollos adicionales en el arranque (14/10/2026)
+
+**Número de pistas en vez de Bolsas x golpe.** Es un paso propio del protocolo: sale después del
+peligro químico y **antes de escanear el primer rollo** (*¿Con cuántas pistas va a trabajar?*). Queda en
+`SEL_ProtocoloArranque` (`Paso='pistas'`, `Respuesta` = el número) y al confirmar el rollo el servidor
+toma las pistas de ahí (`pistasDelArranque`); la ventana del rollo ya no las pide. Es el mismo dato
+que Bolsas x golpe (cada pista da una bolsa por golpe) y se guarda en la misma columna `BolsasxGolpe`,
+así que la base y los reportes del escritorio no cambian. "+ Rollo" lo muestra como "Pistas". Si la
+tableta se recarga sin haberlo respondido, el protocolo lo vuelve a pedir.
+
+**Orden del paso del rollo:** pistas → escaneo del primer rollo y su chequeo 4.1/4.2 (se registra
+directo, sin ventana intermedia) → *¿Se monta otro rollo?* (solo con más de una pista) → **Iniciar
+ejecución**.
+
+**¿Se monta otro rollo?** Dos pistas no siempre son dos rollos (a veces un rollo da dos pistas), así
+que el operario decide:
+
+- **Sí, montar otro rollo:** escanea el rollo, pasa por el chequeo 4.1/4.2 y se vuelve a preguntar.
+  Máximo **un rollo por pista**, contando el primero. Debe ser de la misma bodega que el primero y no
+  puede repetirse.
+- **Si tocó "Sí" por equivocación:** "Cancelar" en la ventana del serial (o en el chequeo) vuelve a la
+  pregunta sin agregar nada.
+- **No, continuar:** pasa a "Iniciar ejecución".
+
+**Iniciar ejecución** sale al final, también con una sola pista. Resume lo montado sin repetir datos:
+las pistas y la referencia (si todos los rollos son de la misma) una sola vez, y por rollo el serial,
+el peso y el lote, con el total. **▶ Iniciar** arranca el alistamiento. **Cancelar** no inicia: vuelve a
+preguntar las pistas (con el valor anterior ya escrito) y a escanear desde el primero; los adicionales
+que hubiera quedan `Reemplazado`.
+
+**Cuándo salen del inventario.** Los adicionales quedan pendientes en `SEL_ProtocoloArranque`
+(`Paso='rollo_adicional'`, `Respuesta='Pendiente'`, con el serial) y se descuentan al terminar el
+alistamiento, justo después del primero, por el mismo camino de "+ Rollo" (`montarRollosAdicionales`
+en `scan-rollo.js`). Ahí quedan `Montado`; uno que falle queda `Error` con el motivo en
+`Observaciones` y no frena el arranque (se puede pitar después con "+ Rollo").
+
+**Si la tableta se recarga** con el primer rollo ya escaneado y el alistamiento sin empezar, el
+protocolo vuelve a la lista de rollos, no a escanear de nuevo.
+
 ## 11. Volver a pesar un paquete (09/09/2026)
 
 En la página de **Bultos**, tocar un paquete ya no reimprime de una: sale un menú con dos opciones.
@@ -364,3 +403,55 @@ con producción las rutas devuelven 404. Cada acción deja rastro `SIMULADOR_PLC
   otro Temporal — limpiar con "Eliminar bulto vacío" de la tableta.
 - El flag viejo `SIMULADOR_PLC_VISIBLE` se retiró: con BD de producción el simulador ya
   no aparece aunque el `.env` lo tenga.
+
+## 15. Suspendidas en la cola, avance mínimo y reanudar con firmas (14/10/2026)
+
+**Cola de la máquina.** Ahora distingue la orden nueva de la suspendida, y muestra las suspendidas (antes no salían):
+
+| Estado | Etiqueta | Botón |
+|---|---|---|
+| `Pendiente` sin bultos (orden nueva) | Por iniciar | ▶ Iniciar (protocolo de arranque) |
+| `Pendiente` con bultos (Programación la devolvió a la cola) | Suspendida (morado) | ⏯ Reanudar (sin firmas ni protocolo, ver `/reanudar-suspendida`) |
+| `Suspendida` (antes no salía en la cola) | Suspendida (morado) | ⏯ Reanudar (firma del líder o del jefe) |
+| `PendienteValidacion` | Pend. validación | Ninguno: "⏯ Reanudar" (firma del líder o del jefe) está solo en Información |
+
+**Finalizar con menos del 95 %.** Si alguna referencia que se va a finalizar (todo el grupo
+Activo, en sellado en paralelo) tiene meta y va por debajo de `PORCENTAJE_MINIMO_FINALIZAR` (95),
+la tableta avisa que el avance no ha completado el 100 % y pide la firma del **Líder de Sellado o
+del Jefe de Planta**. `POST /finalizar` aplica la misma regla en el servidor. Entre 95 % y 100 %
+no se pide nada. Una orden sin meta configurada no cuenta.
+
+**Reanudar un pedido suspendido o finalizado por accidente.** Firma el **Líder de Sellado o el
+Jefe de Planta**, uno solo (`CARGOS_LIDER_SELLADO`, `CARGOS_JEFE_PLANTA` en `auth.js`; el Director
+de Calidad no firma esto; hasta el 17/10/2026 se pedían los dos). Después, `POST /reanudar-con-firmas`:
+
+- `Suspendida`: lo mismo que "Retomar" (`retomarOrdenSuspendida`), sin esperar a Programación.
+- `PendienteValidacion`: `reabrirOrdenFinalizada` devuelve a `Activa` la orden (y su grupo), su
+  ejecución (sin `HoraFinReal`/`OperarioFinal`), la OT y sus controles (`reabrirOTDeOrden`), y
+  reserva un bulto vacío (`Temporal`; `EnEspera` en las hermanas). Lo ya producido y validado
+  no se toca. **No se puede** si el digitador ya cerró la OT o algún control (`Cerrado`): eso
+  se corrige desde el escritorio.
+- La máquina debe estar libre (sin otra orden `Activa` ni un arranque a medias).
+
+**Cómo viajan las firmas.** Cada firma se valida sola (`POST /firma`, usuario + clave + cargo) y
+queda en la sesión del operario 10 minutos (`FIRMA_VIGENCIA_MS`), atada a la orden y al motivo.
+La acción la exige y la consume. No hay tabla nueva: quién firmó queda en `SISMovimientos`
+(`FINALIZAR_BAJO_META`, `REANUDAR_SUSPENDIDA`, `REANUDAR_FINALIZADA`).
+
+**Suspender desde la tableta.** Botón "⏹ Suspender" en las órdenes Activas, solo en Información y en
+la página del grupo (no en la cola). Pide un **motivo obligatorio** y la firma del **Líder de Sellado o del Jefe de
+Planta** (rol `liderOJefe`, propósito `suspender`). `POST /suspender` tiene los mismos dos caminos que la
+suspensión pedida por Programación:
+
+- **Terminar el bulto y suspender:** la ejecución pasa a `SuspensionEnCurso` y
+  `trg_SEL_Bultos_SuspenderTemporal` la suspende (con la OT) cuando el PLC cierra el bulto. La cola
+  muestra "Se suspende al cerrar el bulto en curso". Si el bulto en curso no tiene paquetes, se
+  suspende de una vez.
+- **Suspender ya:** los bultos `Activo` **y** `Temporal` pasan a `Suspendido`, y la orden, la ejecución y
+  la OT a `Suspendida`.
+- En sellado en paralelo se suspende todo el grupo Activo (como Finalizar), y "Reanudar" reanuda el
+  grupo entero. La cola muestra el grupo suspendido en una sola tarjeta.
+- No se puede suspender con una pausa abierta. Queda en `SISMovimientos` como `SUSPENDER`, con el motivo
+  y quién autorizó.
+- También queda como observación en `SEL_ObservacionOperario`, con `Origen = 'Suspension'`: cómo se
+  suspendió, el motivo y quién autorizó.

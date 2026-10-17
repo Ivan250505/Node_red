@@ -8,18 +8,20 @@ const sql = require('mssql');
 const { desencriptar } = require('./crypto-mirane');
 const { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO,
         validarAutorizadorPedido, CARGOS_AUTORIZAN_PEDIDO, AUTORIZACION_LIDER_ACTIVA,
-        AUTORIZACION_LIDER_OBLIGATORIA } = require('./auth');
+        AUTORIZACION_LIDER_OBLIGATORIA, validarFirmaCargo, CARGOS_LIDER_SELLADO,
+        CARGOS_JEFE_PLANTA } = require('./auth');
 const { registrarEvento } = require('./accesos');
-const { consultarSerial, confirmarRollo, alternarReferenciaGrupo, materializarInicioOrden } = require('./scan-rollo');
-const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden } = require('./ejecucion-selladora');
+const { consultarSerial, confirmarRollo, alternarReferenciaGrupo, materializarInicioOrden, crearBultoInicial } = require('./scan-rollo');
+const { validarPuedeIniciar, validarPuedeAnadirRollo, finalizarOrden, idsGrupoSelladoDeOrden, idsConEstado } = require('./ejecucion-selladora');
 const {
   obtenerLineaOriginalControlSellado, resolverTurnoMaquina, cerrarBitacora, cerrarBitacorasPorFinTurno,
   repararCoberturaTurnos, turnosParaLogin, sincronizarBitacoraAlEntrar, abrirBitacorasPendientes,
   franjasMaquinaOBase, turnoAJson, columnaExiste, esSupervisor,
   infoOTParaCorreccion, turnosParaCorregirOT, corregirTurnoOT,
-  abrirOReanudarBitacora, suspenderOTDeOrden, reanudarOTDeOrden, horaServidorBD,
+  abrirOReanudarBitacora, suspenderOTDeOrden, reanudarOTDeOrden, reabrirOTDeOrden, horaServidorBD,
   candidatosTurnoMaquina, activarTurnoMaquina, turnosParaCorregir, corregirTurnoMaquina,
-  obtenerAnclaGrupoSellado, obtenerMiembrosGrupoSellado: miembrosGrupoPorOrden, obtenerEstadoAjusteConsumo, ajustarConsumoRollo
+  obtenerAnclaGrupoSellado, obtenerMiembrosGrupoSellado: miembrosGrupoPorOrden, obtenerEstadoAjusteConsumo, ajustarConsumoRollo,
+  obtenerLoteRollo, obtenerBalanceMPSellado
 } = require('./sel-inventario-mp');
 
 const dbConfig = {
@@ -684,6 +686,10 @@ function estilosBase() {
     .badge-activo { background: var(--verde-fondo); color: var(--verde); }
     .badge-temporal { background: var(--naranja-fondo); color: var(--naranja); }
     .badge-pendiente { background: #e0ecfb; color: #0b5ed7; }
+    /* 14/10/2026: orden suspendida -- la que sigue 'Suspendida' y la que Programacion devolvio a la
+       cola se ven igual (a pedido del usuario, "ambas estan suspendidas"): morado, distinta de una
+       orden nueva ("Por iniciar"). */
+    .badge-suspendida { background: #f3e8ff; color: #7e22ce; }
     .orden-cola {
       background: white; border-radius: 14px; padding: 14px 16px; margin-bottom: 12px;
       box-shadow: 0 1px 4px rgba(0,0,0,0.08); display: flex; flex-wrap: wrap; align-items: center;
@@ -1036,8 +1042,8 @@ function bloqueUsuarioHeader(usuario) {
 }
 
 function badgeEstadoOrden(estado) {
-  const clases = { Activa: 'badge-activo', Pendiente: 'badge-pendiente', PendienteValidacion: 'badge-temporal' };
-  const textos = { Activa: 'Activa', Pendiente: 'Por iniciar', PendienteValidacion: 'Pend. validación' };
+  const clases = { Activa: 'badge-activo', Pendiente: 'badge-pendiente', PendienteValidacion: 'badge-temporal', Suspendida: 'badge-suspendida' };
+  const textos = { Activa: 'Activa', Pendiente: 'Por iniciar', PendienteValidacion: 'Pend. validación', Suspendida: 'Suspendida' };
   return `<span class="badge ${clases[estado] || 'badge-temporal'}">${textos[estado] || estado}</span>`;
 }
 
@@ -1094,7 +1100,34 @@ function renderDashboard(maquinas, usuario, error, esAdmin) {
 </html>`;
 }
 
-// Cola de ordenes de la maquina (Activa/Pendiente/PendienteValidacion) con su boton de accion,
+// La suspendida que Programacion devolvio a la cola ('Pendiente' con bultos) se ve igual que una
+// 'Suspendida': misma etiqueta y mismo boton morado "⏯ Reanudar" (14/10/2026, a pedido del usuario).
+// La diferencia esta solo en lo que hace el boton: esta ya la autorizo Programacion, asi que va por
+// iniciarProtocoloArranque -> retomarOrdenSuspendida, sin firmas; la 'Suspendida' pide las dos.
+const BADGE_POR_RETOMAR = `<span class="badge badge-suspendida">Suspendida</span>`;
+function botonRetomarSuspendida(idOrden) {
+  return `<button type="button" class="btn-accion" style="background:#7e22ce;" onclick="iniciarProtocoloArranque(${idOrden})">⏯ Reanudar</button>`;
+}
+
+// Boton "Reanudar" de una orden Suspendida o PendienteValidacion (finalizada por accidente) --
+// 14/10/2026, a pedido del usuario. Pide la firma del Lider de Sellado o la del Jefe de Planta (ver
+// reanudarConFirmas en scriptConfirmarFinalizar y POST /reanudar-con-firmas). En la cola solo sale
+// el de las Suspendidas; el de una finalizada por equivocacion, solo en Informacion (a pedido del
+// usuario, 14/10/2026).
+function botonReanudarConFirmas(o, tipo, descripcion) {
+  const args = [o.IdOrden, jsString(tipo), jsString(descripcion)].join(', ').replace(/"/g, '&quot;');
+  return `<button type="button" class="btn-accion" style="background:#7e22ce;" onclick="reanudarConFirmas(${args})">⏯ Reanudar</button>`;
+}
+
+// Boton "Suspender" de una orden Activa (14/10/2026), solo en Informacion y en la pagina del grupo,
+// no en la cola (a pedido del usuario) -- pide motivo y la firma del Lider de Sellado o
+// del Jefe de Planta (ver suspenderConFirma en scriptConfirmarFinalizar y POST /suspender).
+function botonSuspender(o, descripcion) {
+  const args = [o.IdOrden, jsString(descripcion)].join(', ').replace(/"/g, '&quot;');
+  return `<button type="button" class="btn-accion" style="background:#c0392b;" onclick="suspenderConFirma(${args})">⏹ Suspender</button>`;
+}
+
+// Cola de ordenes de la maquina (Activa/Pendiente/Suspendida/PendienteValidacion) con su boton de accion,
 // mismas reglas de habilitacion que EjecucionSelladora.vb (dgvEjecuciones_CellFormatting +
 // HandleIniciar/HandleAnadirRollo): Pendiente -> Iniciar, Activa -> +Rollo y Finalizar,
 // PendienteValidacion -> sin accion (Residuos/Verificar/Cerrar Definitivo quedan en el escritorio).
@@ -1130,7 +1163,8 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
   for (const [idGrupo, miembros] of gruposFusionables) {
     const estadoComun = miembros[0].Estado;
     const todosMismoEstado = miembros.every(m => m.Estado === estadoComun);
-    const estadoFusionable = estadoComun === 'Pendiente' || estadoComun === 'Activa' || estadoComun === 'PendienteValidacion';
+    // 14/10/2026: tambien 'Suspendida' -- la suspension desde la tableta suspende el grupo entero.
+    const estadoFusionable = ['Pendiente', 'Activa', 'Suspendida', 'PendienteValidacion'].includes(estadoComun);
     const algunoNecesitaControl = estadoComun === 'Activa' && miembros.some(necesitaTomarControlMiembro);
     if (!todosMismoEstado || !estadoFusionable || algunoNecesitaControl) gruposFusionables.delete(idGrupo);
   }
@@ -1147,18 +1181,26 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
       // ALIÑADO 70grs-P DEL FONCE") era ilegible en la tableta.
       const referencias = miembros.map(m => `<div>${m.Elemento}</div>`).join('');
       let accionesGrupo, infoFinalizadaGrupo = '';
+      const grupoPorRetomar = ancla.Estado === 'Pendiente' && miembros.some(m => m.EsPorRetomar);
       if (ancla.Estado === 'Pendiente') {
         // Iniciar un grupo entra por el mismo protocolo de arranque que una orden suelta (ver
         // scriptProtocoloArranque): es un solo proceso fisico -- una sola limpieza, un solo
         // chequeo de peligro quimico, un solo rollo y un solo alistamiento para las 3 referencias.
         // El protocolo corre sobre la ANCLA, que es la orden que confirmarRollo usa para arrancar
-        // a los hermanos del grupo.
-        accionesGrupo = `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${ancla.IdOrden})">▶ Iniciar</button>`;
+        // a los hermanos del grupo. Si es una suspendida que Programacion devolvio a la cola, el boton
+        // es el morado "⏯ Reanudar" (iniciarProtocoloArranque la desvia a retomarOrdenSuspendida).
+        accionesGrupo = grupoPorRetomar
+          ? botonRetomarSuspendida(ancla.IdOrden)
+          : `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${ancla.IdOrden})">▶ Iniciar</button>`;
       } else if (ancla.Estado === 'PendienteValidacion') {
+        // 14/10/2026: "⏯ Reanudar" (finalizada por equivocacion) solo en Informacion, no en la cola.
         accionesGrupo = `<span class="label">Esperando validación del digitador</span>`;
         const horaFinGrupo = formatearFechaHora(ancla.HoraFinReal);
         if (horaFinGrupo) infoFinalizadaGrupo = `<div class="orden-elemento">Finalizada: ${horaFinGrupo}</div>`;
+      } else if (ancla.Estado === 'Suspendida') {
+        accionesGrupo = botonReanudarConFirmas(ancla, 'suspendida', `Pedido ${(ancla.NumeroPedido || '').trim() || '—'}`);
       } else {
+        // 14/10/2026: "⏹ Suspender" solo en Informacion, no en la cola.
         accionesGrupo = `<form method="post" action="/api/selladora/orden/${ancla.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
              <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
            </form>`;
@@ -1167,7 +1209,7 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
       return `
         <div class="orden-cola">
           <div class="orden-info">
-            <div class="orden-pedido">🔗 Pedido ${pedidosFusion.join(' · ') || ancla.NumeroPedido || '—'} ${badgeEstadoOrden(ancla.Estado)}</div>
+            <div class="orden-pedido">🔗 Pedido ${pedidosFusion.join(' · ') || ancla.NumeroPedido || '—'} ${grupoPorRetomar ? BADGE_POR_RETOMAR : badgeEstadoOrden(ancla.Estado)}</div>
             <div class="orden-elemento">${referencias}</div>
             <div class="orden-elemento" style="color:var(--texto-suave);">Un solo proceso -- ${miembros.length} referencias de salida</div>
             ${ancla.OrdenProduccion ? `<div class="orden-elemento" style="color:var(--texto-suave);">OP: ${ancla.OrdenProduccion}</div>` : ''}
@@ -1217,7 +1259,12 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
       // Iniciar ya no abre el escaneo del rollo de una: entra al protocolo de arranque
       // (limpieza -> peligro quimico -> rollo -> chequeo del rollo -> alistamiento -> temperatura),
       // ver scriptProtocoloArranque. El escaneo sigue estando, pero como paso 3.
-      acciones += `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${o.IdOrden})">▶ Iniciar</button>`;
+      // 14/10/2026: una suspendida que Programacion devolvio a la cola lleva el morado "⏯ Reanudar"
+      // (iniciarProtocoloArranque la desvia a retomarOrdenSuspendida, sin protocolo ni firmas).
+      acciones += o.EsPorRetomar
+        ? botonRetomarSuspendida(o.IdOrden)
+        : `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${o.IdOrden})">▶ Iniciar</button>`;    } else if (o.Estado === 'Suspendida') {
+      acciones += botonReanudarConFirmas(o, 'suspendida', `Pedido ${o.NumeroPedido || '—'} · ${o.Elemento}`);
     } else if (o.Estado === 'Activa') {
       // Sellado en paralelo (08/09/2026): "+Rollo" no aplica a una orden agrupada -- el rollo de
       // entrada ya quedó registrado UNA sola vez para las 3 referencias al dar "Iniciar" en la
@@ -1228,6 +1275,7 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
           <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
         </form>`;
     } else {
+      // 14/10/2026: "⏯ Reanudar" (finalizada por equivocacion) solo en Informacion, no en la cola.
       acciones += `<span class="label">Esperando validación del digitador</span>`;
       // FIX 01/09/2026: se muestra la hora en la que se finalizo (SEL_EjecucionOrden.HoraFinReal,
       // la pone finalizarOrden() al dar "Finalizar") -- a pedido del usuario, para saber desde
@@ -1236,9 +1284,13 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
       const horaFin = formatearFechaHora(o.HoraFinReal);
       if (horaFin) infoFinalizada = `<div class="orden-elemento">Finalizada: ${horaFin}</div>`;
     }
+    // 14/10/2026: suspension pedida "al terminar el bulto" -- sigue Activa hasta que el PLC lo cierre.
+    if (o.Estado === 'Activa' && o.EstadoEjecucion === 'SuspensionEnCurso') {
+      infoFinalizada = `<div class="orden-elemento" style="color:#c0392b;font-weight:600;">Se suspende al cerrar el bulto en curso</div>`;
+    }
     const badge = necesitaTomarControl
       ? `<span class="badge badge-temporal">Pendiente de operador</span>`
-      : badgeEstadoOrden(o.Estado);
+      : (o.Estado === 'Pendiente' && o.EsPorRetomar ? BADGE_POR_RETOMAR : badgeEstadoOrden(o.Estado));
     return `
       <div class="orden-cola">
         <div class="orden-info">
@@ -1308,7 +1360,7 @@ function scriptPesoEnVivo() {
             // peso null = el servidor perdio la conexion con Node-RED (ver conectarNodeRed).
             if (json && json.peso === null) window.ultimoPesoBascula = null;
             if (json && typeof json.peso === 'number') {
-              texto = json.peso.toFixed(2);
+              texto = json.peso.toFixed(3);
               // Ultimo peso recibido, en window para que lo pueda CAPTURAR la verificacion de
               // bascula del protocolo (14/09/2026). Hasta ahora este numero solo se pintaba en el
               // HTML y no quedaba en ninguna variable, asi que no habia forma de leerlo desde otro
@@ -1386,7 +1438,7 @@ function scriptResumenBultoActivo(idOrden, maquinaCodigo) {
           const datos = await resp.json();
           if (!datos.ok) return;
           elPaquetes.textContent = datos.paquetes;
-          elPeso.textContent = datos.pesoTotalKg.toFixed(2);
+          elPeso.textContent = datos.pesoTotalKg.toFixed(3);
           // Se guarda en window (no en una var local del IIFE) para que confirmarPesoYEnviar, que
           // vive en otro <script> (scriptComandos), pueda leer cual es el bulto Activo ahora mismo
           // al marcar un residuo/salida no conforme (01/09/2026, a pedido del usuario).
@@ -1434,6 +1486,259 @@ function scriptActualizarCola(maquinaCodigo) {
   `;
 }
 
+// Pizarra / muro de observaciones de la maquina (16/10/2026, a pedido del usuario). Notas tipo
+// post-it que se quedan en la pantalla de la selladora para todos los turnos, con color por tipo y
+// la opcion de fijarlas arriba. No se borran desde la tableta. Tabla: SEL_MuroMaquina, script
+// sql/pendientes/20261016_agregar_muro_maquina.sql.
+const TIPOS_MURO = {
+  Nota: { label: 'Nota', fondo: '#fff8c5', borde: '#b89a00' },
+  Aviso: { label: 'Aviso', fondo: '#ffe0e0', borde: '#c0392b' },
+  Mantenimiento: { label: 'Mantenimiento', fondo: '#dceeff', borde: '#2f7fd1' },
+  Calidad: { label: 'Calidad', fondo: '#e3f6d8', borde: '#4a9c2e' }
+};
+const SCRIPT_MURO = 'sql/pendientes/20261016_agregar_muro_maquina.sql';
+
+// Todas las fijadas y las 40 mas recientes sin fijar. null si la tabla todavia no existe.
+async function obtenerMuroMaquina(p, codigo) {
+  try {
+    const r = await p.request().input('maquina', codigo).query(`
+      SELECT Id, Texto, Tipo, Fijada, NombreUsuario, FechaHora FROM SEL_MuroMaquina
+      WHERE Maquina = @maquina AND Fijada = 1
+      UNION ALL
+      SELECT * FROM (
+        SELECT TOP 40 Id, Texto, Tipo, Fijada, NombreUsuario, FechaHora FROM SEL_MuroMaquina
+        WHERE Maquina = @maquina AND Fijada = 0
+        ORDER BY FechaHora DESC
+      ) recientes
+      ORDER BY Fijada DESC, FechaHora DESC
+    `);
+    return r.recordset;
+  } catch (err) {
+    if (/Invalid object name|SEL_MuroMaquina/i.test(err.message || '')) return null;
+    throw err;
+  }
+}
+
+function renderMuroNotas(notas) {
+  const esc = t => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  if (notas === null) return `<div class="vacio">Falta correr el script ${SCRIPT_MURO} contra esta base.</div>`;
+  if (notas.length === 0) return `<div class="vacio">La pizarra está vacía. Escriba la primera observación.</div>`;
+  return `<div class="muro-grid">${notas.map(n => {
+    const tipo = TIPOS_MURO[n.Tipo] || TIPOS_MURO.Nota;
+    return `
+      <div class="muro-nota${n.Fijada ? ' muro-fijada' : ''}" style="background:${tipo.fondo};border-top-color:${tipo.borde};">
+        <div class="muro-nota-top">
+          <span class="muro-tipo" style="color:${tipo.borde};">${n.Fijada ? '📌 ' : ''}${tipo.label}</span>
+          <button type="button" class="muro-btn-fijar" onclick="fijarNotaMuro(${n.Id}, ${n.Fijada ? 'false' : 'true'})">${n.Fijada ? 'Desfijar' : 'Fijar arriba'}</button>
+        </div>
+        <div class="muro-texto">${esc(n.Texto)}</div>
+        <div class="muro-pie">${esc(n.NombreUsuario || '')} · ${formatearFechaHora(n.FechaHora)}</div>
+      </div>`;
+  }).join('')}</div>`;
+}
+
+function estilosMuro() {
+  return `
+    /* Boton de la pizarra en la cola de pedidos (16/10/2026): columna del medio del encabezado, entre
+       el titulo de la maquina y la campana/Cerrar sesion. */
+    .btn-pizarra {
+      display: inline-block; background: #fff8c5; color: #6b5a00; font-size: 16px; font-weight: 700;
+      text-decoration: none; padding: 12px 26px; border-radius: 10px; justify-self: center;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+    }
+    .btn-pizarra:active { transform: translateY(1px); }
+    .muro { margin-top: 6px; }
+    .muro h2 { font-size: 16px; margin: 0 0 10px; }
+    .muro-form { background: white; border-radius: 14px; padding: 14px 16px; margin-bottom: 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+    .muro-form textarea { width: 100%; min-height: 70px; font-size: 16px; padding: 10px; border-radius: 10px; border: 1px solid #d0d7de; font-family: inherit; resize: vertical; }
+    .muro-form-fila { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
+    .muro-tipos { display: flex; gap: 6px; flex-wrap: wrap; flex: 1 1 auto; }
+    .muro-tipos label { display: inline-flex; align-items: center; margin: 0; padding: 8px 14px; border-radius: 999px; border: 2px solid transparent; cursor: pointer; font-size: 14px; }
+    .muro-tipos input { display: none; }
+    .muro-tipos label.elegido { border-color: currentColor; font-weight: 700; }
+    .muro-form .muro-publicar { width: auto; background: var(--verde-marca); color: white; padding: 10px 26px; }
+    .muro-form .muro-publicar:disabled { opacity: 0.6; }
+    .muro-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+    .muro-nota { border-radius: 10px; border-top: 6px solid; padding: 12px 14px; box-shadow: 0 2px 6px rgba(0,0,0,0.12); display: flex; flex-direction: column; gap: 8px; }
+    .muro-fijada { box-shadow: 0 3px 12px rgba(0,0,0,0.25); }
+    .muro-nota-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .muro-tipo { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; }
+    .muro-nota .muro-btn-fijar { width: auto; font-size: 12px; padding: 6px 10px; box-shadow: none; background: rgba(255,255,255,0.75); color: var(--texto); border-radius: 8px; }
+    .muro-texto { font-size: 15px; white-space: pre-wrap; word-break: break-word; color: var(--texto); }
+    .muro-pie { font-size: 12px; color: var(--texto-suave); margin-top: auto; }
+  `;
+}
+
+function seccionMuro(notas) {
+  const tipos = Object.entries(TIPOS_MURO).map(([clave, t], i) =>
+    `<label class="${i === 0 ? 'elegido' : ''}" style="color:${t.borde};background:${t.fondo};"><input type="radio" name="muroTipo" value="${clave}"${i === 0 ? ' checked' : ''}>${t.label}</label>`
+  ).join('');
+  return `
+    <section class="muro">
+      <h2>📝 Pizarra de la máquina</h2>
+      <div class="muro-form">
+        <textarea id="muro-texto" maxlength="500" placeholder="Escriba una observación para todos los turnos…"></textarea>
+        <div class="muro-form-fila">
+          <div class="muro-tipos">${tipos}</div>
+          <button type="button" class="muro-publicar" onclick="publicarNotaMuro(this)">Publicar</button>
+        </div>
+      </div>
+      <div id="muro-notas">${renderMuroNotas(notas)}</div>
+    </section>`;
+}
+
+function scriptMuroMaquina(maquinaCodigo) {
+  return `
+    (function() {
+      var codigo = ${jsString(maquinaCodigo)};
+      var contenedor = document.getElementById('muro-notas');
+      if (!contenedor) return;
+
+      function error(titulo, texto) {
+        Swal.fire({ icon: 'error', title: titulo, text: texto || '', confirmButtonColor: '#71bf44' });
+      }
+
+      // Resalta el tipo escogido (los radio van ocultos, se ve solo la pastilla de color).
+      document.querySelectorAll('input[name="muroTipo"]').forEach(function(r) {
+        r.addEventListener('change', function() {
+          document.querySelectorAll('.muro-tipos label').forEach(function(l) {
+            l.classList.toggle('elegido', l.querySelector('input').checked);
+          });
+        });
+      });
+
+      async function recargar() {
+        try {
+          var resp = await fetch('/selladora/' + encodeURIComponent(codigo) + '/muro-fragmento');
+          if (resp.ok) contenedor.innerHTML = await resp.text();
+        } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
+      }
+
+      window.publicarNotaMuro = async function(btn) {
+        var caja = document.getElementById('muro-texto');
+        var texto = (caja.value || '').trim();
+        if (!texto) { error('Escriba la observación'); return; }
+        var sel = document.querySelector('input[name="muroTipo"]:checked');
+        btn.disabled = true;
+        try {
+          var r = await fetch('/api/selladora/' + encodeURIComponent(codigo) + '/muro', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ texto: texto, tipo: sel ? sel.value : 'Nota' })
+          });
+          var d = await r.json();
+          if (!d.ok) { error('No se publicó la nota', d.error); return; }
+          caja.value = '';
+          await recargar();
+        } catch (e) {
+          error('Sin conexión', 'No se publicó la nota. Intente de nuevo.');
+        } finally {
+          btn.disabled = false;
+        }
+      };
+
+      window.fijarNotaMuro = async function(id, fijar) {
+        try {
+          var r = await fetch('/api/selladora/muro/' + id + '/fijar', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fijar: fijar })
+          });
+          var d = await r.json();
+          if (!d.ok) { error('No se pudo ' + (fijar ? 'fijar' : 'desfijar') + ' la nota', d.error); return; }
+          await recargar();
+        } catch (e) {
+          error('Sin conexión', 'Intente de nuevo.');
+        }
+      };
+
+      // Las notas que escriben desde otra tableta u otro turno aparecen solas. No se redibuja con
+      // una ventana abierta, mismo criterio que scriptActualizarCola.
+      setInterval(function() {
+        if (typeof Swal !== 'undefined' && Swal.isVisible()) return;
+        recargar();
+      }, 15000);
+    })();
+  `;
+}
+
+// Pagina propia de la pizarra (16/10/2026): se entra con el boton "Pizarra" de debajo del logo en
+// la cola de pedidos.
+function renderPizarra(usuario, maquinaNombre, maquinaCodigo, notas) {
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pizarra — ${maquinaNombre}</title>
+  <style>${estilosBase()}${estilosMuro()}</style>
+</head>
+<body>
+  <header>
+    <div class="header-top">
+      <div class="logo-wrap"><img class="logo" src="/logo-carlixplast.png" alt="Carlixplast"></div>
+    </div>
+    <div class="header-inner">
+      <div class="header-fila">
+        <div class="header-info">
+          <h1>📝 Pizarra · ${maquinaNombre}</h1>
+          <div class="sub">Observaciones para todos los turnos</div>
+          <a class="volver" href="/selladora/${encodeURIComponent(maquinaCodigo)}">‹ Cola de pedidos</a>
+        </div>
+        ${bloqueUsuarioHeader(usuario)}
+      </div>
+    </div>
+  </header>
+  <main>
+    ${seccionMuro(notas)}
+  </main>
+  <script src="/sweetalert2.min.js"></script>
+  <script>${scriptNotificaciones(maquinaCodigo)}</script>
+  <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPizarra(maquinaCodigo)}</script>
+  <script>${scriptMuroMaquina(maquinaCodigo)}</script>
+</body>
+</html>`;
+}
+
+// Aviso de "alguien escribio en la pizarra" (16/10/2026). Va en todas las paginas de una maquina,
+// igual que el de pedido nuevo, y solo anota en el panel de notificaciones lo que escriben OTROS
+// usuarios (el servidor filtra por SISUsuarios.Codigo). Guarda en localStorage, por base y por
+// maquina, el Id de la ultima nota vista: sin Id guardado se toma la foto en silencio, para no
+// soltar de golpe todo el muro la primera vez.
+function scriptAvisoPizarra(maquinaCodigo) {
+  if (!maquinaCodigo) return '';
+  return `
+    (function() {
+      var MAQUINA = ${jsString(maquinaCodigo)};
+      var CLAVE = 'carlixplast.pizarra.vista.' + ${jsString(CLAVE_BASE_DATOS)} + '.' + MAQUINA;
+      function leer() { try { var v = localStorage.getItem(CLAVE); return v == null ? null : Number(v) || 0; } catch (e) { return null; } }
+      function guardar(id) { try { localStorage.setItem(CLAVE, String(id)); } catch (e) {} }
+
+      async function revisar() {
+        var desde = leer();
+        try {
+          var r = await fetch('/api/selladora/' + encodeURIComponent(MAQUINA) + '/muro/novedades' + (desde != null ? '?desde=' + desde : ''));
+          if (!r.ok) return;
+          var d = await r.json();
+          if (!d.ok) return;
+          // Otra pestana pudo adelantarse mientras llegaba la respuesta: ella ya las anoto.
+          var actual = leer();
+          if (desde != null && actual != null && actual > desde) return;
+          if (desde != null && typeof registrarNotificacion === 'function') {
+            (d.nuevas || []).slice().reverse().forEach(function(n) {
+              registrarNotificacion('pizarra',
+                (n.nombreUsuario || 'Alguien') + ' escribió en la pizarra' + (n.tipo && n.tipo !== 'Nota' ? ' (' + n.tipo + ')' : ''),
+                n.texto.length > 140 ? n.texto.slice(0, 140) + '…' : n.texto, 'pizarra:' + n.id);
+            });
+          }
+          guardar(d.ultimoId || 0);
+        } catch (e) { /* red intermitente -- se reintenta en el proximo tick */ }
+      }
+      revisar();
+      setInterval(revisar, 15000);
+    })();
+  `;
+}
+
 // Aviso de "Programación pidió suspender esta orden" (a pedido del usuario, 07/09/2026 -- reunión
 // Germán/Ángela/Carlos, alternativa A: la decisión de reprorizar es de Programación/escritorio, el
 // operario solo decide el detalle físico de terminar o no el bulto en curso).
@@ -1453,8 +1758,9 @@ function scriptActualizarCola(maquinaCodigo) {
 // Apartado de notificaciones (18/09/2026, a pedido del usuario: "al lado del nombre de usuario
 // quiero un boton donde pueda acceder a un apartado de notificaciones").
 //
-// QUE GUARDA: los avisos que la tableta ya mostraba y se perdian al cerrarse -- pedido nuevo en la
-// cola, suspension pedida por Programacion, chequeo de calidad y protocolo de arranque a medias.
+// QUE GUARDA: desde el 16/10/2026 (a pedido del usuario) solo dos cosas -- pedido nuevo en la cola
+// y lo que otros usuarios escriben en la pizarra de la maquina (scriptAvisoPizarra). Antes tambien
+// anotaba la suspension pedida por Programacion, el chequeo de calidad y el protocolo a medias.
 // El operario que cerro sin querer el aviso, o que no estaba mirando la tableta, puede volver a
 // leerlo. Los avisos siguen saliendo igual que siempre: esto es el historial, no los reemplaza.
 //
@@ -1497,9 +1803,10 @@ function scriptNotificaciones(maquinaCodigo) {
       }
     } catch (e) {}
 
-    var NOTIF_ICONOS = {
-      pedido: '📦', suspension: '⏸', calidad: '✅', calidad_alerta: '⚠️', protocolo: '⚙️'
-    };
+    // 16/10/2026 (a pedido del usuario): las unicas notificaciones son los pedidos nuevos y lo que
+    // otros usuarios escriben en la pizarra de la maquina. Lo anotado antes de otros tipos
+    // (suspension, calidad, protocolo) se descarta al leer.
+    var NOTIF_ICONOS = { pedido: '📦', pizarra: '📝' };
 
     function notifEscapar(texto) {
       return String(texto == null ? '' : texto)
@@ -1507,7 +1814,10 @@ function scriptNotificaciones(maquinaCodigo) {
     }
 
     function leerNotificaciones() {
-      try { var v = JSON.parse(localStorage.getItem(NOTIF_CLAVE)); return Array.isArray(v) ? v : []; }
+      try {
+        var v = JSON.parse(localStorage.getItem(NOTIF_CLAVE));
+        return Array.isArray(v) ? v.filter(function(n) { return n && NOTIF_ICONOS[n.tipo]; }) : [];
+      }
       catch (e) { return []; }
     }
 
@@ -1523,6 +1833,7 @@ function scriptNotificaciones(maquinaCodigo) {
     // dentro de la ultima media hora no se anota otra vez; si no, el panel se llenaria del mismo
     // renglon repetido y el contador no pararia de subir.
     window.registrarNotificacion = function(tipo, titulo, detalle, clave) {
+      if (!NOTIF_ICONOS[tipo]) return;
       try {
         var lista = leerNotificaciones();
         if (clave) {
@@ -1577,7 +1888,7 @@ function scriptNotificaciones(maquinaCodigo) {
       }
       cuerpo.innerHTML = lista.map(function(n) {
         return '<div class="notif-item' + (n.leida ? '' : ' no-leida') + '">' +
-                 '<div class="notif-icono">' + (NOTIF_ICONOS[n.tipo] || '🔔') + '</div>' +
+                 '<div class="notif-icono">' + NOTIF_ICONOS[n.tipo] + '</div>' +
                  '<div class="notif-cuerpo">' +
                    '<div class="notif-titulo">' + notifEscapar(n.titulo) + '</div>' +
                    (n.detalle ? '<div class="notif-detalle">' + notifEscapar(n.detalle) + '</div>' : '') +
@@ -1733,13 +2044,6 @@ function scriptAvisoSuspension(maquinaCodigo) {
         if (Swal.isVisible()) { setTimeout(function() { revisar(); }, 5000); return; }
 
         idPreguntado = datos.idOrden;
-        // Historial de notificaciones (18/09/2026). Con clave: el sondeo corre cada 5s y la
-        // pregunta puede volver a salir al recargar la tableta -- sin ella se anotaria en bucle.
-        if (typeof registrarNotificacion === 'function') {
-          registrarNotificacion('suspension',
-            'Programación pidió suspender el pedido ' + (datos.numeroPedido || '—'),
-            datos.elemento || '', 'suspension:' + datos.idOrden);
-        }
         pitar();
         if (navigator.vibrate) { try { navigator.vibrate([200, 100, 200, 100, 200]); } catch (e) {} }
         Swal.fire({
@@ -2817,20 +3121,6 @@ function abrirCalidad() {
     }
 
     function guardarCalidad(respuestas) {
-      // Historial de notificaciones (18/09/2026): se anota el RESULTADO, que es lo que despues se
-      // quiere volver a mirar. La ventana del chequeo es bloqueante, no se puede perder de vista;
-      // lo que se pierde es en que quedo, sobre todo si salio algo no conforme.
-      if (typeof registrarNotificacion === 'function') {
-        var noConformes = Object.keys(respuestas).filter(function(k) {
-          return respuestas[k] === 'no_conforme';
-        }).length;
-        registrarNotificacion(
-          noConformes > 0 ? 'calidad_alerta' : 'calidad',
-          noConformes > 0
-            ? 'Chequeo de calidad con ' + noConformes + ' no conforme(s)'
-            : 'Chequeo de calidad conforme',
-          window.idBultoActivo ? 'Bulto ' + window.idBultoActivo : '');
-      }
       // calidadEnPantalla se libera cuando el POST termina, no cuando se cierra la ventana: si se
       // liberara antes, el sondeo de 5s podria alcanzar al guardado a medio camino (el servidor
       // todavia no ha escrito el chequeo, /calidad-pendiente sigue diciendo que si) y volveria a
@@ -3579,17 +3869,263 @@ function scriptConfirmarFinalizar() {
         return false;
       }
 
-      if (typeof exigirAutorizacion !== 'function') {
-        // Pagina sin el script de autorizacion cargado: igual que arriba, decide el servidor.
-        confirmarFinalizarPaso2(formulario);
-        return false;
-      }
-
-      exigirAutorizacion(idOrdenFin).then(function(autorizado) {
-        if (!autorizado) return;
-        confirmarFinalizarPaso2(formulario);
+      // 14/10/2026: primero el avance (menos del 95% pide la firma del Lider o del Jefe de Planta),
+      // despues la firma del turno de siempre. 16/10/2026: antes de las firmas, el aviso de salida
+      // por encima de la materia prima escaneada (revisarAvanceAntesDeFinalizar lo muestra primero).
+      revisarAvanceAntesDeFinalizar(idOrdenFin).then(function(sigue) {
+        if (!sigue) return;
+        if (typeof exigirAutorizacion !== 'function') {
+          // Pagina sin el script de autorizacion cargado: igual que arriba, decide el servidor.
+          confirmarFinalizarPaso2(formulario);
+          return;
+        }
+        exigirAutorizacion(idOrdenFin).then(function(autorizado) {
+          if (!autorizado) return;
+          confirmarFinalizarPaso2(formulario);
+        });
       });
       return false;
+    }
+
+    function escaparFirma(texto) {
+      return String(texto == null ? '' : texto).replace(/[&<>"]/g, function(c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+      });
+    }
+
+    // Firma de un cargo para una accion puntual del pedido (14/10/2026): finalizar con menos del 95%
+    // (rol liderOJefe) o reanudar (rol lider, luego rol jefe). El servidor la valida y la guarda unos
+    // minutos en la sesion; la accion la exige alla. Resuelve { nombre, cargo } o null si se cancela.
+    function pedirFirmaCargo(idOrden, proposito, rol, titulo, htmlArriba) {
+      return Swal.fire({
+        title: titulo,
+        html: '<div style="text-align:left;font-size:14px;">' + (htmlArriba || '') +
+                '<label style="display:block;font-weight:600;margin-bottom:4px;">Usuario</label>' +
+                '<input id="firma-usuario" class="swal2-input" style="margin:0 0 10px;width:100%;" ' +
+                  'autocapitalize="characters" autocomplete="off" spellcheck="false">' +
+                '<label style="display:block;font-weight:600;margin-bottom:4px;">Contraseña</label>' +
+                '<input id="firma-clave" type="password" class="swal2-input" style="margin:0;width:100%;" autocomplete="off">' +
+              '</div>',
+        width: 500,
+        showCancelButton: true,
+        confirmButtonText: 'Firmar',
+        confirmButtonColor: '#71bf44',
+        cancelButtonText: 'Cancelar',
+        cancelButtonColor: '#c0392b',
+        allowOutsideClick: false,
+        didOpen: function() {
+          var u = document.getElementById('firma-usuario');
+          if (u) u.focus();
+        },
+        preConfirm: function() {
+          var codigo = (document.getElementById('firma-usuario').value || '').trim();
+          var clave = document.getElementById('firma-clave').value || '';
+          if (!codigo || !clave) { Swal.showValidationMessage('Escriba usuario y contraseña.'); return false; }
+          return enviarFirmaCargo(idOrden, proposito, rol, codigo, clave);
+        }
+      }).then(function(r) { return (r.isConfirmed && r.value) ? r.value : null; });
+    }
+
+    // POST de la firma desde dentro de un Swal abierto (preConfirm/preDeny): resuelve la firma o
+    // false, dejando el error como mensaje de validacion para que la ventana siga abierta.
+    function enviarFirmaCargo(idOrden, proposito, rol, codigo, clave) {
+      Swal.showLoading();
+      return fetch('/api/selladora/orden/' + idOrden + '/firma', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proposito: proposito, rol: rol, codigo: codigo, password: clave })
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(resp) {
+          if (!resp.ok) { Swal.showValidationMessage(resp.error || 'No se pudo firmar.'); return false; }
+          return resp.firma;
+        })
+        .catch(function() { Swal.showValidationMessage('Error de conexión.'); return false; });
+    }
+
+    // Resuelve true si se puede seguir con el Finalizar: avance >= 95% (o sin meta), o ya firmado.
+    // Si la consulta falla se deja seguir -- el servidor tiene la misma regla y rechaza el POST.
+    // Antes del avance, el aviso de salida contra materia prima (avisarExcesoMP).
+    function revisarAvanceAntesDeFinalizar(idOrden) {
+      return fetch('/api/selladora/orden/' + idOrden + '/finalizar/requisitos')
+        .then(function(r) { return r.json(); })
+        .then(function(datos) {
+          if (!datos.ok) return true;
+          return avisarExcesoMP(datos.balance).then(function(sigue) {
+            if (!sigue) return false;
+            return revisarAvance(idOrden, datos);
+          });
+        })
+        .catch(function() { return true; });
+    }
+
+    // Salida (bultos + residuos registrados) por encima de la materia prima escaneada (16/10/2026).
+    // Es un AVISO, no un bloqueo: "Finalizar de todas formas" sigue; "Volver a escanear rollo"
+    // cierra sin finalizar para que el operario use + Rollo en la tarjeta. Resuelve true si sigue.
+    function avisarExcesoMP(b) {
+      if (!b || !b.excede) return Promise.resolve(true);
+      var kg = function(n) {
+        return Number(n).toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' kg';
+      };
+      var fila = function(etiqueta, valor, estilo) {
+        return '<tr><td style="padding:3px 10px 3px 0;color:#64748b;">' + etiqueta + '</td>' +
+               '<td style="padding:3px 0;text-align:right;' + (estilo || '') + '">' + valor + '</td></tr>';
+      };
+      return Swal.fire({
+        icon: 'warning',
+        title: 'La salida supera la materia prima escaneada',
+        html: '<table style="margin:0 auto 12px;font-size:15px;border-collapse:collapse;">' +
+                fila('Materia prima escaneada', '<b>' + kg(b.entrada) + '</b>') +
+                fila('Bultos', kg(b.bultos)) +
+                fila('Residuos registrados', kg(b.residuos)) +
+                fila('Salida total', '<b>' + kg(b.salida) + '</b>') +
+                fila('Diferencia', '<b>' + kg(b.diferencia) + '</b>', 'color:#c0392b;') +
+              '</table>' +
+              '<div style="font-size:15px;">¿Falta escanear un rollo?</div>',
+        width: 520,
+        showDenyButton: true,
+        confirmButtonText: 'Volver a escanear rollo',
+        confirmButtonColor: '#71bf44',
+        denyButtonText: 'Finalizar de todas formas',
+        denyButtonColor: '#c0392b',
+        allowOutsideClick: false
+      }).then(function(r) { return r.isDenied; });
+    }
+
+    // El avance con los datos de /finalizar/requisitos ya consultados: true o la firma del cargo.
+    function revisarAvance(idOrden, datos) {
+      if (!datos.bajas || datos.bajas.length === 0 || datos.firmado) return true;
+      var lista = datos.bajas.map(function(b) {
+        return '<li>' + escaparFirma(b.descripcion) + ': <b>' +
+               b.porcentaje.toLocaleString('es-CO', { maximumFractionDigits: 1 }) + '%</b>' +
+               ' <span style="color:#64748b;">(' + escaparFirma(b.producido) + ' de ' + escaparFirma(b.programado) + ')</span></li>';
+      }).join('');
+      var aviso = '<div style="background:#fdecea;border-left:5px solid #c0392b;padding:10px 12px;border-radius:8px;margin-bottom:14px;">' +
+                    'El porcentaje de avance <b>no ha completado el 100%</b>:' +
+                    '<ul style="margin:6px 0 0 18px;padding:0;">' + lista + '</ul>' +
+                    '<div style="margin-top:8px;">Para finalizar con menos del ' + datos.minimo + '% se necesita la firma del ' +
+                    '<b>Líder de Sellado</b> o del <b>Jefe de Planta</b>.</div>' +
+                  '</div>';
+      return pedirFirmaCargo(idOrden, 'finalizar', 'liderOJefe', '⚠ Avance incompleto', aviso)
+        .then(function(firma) { return !!firma; });
+    }
+
+    // Suspender un pedido desde la tableta (14/10/2026): motivo obligatorio, terminar el bulto en
+    // curso o suspender ya, firma del Lider de Sellado o del Jefe de Planta, y POST /suspender.
+    // 15/10/2026: motivo y firma en una sola ventana (antes eran dos), a pedido del usuario.
+    function suspenderConFirma(idOrden, descripcion) {
+      var cabecera = '<div style="font-size:16px;font-weight:600;color:#006984;margin-bottom:10px;">' + escaparFirma(descripcion) + '</div>';
+      var motivo = '';
+      function motivoYFirma() {
+        motivo = (document.getElementById('suspender-motivo').value || '').trim();
+        var codigo = (document.getElementById('firma-usuario').value || '').trim();
+        var clave = document.getElementById('firma-clave').value || '';
+        if (motivo.length < 3) { Swal.showValidationMessage('Escriba el motivo de la suspensión.'); return false; }
+        if (!codigo || !clave) { Swal.showValidationMessage('Escriba usuario y contraseña de quien autoriza.'); return false; }
+        return enviarFirmaCargo(idOrden, 'suspender', 'liderOJefe', codigo, clave);
+      }
+      Swal.fire({
+        icon: 'warning',
+        title: 'Suspender pedido',
+        html: cabecera +
+              '<div style="text-align:left;font-size:14px;">' +
+                '<div style="color:#64748b;line-height:1.5;margin-bottom:12px;">' +
+                  '<b>Terminar el bulto</b>: la máquina sigue hasta cerrar el bulto que está llenando y ahí se suspende.<br>' +
+                  '<b>Suspender ya</b>: se corta ahora; el bulto queda guardado para cuando se reanude.' +
+                '</div>' +
+                '<label style="display:block;font-weight:600;margin-bottom:4px;">Motivo de la suspensión</label>' +
+                '<textarea id="suspender-motivo" class="swal2-textarea" style="margin:0 0 12px;width:100%;" ' +
+                  'placeholder="Obligatorio"></textarea>' +
+                '<div style="color:#64748b;margin-bottom:8px;">Firma del <b>Líder de Sellado</b> o del <b>Jefe de Planta</b>:</div>' +
+                '<label style="display:block;font-weight:600;margin-bottom:4px;">Usuario</label>' +
+                '<input id="firma-usuario" class="swal2-input" style="margin:0 0 10px;width:100%;" ' +
+                  'autocapitalize="characters" autocomplete="off" spellcheck="false">' +
+                '<label style="display:block;font-weight:600;margin-bottom:4px;">Contraseña</label>' +
+                '<input id="firma-clave" type="password" class="swal2-input" style="margin:0;width:100%;" autocomplete="off">' +
+              '</div>',
+        width: 560,
+        showDenyButton: true,
+        showCancelButton: true,
+        confirmButtonText: 'Terminar el bulto y suspender', confirmButtonColor: '#b46200',
+        denyButtonText: 'Suspender ya', denyButtonColor: '#c0392b',
+        cancelButtonText: 'Cancelar', cancelButtonColor: '#64748b',
+        allowOutsideClick: false,
+        didOpen: function() {
+          var m = document.getElementById('suspender-motivo');
+          if (m) m.focus();
+        },
+        preConfirm: motivoYFirma,
+        preDeny: motivoYFirma
+      })
+        .then(function(r) {
+          if ((!r.isConfirmed && !r.isDenied) || !r.value) return;
+          var terminarBulto = r.isConfirmed;
+          Swal.fire({ title: 'Suspendiendo…', allowOutsideClick: false, showConfirmButton: false, didOpen: function() { Swal.showLoading(); } });
+          return fetch('/api/selladora/orden/' + idOrden + '/suspender', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ terminarBulto: terminarBulto, motivo: motivo })
+          })
+            .then(function(r) { return r.json(); })
+            .then(function(datos) {
+              if (!datos.ok) {
+                Swal.fire({ icon: 'error', title: 'No se pudo suspender', text: datos.error || '', confirmButtonColor: '#71bf44' });
+                return;
+              }
+              Swal.fire({
+                icon: 'success',
+                title: datos.esperaBulto ? 'Suspensión en curso' : 'Pedido suspendido',
+                text: datos.esperaBulto ? 'Se suspende cuando la máquina cierre el bulto que está llenando.' : 'Quedó suspendido. Se puede reanudar desde la cola con la firma del Líder de Sellado o del Jefe de Planta.',
+                confirmButtonColor: '#71bf44'
+              }).then(function() { location.reload(); });
+            });
+        })
+        .catch(function() {
+          Swal.fire({ icon: 'error', title: 'Sin conexión', text: 'Intente de nuevo.', confirmButtonColor: '#71bf44' });
+        });
+    }
+
+    // Reanudar un pedido Suspendido o finalizado por accidente (14/10/2026): la firma del Lider de
+    // Sellado O del Jefe de Planta (17/10/2026, antes las dos), y despues POST /reanudar-con-firmas.
+    // tipo: 'suspendida' | 'finalizada'.
+    function reanudarConFirmas(idOrden, tipo, descripcion) {
+      var cabecera = '<div style="font-size:16px;font-weight:600;color:#006984;margin-bottom:10px;">' + escaparFirma(descripcion) + '</div>';
+      var explicacion = tipo === 'finalizada'
+        ? 'Este pedido ya se finalizó y espera la validación del digitador. Al reanudarlo vuelve a quedar <b>Activo</b> en esta máquina, sobre lo ya producido, con un bulto nuevo para seguir pesando.'
+        : 'Este pedido está suspendido. Al reanudarlo vuelve a quedar <b>Activo</b> en esta máquina, sobre lo ya producido y sin protocolo de arranque.';
+      Swal.fire({
+        icon: 'question',
+        title: tipo === 'finalizada' ? 'Reanudar pedido finalizado' : 'Reanudar pedido suspendido',
+        html: cabecera +
+              '<div style="text-align:left;font-size:14px;color:#64748b;line-height:1.5;">' + explicacion +
+                '<br><br>Se necesita la firma del <b>Líder de Sellado</b> o del <b>Jefe de Planta</b>.' +
+              '</div>',
+        showCancelButton: true,
+        confirmButtonText: '🔑 Pedir firma', confirmButtonColor: '#7e22ce',
+        cancelButtonText: 'Cancelar', cancelButtonColor: '#64748b'
+      })
+        .then(function(r) {
+          if (!r.isConfirmed) return null;
+          return pedirFirmaCargo(idOrden, 'reanudar', 'liderOJefe', '🔑 Firma: Líder de Sellado o Jefe de Planta', cabecera);
+        })
+        .then(function(firma) {
+          if (!firma) return;
+          Swal.fire({ title: 'Reanudando…', allowOutsideClick: false, showConfirmButton: false, didOpen: function() { Swal.showLoading(); } });
+          return fetch('/api/selladora/orden/' + idOrden + '/reanudar-con-firmas', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+          })
+            .then(function(r) { return r.json(); })
+            .then(function(datos) {
+              if (!datos.ok) {
+                Swal.fire({ icon: 'error', title: 'No se pudo reanudar', text: datos.error || '', confirmButtonColor: '#71bf44' });
+                return;
+              }
+              Swal.fire({ icon: 'success', title: 'Pedido reanudado', text: 'Quedó activo en esta máquina.', timer: 2200, showConfirmButton: false })
+                .then(function() { location.reload(); });
+            });
+        })
+        .catch(function() {
+          Swal.fire({ icon: 'error', title: 'Sin conexión', text: 'Intente de nuevo.', confirmButtonColor: '#71bf44' });
+        });
     }
 
     function confirmarFinalizarPaso2(formulario) {
@@ -3681,6 +4217,28 @@ function scriptEscanearRollo(maquinaCodigo) {
              '<span style="color:#64748b;">' + etiqueta + '</span><strong>' + valor + '</strong></div>';
     }
 
+    // 16/10/2026 (a pedido del usuario): si el rollo es de otro pedido u otro cliente que la orden,
+    // se avisa y se sigue -- no es una restriccion, el operario solo debe enterarse (ver
+    // avisoPedidoClienteRollo en scan-rollo.js). Sin aviso, sigue directo. Cancelar (por si escaneo
+    // el rollo equivocado) llama a reescanear: vuelve a pedir el serial, sin registrar nada.
+    function avisoPedidoRollo(rollo, seguir, reescanear) {
+      var a = rollo && rollo.avisoPedido;
+      if (!a) { seguir(); return; }
+      var html = '<div style="text-align:left;">' +
+        (a.mismoPedido ? '' : '<div style="margin-bottom:10px;">Este rollo es del pedido <b>' + a.pedidoRollo + '</b>, pero la orden es del pedido <b>' + a.pedidoOrden + '</b>.</div>') +
+        (a.clienteDistinto ? '<div style="margin-bottom:10px;">Cliente del rollo: <b>' + a.clienteRollo + '</b><br>Cliente de la orden: <b>' + a.clienteOrden + '</b></div>' : '') +
+        '<div style="font-size:13px;color:#64748b;">Puede continuar si es correcto.</div></div>';
+      Swal.fire({
+        icon: 'warning',
+        title: a.clienteDistinto ? 'El rollo es de otro cliente' : 'El rollo es de otro pedido',
+        html: html,
+        showCancelButton: true,
+        confirmButtonText: 'Entendido, continuar', confirmButtonColor: '#71bf44',
+        cancelButtonText: 'Cancelar, escanear otro', cancelButtonColor: '#c0392b',
+        allowOutsideClick: false
+      }).then(function(r) { if (r.isConfirmed) seguir(); else reescanear(); });
+    }
+
     // El parametro ganchos (09/09/2026) es opcional y solo lo manda el protocolo de arranque -- ver
     // scriptProtocoloArranque. Sin el, esta pantalla se comporta exactamente como siempre:
     //   antesDeConfirmar(idOrden, rollo, seguir) : corre con el rollo ya consultado y ANTES de la
@@ -3692,7 +4250,7 @@ function scriptEscanearRollo(maquinaCodigo) {
     //       recargar la pagina. Lo usa el protocolo de relevo (18/09/2026), donde pitar otro rollo
     //       es un paso a mitad del protocolo y recargar perderia el hilo.
     function abrirEscaneoRollo(idOrden, esNuevoRollo, ganchos) {
-      var titulo = esNuevoRollo ? 'Añadir rollo' : 'Iniciar ejecución';
+      var titulo = esNuevoRollo ? 'Añadir rollo' : (ganchos && ganchos.sinConfirmacion ? 'Primer rollo' : 'Iniciar ejecución');
       fetch('/api/selladora/orden/' + idOrden + '/rollo/preparar?nuevo=' + (esNuevoRollo ? '1' : '0'))
         .then(function(r) { return r.json(); })
         .then(function(datos) {
@@ -3741,29 +4299,59 @@ function scriptEscanearRollo(maquinaCodigo) {
       }).then(function(resultado) {
         if (!resultado.isConfirmed) return;
         var rollo = resultado.value;
-        if (ganchos && ganchos.antesDeConfirmar) {
-          ganchos.antesDeConfirmar(idOrden, rollo, function(decision) {
-            if (decision === 'confirmar') confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, rollo, ganchos);
-            else if (decision === 'reescanear') pedirSerialRollo(idOrden, esNuevoRollo, titulo, bolsasActual, ganchos);
-          });
+        avisoPedidoRollo(rollo, function() {
+          if (ganchos && ganchos.antesDeConfirmar) {
+            ganchos.antesDeConfirmar(idOrden, rollo, function(decision) {
+              if (decision === 'confirmar') confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, rollo, ganchos);
+              else if (decision === 'reescanear') pedirSerialRollo(idOrden, esNuevoRollo, titulo, bolsasActual, ganchos);
+            });
+            return;
+          }
+          confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, rollo, ganchos);
+        }, function() { pedirSerialRollo(idOrden, esNuevoRollo, titulo, bolsasActual, ganchos); });
+      });
+    }
+
+    // Protocolo de arranque (14/10/2026): el primer rollo, ya chequeado, se registra directo con las
+    // pistas del protocolo. Sigue quedando pendiente (sale del inventario al terminar el alistamiento).
+    function registrarPrimerRollo(idOrden, rollo, ganchos) {
+      Swal.fire({ title: 'Registrando el rollo…', allowOutsideClick: false, showConfirmButton: false, didOpen: function() { Swal.showLoading(); } });
+      fetch('/api/selladora/orden/' + idOrden + '/rollo', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serial: rollo.serial, esNuevoRollo: false, bolsasXGolpe: ganchos.pistas })
+      }).then(function(r) { return r.json(); }).then(function(datos) {
+        if (!datos.ok) {
+          Swal.fire({ icon: 'error', title: 'No se pudo registrar el rollo', text: datos.error || '',
+                      confirmButtonText: 'Escanear de nuevo', confirmButtonColor: '#71bf44', allowOutsideClick: false })
+            .then(function() { pedirSerialRollo(idOrden, false, 'Iniciar ejecución', 0, ganchos); });
           return;
         }
-        confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, rollo, ganchos);
+        ganchos.alIniciar(idOrden);
+      }).catch(function(err) {
+        Swal.fire({ icon: 'error', title: 'Sin conexión', text: err.message, confirmButtonText: 'Escanear de nuevo', confirmButtonColor: '#71bf44' })
+          .then(function() { pedirSerialRollo(idOrden, false, 'Iniciar ejecución', 0, ganchos); });
       });
     }
 
     function confirmarRolloModal(idOrden, esNuevoRollo, titulo, bolsasActual, rollo, ganchos) {
+      if (!esNuevoRollo && ganchos && ganchos.sinConfirmacion) { registrarPrimerRollo(idOrden, rollo, ganchos); return; }
       var detalle =
         filaRollo('Serial', rollo.serial) +
         filaRollo('Peso (Kg)', rollo.cantidad) +
         filaRollo('Lote', rollo.lote || '—') +
         filaRollo('Bodega', rollo.bodegaNombre) +
         filaRollo('Referencia', rollo.referencia);
-      // Al +Rollo las bolsas x golpe ya vienen de la ejecucion en curso (solo se muestran); al
-      // Iniciar las escribe el operario -- el servidor vuelve a decidir cual usar, esto es la UI.
-      var campoBolsas = esNuevoRollo
-        ? filaRollo('Bolsas x golpe', bolsasActual || '—')
-        : '<label for="rollo-bolsas" style="display:block;text-align:left;font-size:13px;font-weight:600;margin:12px 0 6px;">Bolsas x golpe</label>' +
+      // Al +Rollo las pistas ya vienen de la ejecucion en curso (solo se muestran); al Iniciar las
+      // escribe el operario -- el servidor vuelve a decidir cual usar, esto es la UI.
+      // 14/10/2026 (a pedido del usuario): se pregunta el NUMERO DE PISTAS en vez de "Bolsas x
+      // golpe". Es el mismo dato (cada pista da una bolsa por golpe) y se guarda en la misma
+      // columna BolsasxGolpe, asi que la base y los reportes del escritorio no cambian.
+      // Con el protocolo de arranque las pistas ya se respondieron en su propio paso (ganchos.pistas):
+      // aca solo se muestran. El campo queda para el camino viejo sin protocolo.
+      var pistasProtocolo = !esNuevoRollo && ganchos && ganchos.pistas ? ganchos.pistas : null;
+      var campoBolsas = esNuevoRollo || pistasProtocolo
+        ? filaRollo('Pistas', (esNuevoRollo ? bolsasActual : pistasProtocolo) || '—')
+        : '<label for="rollo-bolsas" style="display:block;text-align:left;font-size:13px;font-weight:600;margin:12px 0 6px;">Número de pistas</label>' +
           '<input id="rollo-bolsas" class="swal2-input" style="margin:0;width:100%;" type="number" min="1" inputmode="numeric">';
       Swal.fire({
         title: titulo,
@@ -3779,10 +4367,10 @@ function scriptEscanearRollo(maquinaCodigo) {
           if (campo) campo.focus();
         },
         preConfirm: function() {
-          var bolsas = bolsasActual;
-          if (!esNuevoRollo) {
+          var bolsas = esNuevoRollo ? bolsasActual : pistasProtocolo;
+          if (!esNuevoRollo && !pistasProtocolo) {
             bolsas = parseInt(document.getElementById('rollo-bolsas').value, 10);
-            if (!bolsas || bolsas <= 0) { Swal.showValidationMessage('Ingrese un número de bolsas x golpe válido.'); return false; }
+            if (!bolsas || bolsas <= 0) { Swal.showValidationMessage('Ingrese un número de pistas válido.'); return false; }
           }
           return fetch('/api/selladora/orden/' + idOrden + '/rollo', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -4147,8 +4735,9 @@ function scriptProtocoloArranque(maquinaCodigo) {
         if (resultado.dismiss === Swal.DismissReason.cancel) {
           guardarPasoProtocolo(idOrden, { paso: 'peligro_quimico', respuesta: 'No' }, function() {
             // En el relevo el paso 3 no es el escaneo sino la confirmacion del rollo ya montado.
+            // 14/10/2026: en el arranque, antes del primer rollo se pregunta el numero de pistas.
             if (esRelevo) pasoRolloRelevo(idOrden);
-            else pasoEscanearRolloProtocolo(idOrden);
+            else pasoPistasProtocolo(idOrden);
           });
         }
       });
@@ -4159,10 +4748,53 @@ function scriptProtocoloArranque(maquinaCodigo) {
     // uno entre consultar el serial y confirmarlo (las preguntas 4.1/4.2) y otro para lo que sigue
     // despues de que la ejecucion arranca (el alistamiento del paso 5, en vez de la vieja pregunta
     // "¿va a realizar alguna actividad antes de producir?").
-    function pasoEscanearRolloProtocolo(idOrden) {
+    // ---------------- Paso 3a: numero de pistas (14/10/2026) ----------------
+    // A pedido del usuario: se pregunta en el protocolo, ANTES de escanear el primer rollo (antes iba
+    // en la ventana del rollo como "Bolsas x golpe"; es el mismo dato y la misma columna). Queda en
+    // SEL_ProtocoloArranque (Paso 'pistas') y el servidor lo toma de ahi al confirmar el rollo.
+    // actual: el valor ya respondido, para reconfirmarlo al cambiar el primer rollo.
+    function pasoPistasProtocolo(idOrden, actual) {
+      Swal.fire({
+        icon: 'question',
+        title: '¿Con cuántas pistas va a trabajar?',
+        html: '<div style="font-size:14px;color:#64748b;margin-bottom:12px;">Cada pista da una bolsa por golpe. ' +
+                'Un rollo puede alimentar más de una pista: los rollos se escanean después.</div>' +
+              '<input id="protocolo-pistas" class="swal2-input" style="margin:0;width:100%;" type="number" min="1" inputmode="numeric"' +
+                (actual ? ' value="' + Number(actual) + '"' : '') + '>',
+        showCancelButton: true,
+        confirmButtonText: 'Continuar', confirmButtonColor: '#71bf44',
+        cancelButtonText: 'Salir', cancelButtonColor: '#64748b',
+        allowOutsideClick: false, allowEscapeKey: false,
+        didOpen: function() {
+          var campo = document.getElementById('protocolo-pistas');
+          campo.focus();
+          campo.addEventListener('keydown', function(evento) {
+            if (evento.key === 'Enter') { evento.preventDefault(); Swal.clickConfirm(); }
+          });
+        },
+        preConfirm: function() {
+          var pistas = parseInt(document.getElementById('protocolo-pistas').value, 10);
+          if (!pistas || pistas <= 0) { Swal.showValidationMessage('Ingrese un número de pistas válido.'); return false; }
+          return pistas;
+        }
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) return;
+        var pistas = resultado.value;
+        guardarPasoProtocolo(idOrden, { paso: 'pistas', respuesta: String(pistas) }, function() {
+          pasoEscanearRolloProtocolo(idOrden, pistas);
+        });
+      });
+    }
+
+    function pasoEscanearRolloProtocolo(idOrden, pistas) {
       abrirEscaneoRollo(idOrden, false, {
+        pistas: pistas,
+        // 14/10/2026: sin la ventana intermedia -- "Iniciar ejecución" sale al final, con todos los
+        // rollos montados (ver ventanaIniciarEjecucion).
+        sinConfirmacion: true,
         antesDeConfirmar: preguntarEstadoRollo,
-        alIniciar: pasoAlistamientoProtocolo
+        // 14/10/2026: con mas de una pista, antes del alistamiento: "¿Se monta otro rollo?"
+        alIniciar: pasoRollosAdicionales
       });
     }
 
@@ -4317,6 +4949,139 @@ function scriptProtocoloArranque(maquinaCodigo) {
       abrirEscaneoRollo(idOrden, true, {
         antesDeConfirmar: preguntarEstadoRolloNuevo,
         alAnadir: function() { pasoAlistamientoProtocolo(idOrden, true); }
+      });
+    }
+
+    // ---------------- Paso 3b: rollos adicionales e "Iniciar ejecución" (14/10/2026) ----------------
+    // Despues del primer rollo: con mas de una pista se pregunta "¿Se monta otro rollo?" (dos pistas
+    // no siempre son dos rollos: a veces un rollo da dos pistas; maximo uno por pista contando el
+    // primero). Si le dio "Sí" por equivocacion, "Cancelar" en la ventana del serial (o en el chequeo
+    // del rollo) vuelve a la pregunta sin agregar nada. Al final sale "Iniciar ejecución" con el
+    // resumen de lo montado, y "Iniciar" arranca el alistamiento. Los rollos salen del inventario al
+    // terminar el alistamiento.
+    function pasoRollosAdicionales(idOrden) {
+      fetch('/api/selladora/orden/' + idOrden + '/rollos-arranque')
+        .then(function(r) { return r.json(); })
+        .then(function(datos) {
+          if (!datos.ok) { pasoAlistamientoProtocolo(idOrden); return; }
+          if (datos.adicionales.length + 1 < datos.pistas) preguntarOtroRollo(idOrden, datos);
+          else ventanaIniciarEjecucion(idOrden, datos);
+        })
+        .catch(function() { pasoAlistamientoProtocolo(idOrden); });
+    }
+
+    function escaparRollo(texto) {
+      return String(texto == null ? '' : texto).replace(/[&<>"]/g, function(c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+      });
+    }
+
+    function preguntarOtroRollo(idOrden, datos) {
+      var montados = datos.adicionales.length + 1;
+      Swal.fire({
+        icon: 'question',
+        title: '¿Se monta otro rollo?',
+        html: '<div style="font-size:14px;color:#64748b;line-height:1.5;">' +
+                'La máquina trabaja con <b>' + datos.pistas + ' pistas</b> y lleva <b>' + montados + ' rollo' + (montados === 1 ? '' : 's') + '</b>. ' +
+                'Un rollo puede alimentar más de una pista: monte otro solo si de verdad va otro rollo en la máquina.' +
+              '</div>',
+        showDenyButton: true,
+        confirmButtonText: 'Sí, montar otro rollo', confirmButtonColor: '#006984',
+        denyButtonText: 'No, continuar', denyButtonColor: '#71bf44',
+        allowOutsideClick: false, allowEscapeKey: false
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) { montarRolloAdicional(idOrden, function() { pasoRollosAdicionales(idOrden); }); return; }
+        ventanaIniciarEjecucion(idOrden, datos);
+      });
+    }
+
+    // El cierre del paso del rollo: lo que quedo montado, sin repetir datos (las pistas, y la
+    // referencia si todos los rollos son de la misma, una sola vez; por rollo, lo que cambia).
+    function ventanaIniciarEjecucion(idOrden, datos) {
+      var rollos = [datos.principal].concat(datos.adicionales);
+      var referencias = rollos.map(function(r) { return r.referencia || ''; });
+      var mismaReferencia = referencias.every(function(x) { return x === referencias[0]; });
+      var total = rollos.reduce(function(suma, r) { return suma + (Number(r.cantidad) || 0); }, 0);
+      var celda = 'padding:6px 8px;border-bottom:1px solid #eef0f2;';
+      var filas = rollos.map(function(r, i) {
+        return '<tr>' +
+                 '<td style="' + celda + 'color:#006984;font-weight:700;">' + (i + 1) + '</td>' +
+                 '<td style="' + celda + 'word-break:break-all;">' + escaparRollo(r.serial) +
+                   (mismaReferencia ? '' : '<div style="font-size:12px;color:#64748b;">' + escaparRollo(r.referencia) + '</div>') + '</td>' +
+                 '<td style="' + celda + 'text-align:right;white-space:nowrap;">' + (r.cantidad != null ? escaparRollo(r.cantidad) : '—') + '</td>' +
+                 '<td style="' + celda + '">' + escaparRollo(r.lote || '—') + '</td>' +
+               '</tr>';
+      }).join('');
+      var encabezado = 'padding:6px 8px;border-bottom:2px solid #dde3e8;font-size:12px;color:#64748b;text-align:left;';
+      Swal.fire({
+        title: 'Iniciar ejecución',
+        html: '<div style="text-align:left;font-size:14px;">' +
+                filaRollo('Pistas', datos.pistas) +
+                (mismaReferencia && referencias[0] ? filaRollo('Referencia', referencias[0]) : '') +
+                '<table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:8px;font-variant-numeric:tabular-nums;">' +
+                  '<thead><tr><th style="' + encabezado + '">#</th><th style="' + encabezado + '">Rollo</th>' +
+                    '<th style="' + encabezado + 'text-align:right;">Peso (kg)</th><th style="' + encabezado + '">Lote</th></tr></thead>' +
+                  '<tbody>' + filas + '</tbody>' +
+                  (rollos.length > 1
+                    ? '<tfoot><tr><td></td><td style="padding:6px 8px;font-weight:600;">Total</td>' +
+                        '<td style="padding:6px 8px;text-align:right;font-weight:600;">' + total.toFixed(2) + '</td><td></td></tr></tfoot>'
+                    : '') +
+                '</table>' +
+                '<div style="font-size:12px;color:#64748b;margin-top:10px;">Al iniciar arranca el alistamiento.</div>' +
+              '</div>',
+        width: 560,
+        confirmButtonText: '▶ Iniciar', confirmButtonColor: '#71bf44',
+        showCancelButton: true,
+        cancelButtonText: 'Cancelar', cancelButtonColor: '#64748b',
+        allowOutsideClick: false, allowEscapeKey: false
+      }).then(function(resultado) {
+        if (resultado.isConfirmed) { pasoAlistamientoProtocolo(idOrden); return; }
+        // Cancelar: no inicia; vuelve a las pistas (con el valor anterior) y a escanear desde el
+        // primer rollo (la lista de adicionales arranca de nuevo, ver confirmarRollo).
+        if (resultado.dismiss === Swal.DismissReason.cancel) pasoPistasProtocolo(idOrden, datos.pistas);
+      });
+    }
+
+    function montarRolloAdicional(idOrden, volver) {
+      Swal.fire({
+        title: 'Otro rollo',
+        html: '<div style="text-align:left;font-size:13px;color:#64748b;margin-bottom:10px;">' +
+              'Escanee la etiqueta del rollo con la pistola (código de 19 dígitos) o escríbalo.</div>' +
+              '<input id="rollo-adicional-serial" class="swal2-input" style="margin:0;width:100%;" inputmode="numeric" placeholder="Serial del rollo">' +
+              '<div style="text-align:left;font-size:12px;color:#64748b;margin-top:10px;">' +
+                'Si tocó "Sí" por equivocación, toque <b>Cancelar</b>: no se agrega ningún rollo.</div>',
+        showCancelButton: true,
+        cancelButtonText: 'Cancelar', confirmButtonText: 'Buscar', confirmButtonColor: '#71bf44',
+        showLoaderOnConfirm: true,
+        allowOutsideClick: function() { return !Swal.isLoading(); },
+        didOpen: function() {
+          var campo = document.getElementById('rollo-adicional-serial');
+          campo.focus();
+          campo.addEventListener('keydown', function(evento) {
+            if (evento.key === 'Enter') { evento.preventDefault(); Swal.clickConfirm(); }
+          });
+        },
+        preConfirm: function() {
+          var serial = (document.getElementById('rollo-adicional-serial').value || '').trim();
+          if (!serial) { Swal.showValidationMessage('Escanee o escriba el serial del rollo.'); return false; }
+          return protocoloPost('/api/selladora/orden/' + idOrden + '/rollos-arranque/consultar', { serial: serial }).then(function(datos) {
+            if (!datos.ok) { Swal.showValidationMessage(datos.error || 'No se pudo consultar el rollo.'); return false; }
+            return datos;
+          });
+        }
+      }).then(function(resultado) {
+        if (!resultado.isConfirmed) { volver(); return; }
+        var rollo = resultado.value;
+        avisoPedidoRollo(rollo, function() {
+          chequeoRollo(idOrden, rollo, function(decision) {
+            if (decision === 'reescanear') { montarRolloAdicional(idOrden, volver); return; }
+            if (decision !== 'confirmar') { volver(); return; }
+            protocoloPost('/api/selladora/orden/' + idOrden + '/rollos-arranque', { serial: rollo.serial }).then(function(datos) {
+              if (datos.ok) { volver(); return; }
+              Swal.fire({ icon: 'error', title: 'No se pudo agregar el rollo', text: datos.error || '', confirmButtonColor: '#71bf44' }).then(volver);
+            });
+          }, false);
+        }, function() { montarRolloAdicional(idOrden, volver); });
       });
     }
 
@@ -4603,7 +5368,7 @@ function scriptProtocoloArranque(maquinaCodigo) {
 
     function retomarOrdenSuspendida(idOrden, orden) {
       Swal.fire({
-        icon: 'question', title: 'Retomar orden suspendida',
+        icon: 'question', title: 'Reanudar pedido suspendido',
         html: (orden && orden.descripcion
                 ? '<div style="font-size:16px;font-weight:600;color:#006984;margin-bottom:10px;">Orden ' +
                     String(orden.descripcion).replace(/[&<>"]/g, function(c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }) +
@@ -4614,7 +5379,7 @@ function scriptProtocoloArranque(maquinaCodigo) {
                 'con el mismo rollo y sin protocolo de arranque: queda lista para producir.' +
               '</div>',
         showCancelButton: true,
-        confirmButtonText: '▶ Retomar', confirmButtonColor: '#71bf44',
+        confirmButtonText: '⏯ Reanudar', confirmButtonColor: '#7e22ce',
         cancelButtonText: 'Cancelar', cancelButtonColor: '#64748b',
         showLoaderOnConfirm: true,
         allowOutsideClick: function() { return !Swal.isLoading(); },
@@ -4692,6 +5457,8 @@ function scriptProtocoloArranque(maquinaCodigo) {
       if (pendiente.paso === 'amperaje') { pasoAmperajeProtocolo(idOrden); return; }
 
       var textos = {
+        pistas: 'Falta indicar el número de pistas para poder seguir.',
+        rollos_adicionales: 'Falta confirmar los rollos montados y empezar el alistamiento.',
         peligro_quimico: 'Falta responder el chequeo de peligro químico para poder seguir.',
         rollo: relevo
           ? 'Falta confirmar el rollo que está montado para poder seguir.'
@@ -4700,18 +5467,12 @@ function scriptProtocoloArranque(maquinaCodigo) {
       };
       var continuar = function() {
         if (pendiente.paso === 'peligro_quimico') preguntarPeligroQuimico(idOrden, relevo);
+        else if (pendiente.paso === 'rollos_adicionales') pasoRollosAdicionales(idOrden);
+        else if (pendiente.paso === 'pistas') pasoPistasProtocolo(idOrden);
         else if (relevo) pasoRolloRelevo(idOrden);
-        else pasoEscanearRolloProtocolo(idOrden);
+        else pasoEscanearRolloProtocolo(idOrden, pendiente.pistas);
       };
       if (pedido) { continuar(); return; }
-      // Historial de notificaciones (18/09/2026). Con clave porque este aviso vuelve a salir en
-      // CADA carga de pagina mientras el protocolo siga a medias: sin ella, el panel se llenaria
-      // del mismo renglon cada vez que el operario cambia de pantalla.
-      if (typeof registrarNotificacion === 'function') {
-        registrarNotificacion('protocolo',
-          relevo ? 'Protocolo de relevo sin terminar' : 'Protocolo de arranque sin terminar',
-          textos[pendiente.paso] || '', 'protocolo:' + idOrden + ':' + pendiente.paso);
-      }
       // 06/10/2026: el arranque (no el relevo, que corre con la orden ya Activa) se puede cancelar.
       Swal.fire({
         icon: 'info',
@@ -4739,7 +5500,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Órdenes — ${maquinaNombre}</title>
-  <style>${estilosBase()}</style>
+  <style>${estilosBase()}${estilosMuro()}</style>
 </head>
 <body>
   <header>
@@ -4753,6 +5514,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
           <div class="sub">Programación máquina</div>
           <a class="volver" href="/">‹ Selladoras</a>
         </div>
+        <a class="btn-pizarra" href="/selladora/${encodeURIComponent(maquinaCodigo)}/pizarra">📝 Pizarra</a>
         ${bloqueUsuarioHeader(usuario)}
       </div>
     </div>
@@ -4777,6 +5539,7 @@ function renderPage(error, usuario, maquinaNombre, maquinaCodigo, colaOrdenes, m
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPizarra(maquinaCodigo)}</script>
   <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptConfirmarFinalizar()}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
@@ -4918,7 +5681,10 @@ function filasEspecificaciones(orden) {
     const etiqueta = MEDIDAS_BOLSA.find(x => x.clave === m.clave).etiqueta;
     return [etiqueta.charAt(0).toUpperCase() + etiqueta.slice(1), m.valorEsperado];
   });
+  // 14/10/2026 (a pedido del usuario): el cliente del pedido, de primero. SEL_OrdenProduccion.Cliente
+  // contra VISTerceros (NombreCliente, lo traen las dos consultas que alimentan esta funcion).
   return [
+    ['Cliente', orden.NombreCliente],
     ...filasMedidas,
     ['Tipo de sellado', orden.TipoSellado],
     ['Troquelado', orden.Troquelado],
@@ -5057,7 +5823,17 @@ function seccionOrdenTrabajo(otInfo, esSup) {
     </script>` : ''}`;
 }
 
-function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, ordenProduccion, esSup, otInfo, simBloque = '') {
+function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, ordenProduccion, esSup, otInfo, simBloque = '', retoma = null) {
+  // 09/10/2026: sin control de la ejecucion (ver retomaPendiente) no se ofrece nada que la toque:
+  // ni Produccion, ni Residuos, ni Imprimir/Cierre bulto; tampoco el cronometro de la pausa, la
+  // Calidad ni el protocolo a medias, que son del operario que si la tiene.
+  const avisoRetomar = bloqueRetomar(retoma && orden.Estado === 'Activa' ? [retoma] : []);
+  const sinControl = !!avisoRetomar.html;
+  if (sinControl) {
+    pausaActiva = null;
+    calidadHabilitada = false;
+    protocoloPendiente = null;
+  }
   // Sellado en paralelo (ver DISENO_SELLADO_PARALELO_08092026.md): si esta orden comparte máquina
   // con otras (mismo rollo, hasta 3 referencias de salida distintas), grupoSellado trae TODAS las
   // referencias del grupo (incluida esta misma) -- solo se usa para saber si hay que ocultar
@@ -5115,7 +5891,11 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   if (orden.Estado === 'Pendiente') {
     // Mismo protocolo de arranque que el boton Iniciar de la cola, ver renderColaOrdenes.
     acciones = `<button type="button" class="btn-accion btn-iniciar" onclick="iniciarProtocoloArranque(${orden.IdOrden})">▶ Iniciar</button>`;
-  } else if (activa) {
+  } else if (orden.Estado === 'Suspendida' || orden.Estado === 'PendienteValidacion') {
+    // 14/10/2026: reanudar con la firma del Lider de Sellado y del Jefe de Planta (igual que en la cola).
+    acciones = botonReanudarConFirmas(orden, orden.Estado === 'Suspendida' ? 'suspendida' : 'finalizada',
+                                      `Pedido ${orden.NumeroPedido || '—'}`);
+  } else if (activa && !sinControl) {
     // Sellado en paralelo (08/09/2026): "+Rollo" no aplica a una orden agrupada -- el rollo de
     // entrada ya quedó registrado UNA sola vez para las 3 referencias al dar "Iniciar" en la ancla.
     // Orden de izquierda a derecha: Rollo, Pausa, Finalizar. El boton Turno se quito de aca
@@ -5123,6 +5903,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     acciones = `
       ${grupoSelladoOtras.length === 0 ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${orden.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo, alAnadir: alistamientoMaterialRolloNuevo })">+ Rollo</button>` : ''}
       ${!pausaActiva ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>` : ''}
+      ${botonSuspender(orden, `Pedido ${orden.NumeroPedido || '—'}`)}
       <form method="post" action="/api/selladora/orden/${orden.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
         <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
       </form>`;
@@ -5138,7 +5919,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   // van agrupados bajo un titulo "Residuos", en su propia isla separada de "Producción"
   // (+Rollo/Finalizar/Pausa) pero en la MISMA fila (a pedido del usuario, 01/09/2026 -- antes vivian
   // junto a Imprimir etiqueta/Cierre bulto). Ver botonesResiduos().
-  const botonesResiduosHTML = activa ? botonesResiduos(orden, null) : '';
+  const botonesResiduosHTML = activa && !sinControl ? botonesResiduos(orden, null) : '';
 
   // Peso en vivo + Imprimir etiqueta/Cierre bulto/Residuos: solo tienen sentido con la orden
   // Activa (bascula/impresora actuando sobre el bulto que se esta armando en este momento).
@@ -5169,7 +5950,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   // quedan aca. FIX 09/09/2026: tampoco esta ya el boton "🌡️ Temperatura perilla" -- la
   // temperatura la pide el paso 6 del protocolo de arranque, al terminar el alistamiento y antes
   // de empezar a producir (a pedido del usuario, ver scriptProtocoloArranque).
-  const imprimirYAccionesBox = activa ? `
+  const imprimirYAccionesBox = activa && !sinControl ? `
     <div class="peso-box">
       <div class="imprimir-acciones-grid">
         <button type="button" class="btn-accion btn-imprimir" onclick="confirmarYEnviar('¿Está seguro de imprimir la etiqueta?', 'imprimir_etiqueta', this)">🖨️ Imprimir etiqueta</button>
@@ -5240,6 +6021,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     </div>
   </header>
   <main>
+    ${avisoRetomar.html}
     ${/* La fila ya no cuelga de `acciones`: la isla de Autorizacion va aca (24/09/2026) y la firma
           se puede pedir en cualquier estado, tambien con la orden ya finalizada o en validacion,
           que es cuando `acciones` viene vacio. Produccion y Residuos si siguen apareciendo solo
@@ -5279,7 +6061,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Especificaciones</h2>
     <div class="ejecucion-box"><div class="ejecucion-grid">${especificaciones}</div></div>
-    <h2 style="font-size:15px;margin:22px 0 10px;">Historial rollo</h2>
+    <h2 style="font-size:15px;margin:22px 0 10px;">Historial de consumo de rollos</h2>
     ${botonAjusteConsumo}
     <div class="ejecucion-box">${filasHistorial}</div>
     ${seccionOrdenTrabajo(otInfo, esSup)}
@@ -5289,6 +6071,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPizarra(maquinaCodigo)}</script>
   <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
@@ -5305,6 +6088,7 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     reanudarProtocoloArranque(${JSON.stringify(protocoloPendiente)}, false);
   </script>` : ''}
   ${avanceCard ? `<script>${scriptAvanceProduccion(orden.IdOrden, maquinaCodigo)}</script>` : ''}
+  ${avisoRetomar.script ? `<script>${avisoRetomar.script}</script>` : ''}
   ${scriptMensajeVolver()}
 </body>
 </html>`;
@@ -5784,7 +6568,7 @@ function scriptReimprimir(idOrden, maquinaCodigo) {
               var json = JSON.parse(evento.data);
               if (json && typeof json.peso === 'number') {
                 ultimoPeso = json.peso;
-                elPeso.textContent = json.peso.toFixed(2);
+                elPeso.textContent = json.peso.toFixed(3);
               }
             } catch (e) { /* mensaje no valido -- se ignora, se queda la ultima lectura buena */ }
           };
@@ -5798,7 +6582,7 @@ function scriptReimprimir(idOrden, maquinaCodigo) {
             return false;
           }
           if (!(ultimoPeso > 0)) {
-            Swal.showValidationMessage('La báscula marca ' + ultimoPeso.toFixed(2) + ' kg. Ponga el paquete en la báscula.');
+            Swal.showValidationMessage('La báscula marca ' + ultimoPeso.toFixed(3) + ' kg. Ponga el paquete en la báscula.');
             return false;
           }
           var pesoNuevo = ultimoPeso;
@@ -6200,6 +6984,7 @@ function renderBultosOrden(orden, bultos, pesajesPorBulto, residuosPorBulto, usu
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPizarra(maquinaCodigo)}</script>
   <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptReimprimir(orden.IdOrden, maquinaCodigo)}</script>
   <script>${scriptTraslado(orden.IdOrden, maquinaCodigo)}</script>
@@ -6492,6 +7277,12 @@ async function obtenerColaOrdenes(p, codigo) {
     SELECT ord.IdOrden, ord.Estado, ISNULL(ord.NumeroPedido,'') AS NumeroPedido, ie.Referencia AS Elemento,
            ej.Estado AS EstadoEjecucion, ej.Operario AS OperarioEjecucionCodigo, op.Nombre AS OperarioEjecucionNombre,
            ej.HoraFinReal,
+           -- 14/10/2026: 'Pendiente' con bultos = suspendida que Programación devolvió a la cola y
+           -- espera que la retomen (mismo criterio que esOrdenSuspendidaReanudada). La cola la
+           -- distingue de una orden nueva.
+           CASE WHEN ord.Estado = 'Pendiente' AND EXISTS (
+                  SELECT 1 FROM SEL_Bultos bs INNER JOIN SEL_EjecucionOrden es ON es.IdEjecucion = bs.id_ejecucion
+                  WHERE es.IdOrden = ord.IdOrden) THEN 1 ELSE 0 END AS EsPorRetomar,
            -- Orden de Trabajo (PRDProduccion.OrdenProduccion, redefinicion 15/09/2026): se resuelve
            -- por el primer bulto de esta ejecucion, igual patron que el endpoint de pausar. Null
            -- mientras la orden sigue 'Pendiente' (todavia no se ha dado Iniciar y no existe OT).
@@ -6518,8 +7309,10 @@ async function obtenerColaOrdenes(p, codigo) {
     INNER JOIN INVElementos ie ON ie.Codigo = ord.Elemento
     LEFT JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
     LEFT JOIN PRDOperarios op ON op.Codigo = ej.Operario
-    WHERE ord.Maquina = @codigo AND ord.Estado IN ('Activa','Pendiente','PendienteValidacion')
-    ORDER BY CASE ord.Estado WHEN 'Activa' THEN 0 WHEN 'Pendiente' THEN 1 ELSE 2 END ASC,
+    -- 14/10/2026: tambien las 'Suspendida' -- desde la tableta se pueden reanudar con la firma del
+    -- Lider de Sellado o del Jefe de Planta (ver /reanudar-con-firmas).
+    WHERE ord.Maquina = @codigo AND ord.Estado IN ('Activa','Pendiente','Suspendida','PendienteValidacion')
+    ORDER BY CASE ord.Estado WHEN 'Activa' THEN 0 WHEN 'Pendiente' THEN 1 WHEN 'Suspendida' THEN 2 ELSE 3 END ASC,
              ISNULL(ord.Prioridad, 99999) ASC, ord.IdOrden ASC
   `);
   return colaResult.recordset;
@@ -6602,6 +7395,105 @@ app.get('/selladora/:codigo/cola-fragmento', requireLogin, async (req, res) => {
     res.type('html').send(renderColaOrdenes(ordenes, codigo, req.session.usuario.codigoOperarioPRD));
   } catch (err) {
     res.status(500).type('html').send('');
+  }
+});
+
+// Pizarra / muro de la maquina (16/10/2026) -- ver obtenerMuroMaquina. El fragmento lo pide el
+// sondeo de scriptMuroMaquina y lo vuelve a pedir despues de publicar o fijar.
+app.get('/selladora/:codigo/muro-fragmento', requireLogin, async (req, res) => {
+  try {
+    const p = await getPool();
+    res.type('html').send(renderMuroNotas(await obtenerMuroMaquina(p, req.params.codigo)));
+  } catch (err) {
+    res.status(500).type('html').send('');
+  }
+});
+
+app.get('/selladora/:codigo/pizarra', requireLogin, async (req, res) => {
+  const codigo = req.params.codigo;
+  try {
+    const p = await getPool();
+    const maquina = await p.request().input('codigo', codigo).query(`SELECT Nombre FROM PRDMaquinas WHERE Codigo = @codigo`);
+    const nombre = maquina.recordset[0] ? maquina.recordset[0].Nombre : 'Selladora';
+    res.send(renderPizarra(req.session.usuario.nombre, nombre, codigo, await obtenerMuroMaquina(p, codigo)));
+  } catch (err) {
+    res.status(500).send(renderPizarra(req.session.usuario.nombre, 'Selladora', codigo, []));
+  }
+});
+
+// Para scriptAvisoPizarra: el Id mas alto del muro de la maquina y, si viene ?desde, las notas
+// posteriores escritas por OTROS usuarios. Sin la tabla contesta ok:false y el aviso no hace nada.
+app.get('/api/selladora/:codigo/muro/novedades', requireLogin, async (req, res) => {
+  const conDesde = req.query.desde != null && req.query.desde !== '';
+  const desde = Number(req.query.desde) || 0;
+  try {
+    const p = await getPool();
+    const ult = await p.request().input('maquina', req.params.codigo)
+      .query(`SELECT ISNULL(MAX(Id), 0) AS UltimoId FROM SEL_MuroMaquina WHERE Maquina = @maquina`);
+    let nuevas = [];
+    if (conDesde) {
+      const r = await p.request()
+        .input('maquina', req.params.codigo)
+        .input('desde', desde)
+        .input('usuario', String(req.session.usuario.codigo || ''))
+        .query(`
+          SELECT TOP 20 Id, Texto, Tipo, NombreUsuario FROM SEL_MuroMaquina
+          WHERE Maquina = @maquina AND Id > @desde AND ISNULL(Usuario, '') <> @usuario
+          ORDER BY Id DESC
+        `);
+      nuevas = r.recordset.map(n => ({ id: n.Id, texto: n.Texto, tipo: n.Tipo, nombreUsuario: n.NombreUsuario }));
+    }
+    res.json({ ok: true, ultimoId: ult.recordset[0].UltimoId, nuevas });
+  } catch (err) {
+    res.json({ ok: false });
+  }
+});
+
+app.post('/api/selladora/:codigo/muro', requireLogin, async (req, res) => {
+  const maquina = Number(req.params.codigo);
+  const texto = String(req.body.texto || '').trim();
+  const tipo = TIPOS_MURO[req.body.tipo] ? req.body.tipo : 'Nota';
+  if (!maquina) return res.json({ ok: false, error: 'Máquina inválida.' });
+  if (!texto) return res.json({ ok: false, error: 'La observación está vacía.' });
+  const u = req.session.usuario;
+  try {
+    const p = await getPool();
+    await p.request()
+      .input('maquina', maquina)
+      .input('texto', texto.slice(0, 500))
+      .input('tipo', tipo)
+      .input('usuario', String(u.codigo || '').slice(0, 20) || null)
+      .input('nombre', String(u.nombre || '').slice(0, 100) || null)
+      .input('operario', u.codigoOperarioPRD || null)
+      .query(`
+        INSERT INTO SEL_MuroMaquina (Maquina, Texto, Tipo, Usuario, NombreUsuario, Operario)
+        VALUES (@maquina, @texto, @tipo, @usuario, @nombre, @operario)
+      `);
+    res.json({ ok: true });
+  } catch (err) {
+    const falta = /Invalid object name|SEL_MuroMaquina/i.test(err.message || '');
+    res.json({ ok: false, error: falta ? `Falta correr el script ${SCRIPT_MURO} contra esta base.` : err.message });
+  }
+});
+
+app.post('/api/selladora/muro/:id/fijar', requireLogin, async (req, res) => {
+  const id = Number(req.params.id);
+  const fijar = req.body.fijar === true || req.body.fijar === 'true';
+  try {
+    const p = await getPool();
+    const r = await p.request()
+      .input('id', id)
+      .input('fijada', fijar ? 1 : 0)
+      .input('por', String(req.session.usuario.nombre || '').slice(0, 100) || null)
+      .query(`
+        UPDATE SEL_MuroMaquina SET Fijada = @fijada, FijadaPor = @por, FechaFijada = GETDATE()
+        WHERE Id = @id
+      `);
+    if (r.rowsAffected[0] === 0) return res.json({ ok: false, error: 'La nota ya no existe.' });
+    res.json({ ok: true });
+  } catch (err) {
+    const falta = /Invalid object name|SEL_MuroMaquina/i.test(err.message || '');
+    res.json({ ok: false, error: falta ? `Falta correr el script ${SCRIPT_MURO} contra esta base.` : err.message });
   }
 });
 
@@ -7096,6 +7988,8 @@ async function obtenerMiembrosGrupoSellado(p, idGrupo) {
            ord.TipoSellado, ord.Troquelado, ord.UsoPrevisto, ord.Manija, ord.ManijaColor, ord.Tula,
            ord.TulaColor, ord.Parche, ord.CierreDeslizador, ord.Perforaciones,
            ord.CierreHermetico, ord.CintaAdhesiva, maq.Tipo AS MaquinaTipo,
+           -- 14/10/2026: nombre del cliente para Especificaciones (Cliente 0 = Carlixplast).
+           (SELECT TOP 1 t.Nombre FROM VISTerceros t WHERE t.Codigo = ord.Cliente AND t.Sucursal = 0) AS NombreCliente,
            CASE WHEN er12.Valor IS NOT NULL THEN 1 ELSE 0 END AS TieneImpresion,
            ti.Descripcion AS TipoImpresionDescripcion,
            ${COLUMNAS_MEDIDAS_BOLSA},
@@ -7272,7 +8166,7 @@ function scriptTarjetasReferencia(maquinaCodigo) {
           const datos = await resp.json();
           if (!datos.ok) return;
           fijar(tarjeta, '.ref-paquetes', datos.paquetes);
-          fijar(tarjeta, '.ref-peso-acumulado', datos.pesoTotalKg.toFixed(2));
+          fijar(tarjeta, '.ref-peso-acumulado', datos.pesoTotalKg.toFixed(3));
           window.resumenPorOrden[idOrden] = {
             idBulto: datos.idBulto,
             ultimo: (datos.ultimoConsecutivo != null) ? { consecutivo: datos.ultimoConsecutivo, pesoKg: datos.ultimoPesoKg } : null
@@ -7510,7 +8404,7 @@ function calcularAvanceTotalGrupo(miembros) {
 // del usuario): peso de bascula, paquetes del bulto actual y peso acumulado DE ESA REFERENCIA,
 // Imprimir etiqueta, Cierre bulto y sus Especificaciones. Los botones de operar solo salen si la
 // orden de esa referencia esta Activa.
-function renderTarjetaReferenciaGrupo(m, indice, simHtml = '') {
+function renderTarjetaReferenciaGrupo(m, indice, simHtml = '', sinControl = false) {
   const color = colorReferenciaGrupo(indice);
   const refJs = jsString(m.Referencia).replace(/"/g, '&quot;');
   const activa = m.Estado === 'Activa';
@@ -7553,6 +8447,7 @@ function renderTarjetaReferenciaGrupo(m, indice, simHtml = '') {
           </div>
           <span class="peso-estado peso-vivo-estado desconectado">Conectando…</span>
         </div>
+        ${sinControl ? `<div class="pesaje-vacio">Retome la ejecución (arriba) para imprimir, cerrar bultos o registrar residuos.</div>` : `
         <div class="imprimir-acciones-grid">
           <button type="button" class="btn-accion btn-imprimir" onclick="accionReferencia('imprimir_etiqueta', this, ${m.IdOrden})">🖨️ Imprimir etiqueta</button>
           <button type="button" class="btn-accion btn-cierre-bulto" onclick="accionReferencia('cierre_bulto', this, ${m.IdOrden})">📦 Cierre bulto</button>
@@ -7560,7 +8455,7 @@ function renderTarjetaReferenciaGrupo(m, indice, simHtml = '') {
         <div class="ref-residuos">
           <div class="label">Residuos</div>
           <div class="orden-acciones">${botonesResiduos(m, { idOrden: m.IdOrden, referencia: m.Referencia })}</div>
-        </div>` : `
+        </div>`}` : `
         <div class="pesaje-vacio">Esta referencia no está activa (${m.Estado}) — no se puede imprimir ni cerrar bultos.</div>`;
 
   return `
@@ -7600,7 +8495,15 @@ function renderTarjetaReferenciaGrupo(m, indice, simHtml = '') {
 //   - Una tarjeta interactiva por referencia (ver renderTarjetaReferenciaGrupo).
 // "Ver bultos" lleva a la pagina de bultos del GRUPO (/grupo/:idGrupo/bultos), con el filtro por
 // referencia -- no a la de una sola orden.
-function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquinaCodigo, miembros, usuario, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, ordenProduccion, esSup, otInfo, simPorOrden = {}) {
+function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquinaCodigo, miembros, usuario, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, ordenProduccion, esSup, otInfo, simPorOrden = {}, retomas = []) {
+  // 09/10/2026: sin control de la ejecucion -- mismo criterio que renderOrdenDetalle.
+  const avisoRetomar = bloqueRetomar(retomas);
+  const sinControl = !!avisoRetomar.html;
+  if (sinControl) {
+    pausaActiva = null;
+    calidadHabilitada = false;
+    protocoloPendiente = null;
+  }
   // "Activo ahora" es el que esta recibiendo paquetes en este momento (su bulto esta Activo o
   // Temporal). Si ninguno lo esta (grupo recien creado, nadie ha dado Iniciar) no se ofrece
   // "+ Rollo": el rollo se registra siempre contra la referencia activa.
@@ -7650,21 +8553,31 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
 
   // Orden de izquierda a derecha: Rollo, Pausa, Finalizar. El boton Turno se quito de aca
   // (a pedido del usuario, 30/09/2026).
-  const accionesProduccion = [
+  const miembroSuspendido = (miembros || []).find(m => m.Estado === 'Suspendida') || null;
+  const accionesProduccion = sinControl ? '' : [
     miembroActivoAhora
       ? `<button type="button" class="btn-accion btn-anadir" onclick="abrirEscaneoRollo(${miembroActivoAhora.IdOrden}, true, { antesDeConfirmar: preguntarEstadoRolloNuevo })">+ Rollo</button>`
       : '',
     (miembroAncla && !pausaActiva)
       ? `<button type="button" class="btn-accion btn-pausa" onclick="abrirPausa()">⏸ Pausa</button>`
       : '',
+    miembroAncla ? botonSuspender(miembroAncla, `Pedido ${(miembroAncla.NumeroPedido || '').trim() || '—'}`) : '',
     miembroAncla
       ? `<form method="post" action="/api/selladora/orden/${miembroAncla.IdOrden}/finalizar" onsubmit="return confirmarFinalizar(event, this);">
           <button type="submit" class="btn-accion btn-finalizar">■ Finalizar</button>
         </form>`
+      : '',
+    // 14/10/2026: sin referencia activa, "⏯ Reanudar" del grupo suspendido o finalizado por
+    // equivocacion (firma del lider o del jefe) -- igual que en la pagina de una sola referencia.
+    !miembroAncla && miembroSuspendido
+      ? botonReanudarConFirmas(miembroSuspendido, 'suspendida', `Pedido ${(miembroSuspendido.NumeroPedido || '').trim() || '—'}`)
+      : '',
+    !miembroAncla && !miembroSuspendido && miembroParaAjuste
+      ? botonReanudarConFirmas(miembroParaAjuste, 'finalizada', `Pedido ${(miembroParaAjuste.NumeroPedido || '').trim() || '—'}`)
       : ''
   ].join('');
 
-  const tarjetasReferencia = miembros.map((m, i) => renderTarjetaReferenciaGrupo(m, i, simPorOrden[m.IdOrden] || '')).join('');
+  const tarjetasReferencia = miembros.map((m, i) => renderTarjetaReferenciaGrupo(m, i, simPorOrden[m.IdOrden] || '', sinControl)).join('');
 
   // Tarjeta de avance TOTAL del pedido en el encabezado -- los mismos ids que usa la pagina de una
   // sola referencia (avance-porcentaje/relleno/producido/programado), porque quien la refresca cada
@@ -7719,6 +8632,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
     </div>
   </header>
   <main>
+    ${avisoRetomar.html}
     <div class="islas-fila">
       ${accionesProduccion ? `<div class="isla">
         <div class="label">Producción</div>
@@ -7747,7 +8661,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
     </div>
     <h2 style="font-size:15px;margin:0 0 10px;">Referencias de salida</h2>
     ${tarjetasReferencia}
-    <h2 style="font-size:15px;margin:22px 0 10px;">Historial rollo (todo el grupo)</h2>
+    <h2 style="font-size:15px;margin:22px 0 10px;">Historial de consumo de rollos (todo el grupo)</h2>
     ${botonAjusteConsumo}
     <div class="ejecucion-box">${filasHistorial}</div>
     ${seccionOrdenTrabajo(otInfo, esSup)}
@@ -7762,6 +8676,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPizarra(maquinaCodigo)}</script>
   <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptConfirmarFinalizar()}</script>
@@ -7792,6 +8707,7 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
     // que en la pagina de una referencia suelta.
     reanudarProtocoloArranque(${JSON.stringify(protocoloPendiente)}, false);
   </script>` : ''}
+  ${avisoRetomar.script ? `<script>${avisoRetomar.script}</script>` : ''}
   ${scriptMensajeVolver()}
 </body>
 </html>`;
@@ -7886,6 +8802,7 @@ function renderBultosGrupo(idGrupo, numeroPedido, maquinaCodigo, datosPorReferen
   <script>${scriptAutorizacion()}</script>
   <script>${scriptObservaciones()}</script>
   <script>${scriptAvisoPedidoNuevo(maquinaCodigo)}</script>
+  <script>${scriptAvisoPizarra(maquinaCodigo)}</script>
   <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <!-- El idOrden que reciben estos dos es solo el de respaldo: cada tarjeta de bulto y cada
        seccion de traslado traen el IdOrden de SU referencia, y ese es el que se usa. -->
@@ -8011,8 +8928,14 @@ app.get('/selladora/:codigo/grupo/:idGrupo', requireLogin, async (req, res) => {
     }
     // Tarjeta #9: encabezado con TODOS los pedidos del grupo ("Pedido 11285 · 11286").
     const pedidosGrupo = [...new Set(miembros.map(m => (m.NumeroPedido || '').trim()).filter(Boolean))];
+    // 09/10/2026: cada referencia tiene su propia ejecucion -- una por cada una que haga falta retomar.
+    const retomas = [];
+    for (const m of miembros) {
+      const r = await retomaPendiente(p, m.IdOrden, req.session.usuario.codigoOperarioPRD);
+      if (r) retomas.push(r);
+    }
     res.send(renderGrupoSelladoDetalle(idGrupo, pedidosGrupo.join(' · ') || miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, textoOT,
-      esSupervisor(req.session.usuario), await infoOTParaCorreccion(p, ordenProduccion), simPorOrden));
+      esSupervisor(req.session.usuario), await infoOTParaCorreccion(p, ordenProduccion), simPorOrden, retomas));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
@@ -8130,6 +9053,8 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
              ord.TipoSellado, ord.Troquelado, ord.UsoPrevisto, ord.Manija, ord.ManijaColor, ord.Tula,
              ord.TulaColor, ord.Parche, ord.CierreDeslizador, ord.Perforaciones,
              ord.CierreHermetico, ord.CintaAdhesiva,
+             -- 14/10/2026: nombre del cliente para Especificaciones (Cliente 0 = Carlixplast).
+             (SELECT TOP 1 t.Nombre FROM VISTerceros t WHERE t.Codigo = ord.Cliente AND t.Sucursal = 0) AS NombreCliente,
              CASE WHEN er12.Valor IS NOT NULL THEN 1 ELSE 0 END AS TieneImpresion,
              ti.Descripcion AS TipoImpresionDescripcion,
              ${COLUMNAS_MEDIDAS_BOLSA}
@@ -8250,8 +9175,10 @@ app.get('/selladora/:codigo/orden/:idOrden', requireLogin, async (req, res) => {
       }
     }
     const textoOT = await textoOTConOperario(p, ordenProduccion, req.session.usuario.codigoOperarioPRD);
+    // 09/10/2026: si la ejecucion no es de quien mira, aviso con Retomar y sin acciones (ver retomaPendiente).
+    const retoma = await retomaPendiente(p, idOrden, req.session.usuario.codigoOperarioPRD);
     res.send(renderOrdenDetalle(orden, totalBultos, historial, req.session.usuario.nombre, codigo, pausaActiva, avance, calidadHabilitada, grupoSellado, protocoloPendiente, esAdmin, textoOT,
-      esSupervisor(req.session.usuario), await infoOTParaCorreccion(p, ordenProduccion), simBloque));
+      esSupervisor(req.session.usuario), await infoOTParaCorreccion(p, ordenProduccion), simBloque, retoma));
   } catch (err) {
     res.status(500).send(renderErrorSimple(err.message, `/selladora/${codigo}`));
   }
@@ -9207,6 +10134,85 @@ app.get('/selladora/:codigo/peso-patron-pendiente', requireLogin, async (req, re
 // operario actual de la maquina (SEL_OperarioActualMaquina, ver agregar_operarioactualmaquina.sql
 // -- lo consulta trg_SEL_Bultos_CierreBulto para cada bulto nuevo que la maquina cree sola).
 //
+// 09/10/2026 (a pedido del usuario, bug real: maquina 7, noche del 08/10): Andres entro a la tableta
+// y trabajo toda la noche desde Informacion sin darle Retomar -- la ejecucion y el operario actual
+// de la maquina siguieron a nombre de Ronal, y los 10 bultos de su turno salieron a nombre de Ronal.
+// Ahora, si la ejecucion de una orden Activa no es de quien mira (mismo criterio que
+// renderColaOrdenes), la pantalla de la orden/grupo muestra el aviso con Retomar y esconde las
+// acciones, y el servidor rechaza +Rollo, Pausa, Finalizar, Alternar y los comandos al PLC.
+// Devuelve null si no hay nada que retomar, o { idOrden, operario, nombre, esElMismo }.
+async function retomaPendiente(p, idOrden, miOperario) {
+  const dt = await p.request().input('idOrden', Number(idOrden)).query(`
+    SELECT TOP 1 ord.Estado AS EstadoOrden, ej.Estado AS EstadoEjecucion, ej.Operario, op.Nombre
+    FROM SEL_OrdenProduccion ord
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
+    LEFT JOIN PRDOperarios op ON op.Codigo = ej.Operario
+    WHERE ord.IdOrden = @idOrden
+    ORDER BY ej.IdEjecucion ASC
+  `);
+  const r = dt.recordset[0];
+  if (!r || r.EstadoOrden !== 'Activa' || r.EstadoEjecucion == null) return null;
+  const yo = Number(miOperario) || null;
+  const flag = r.EstadoEjecucion === 'PendienteOperador';
+  const distinto = !!yo && Number(r.Operario) !== yo;
+  if (!flag && !distinto) return null;
+  return {
+    idOrden: Number(idOrden),
+    operario: r.Operario,
+    nombre: r.Nombre || 'un operario sin nombre configurado',
+    esElMismo: !!yo && Number(r.Operario) === yo
+  };
+}
+
+function mensajeRetomaPendiente(retoma) {
+  return retoma.esElMismo
+    ? 'Usted cerró sesión con esta orden en curso. Toque "Reanudar ejecución" en la pantalla de la orden antes de seguir.'
+    : `Esta orden está a nombre de ${retoma.nombre}. Toque "Retomar ejecución" en la pantalla de la orden antes de seguir.`;
+}
+
+// Aviso de la pantalla de la orden/grupo: una franja con el boton Retomar (o Reanudar) por cada
+// orden que haga falta tomar, y una ventana al cargar para que no pase de largo. El boton reusa
+// confirmarTomarControlEjecucion (scriptConfirmarFinalizar), igual que el de la cola.
+function bloqueRetomar(retomas) {
+  if (!retomas || retomas.length === 0) return { html: '', script: '' };
+  const r0 = retomas[0];
+  const texto = r0.esElMismo
+    ? 'Usted cerró sesión con esta orden en curso. Toque <b>Reanudar ejecución</b> para seguir trabajándola.'
+    : `Esta orden está a nombre de <b>${escapeHtmlTurno(r0.nombre)}</b>. Para trabajarla con su usuario toque <b>Retomar ejecución</b>. ` +
+      `Mientras no lo haga no puede añadir rollo, pausar, cerrar bultos ni finalizar, y los bultos siguen saliendo a nombre de ${escapeHtmlTurno(r0.nombre)}.`;
+  const botones = retomas.map(r => `
+      <form method="post" action="/api/selladora/orden/${r.idOrden}/tomar-control-ejecucion" onsubmit="return confirmarTomarControlEjecucion(event, this, ${r.esElMismo}, ${jsString(r.nombre).replace(/"/g, '&quot;')});">
+        <button type="submit" class="btn-accion" style="background:#b46200;">${r.esElMismo ? '▶ Reanudar ejecución' : '🔓 Retomar ejecución'}</button>
+      </form>`).join('');
+  const html = `
+    <div id="aviso-retomar" style="background:#fff4e5;border:2px solid #b46200;border-radius:12px;padding:14px 16px;margin-bottom:16px;">
+      <div style="font-size:15px;color:#7a4300;line-height:1.45;margin-bottom:10px;">⚠ ${texto}</div>
+      <div class="orden-acciones">${botones}</div>
+    </div>`;
+  const script = `
+    (function() {
+      var titulo = ${jsString(r0.esElMismo ? 'Reanude la ejecución' : 'Retome la ejecución')};
+      var html = ${jsString(texto)};
+      var boton = ${jsString(r0.esElMismo ? '▶ Reanudar ejecución' : '🔓 Retomar ejecución')};
+      var accion = ${jsString(`/api/selladora/orden/${r0.idOrden}/tomar-control-ejecucion`)};
+      function avisar() {
+        if (window.Swal && Swal.isVisible()) { setTimeout(avisar, 1500); return; }
+        Swal.fire({
+          icon: 'warning', title: titulo, html: html,
+          showCancelButton: true, confirmButtonText: boton, cancelButtonText: 'Solo mirar',
+          confirmButtonColor: '#b46200', cancelButtonColor: '#7f8c8d', allowOutsideClick: false
+        }).then(function(r) {
+          if (!r.isConfirmed) return;
+          var f = document.createElement('form');
+          f.method = 'post'; f.action = accion; f.style.display = 'none';
+          document.body.appendChild(f); f.submit();
+        });
+      }
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', avisar); else avisar();
+    })();`;
+  return { html, script };
+}
+
 // FIX 01/09/2026: ya NO exige Estado='PendienteOperador' -- ese flag solo se pone si el operario
 // anterior cerro sesion con el boton Salir; si el servidor se reinicia a mitad de turno, las
 // sesiones se pierden pero esa fila nunca se marca. El chequeo real es simplemente "el Operario de
@@ -9364,6 +10370,11 @@ app.post('/api/selladora/orden/:idOrden/rollo', requireLogin, async (req, res) =
     const p = await getPool();
     const check = esNuevoRollo ? await validarPuedeAnadirRollo(p, idOrden) : await validarPuedeIniciar(p, idOrden);
     if (!check.ok) return res.json({ ok: false, error: check.error });
+    // 09/10/2026: +Rollo solo con el control de la ejecucion (ver retomaPendiente).
+    if (esNuevoRollo) {
+      const retoma = await retomaPendiente(p, idOrden, usuario.codigoOperarioPRD);
+      if (retoma) return res.json({ ok: false, error: mensajeRetomaPendiente(retoma) });
+    }
 
     const maquinaCodigo = await obtenerCodigoMaquinaDeOrden(p, idOrden);
     await activarTurnoDeSesion(p, req, maquinaCodigo);   // 28/09/2026: turno escogido en el login
@@ -9374,7 +10385,9 @@ app.post('/api/selladora/orden/:idOrden/rollo', requireLogin, async (req, res) =
       serial,
       esNuevoRollo: !!esNuevoRollo,
       codOperario: usuario.codigoOperarioPRD,
-      bolsasXGolpe: esNuevoRollo ? check.bolsasActual : Number(bolsasXGolpe),
+      // 14/10/2026: al Iniciar, las pistas que se respondieron en el protocolo mandan; lo que llega
+      // del navegador queda solo para el camino viejo sin protocolo.
+      bolsasXGolpe: esNuevoRollo ? check.bolsasActual : ((await pistasDelArranque(p, idOrden)) || Number(bolsasXGolpe)),
       generadoPor: usuario.generadoPor
     });
 
@@ -9442,6 +10455,8 @@ app.post('/api/selladora/orden/:idOrden/alternar-referencia', requireLogin, asyn
 
   try {
     const p = await getPool();
+    const retoma = await retomaPendiente(p, idOrden, usuario.codigoOperarioPRD);   // 09/10/2026
+    if (retoma) return res.json({ ok: false, error: mensajeRetomaPendiente(retoma) });
     const maquinaCodigo = await obtenerCodigoMaquinaDeOrden(p, idOrden);
 
     const dtBolsas = await p.request().input('maquina', maquinaCodigo).query(`
@@ -9631,7 +10646,7 @@ function renderBitacora(datos, recientes, maquinaCodigo, usuario) {
         <td>${esc(r.SerialesRollo) || '—'}</td>
         <td class="cen">${r.number_paqu || 0}</td>
         <td class="num">${unidadesDe(r).toLocaleString('es-CO')}</td>
-        <td class="num">${r.PesoPaquetes != null ? Number(r.PesoPaquetes).toFixed(2) : '—'}</td>
+        <td class="num">${r.PesoPaquetes != null ? Number(r.PesoPaquetes).toFixed(3) : '—'}</td>
         <td class="cen">${esc(r.estado)}</td>
       </tr>`).join('')
     : `<tr><td colspan="10" class="bit-vacio">Todavía no hay bultos en este turno.</td></tr>`;
@@ -9731,7 +10746,7 @@ function renderBitacora(datos, recientes, maquinaCodigo, usuario) {
       <div class="bit-dato">
         <div class="label">Producido</div>
         <div class="valor">${totalUnidades.toLocaleString('es-CO')} und</div>
-        <div class="bit-sub">${renglones.length} bulto(s) · ${totalPaquetes} paquete(s) · ${totalKg.toFixed(2)} kg</div>
+        <div class="bit-sub">${renglones.length} bulto(s) · ${totalPaquetes} paquete(s) · ${totalKg.toFixed(3)} kg</div>
       </div>
     </div>
 
@@ -9757,7 +10772,7 @@ function renderBitacora(datos, recientes, maquinaCodigo, usuario) {
             <td colspan="6">Total del turno</td>
             <td class="cen">${totalPaquetes}</td>
             <td class="num">${totalUnidades.toLocaleString('es-CO')}</td>
-            <td class="num">${totalKg.toFixed(2)}</td>
+            <td class="num">${totalKg.toFixed(3)}</td>
             <td></td>
           </tr>
         </tfoot>` : ''}
@@ -9895,6 +10910,10 @@ app.post('/api/selladora/orden/:idOrden/pausar', requireLogin, async (req, res) 
   }
   try {
     const p = await getPool();
+    // 09/10/2026: una orden Activa solo la pausa quien tiene el control de su ejecucion. Una
+    // Pendiente (limpieza del protocolo de arranque) no tiene a quien retomarle: retomaPendiente da null.
+    const retoma = await retomaPendiente(p, idOrden, operario);
+    if (retoma) return res.json({ ok: false, error: mensajeRetomaPendiente(retoma) });
     // 26/09/2026: la limpieza del protocolo de arranque entra por aca -- una orden Pendiente no la
     // puede abrir con otra orden Activa en la misma maquina (ver bloqueoArranquePorOrdenActiva).
     const bloqueo = await bloqueoArranquePorOrdenActiva(p, idOrden);
@@ -10117,7 +11136,9 @@ const PASOS_PROTOCOLO_VALIDOS = new Set([
   // cuando alguien retoma una ejecucion en curso -- obtenerProtocoloPendiente la usa como linea
   // divisoria y solo evalua los pasos posteriores. 'rollo_mismo' es la respuesta propia de esa
   // ronda: el operario confirmo que sigue con el rollo que ya estaba montado, sin pitar otro.
-  'relevo', 'rollo_mismo'
+  'relevo', 'rollo_mismo',
+  // Numero de pistas del arranque (14/10/2026): Respuesta = el numero. Ver pistasDeLosPasos.
+  'pistas'
 ]);
 
 app.post('/api/selladora/orden/:idOrden/protocolo/respuesta', requireLogin, async (req, res) => {
@@ -10158,6 +11179,23 @@ app.post('/api/selladora/orden/:idOrden/protocolo/respuesta', requireLogin, asyn
     res.json({ ok: false, error: falta ? 'Falta crear la tabla SEL_ProtocoloArranque (ejecute agregar_protocolo_arranque.sql).' : err.message });
   }
 });
+
+// Numero de pistas respondido en el protocolo de arranque (el ultimo), o null. 14/10/2026.
+function pistasDeLosPasos(pasos) {
+  const fila = [...pasos].reverse().find(x => x.Paso === 'pistas');
+  const n = fila ? parseInt(fila.Respuesta, 10) : NaN;
+  return n > 0 ? n : null;
+}
+
+async function pistasDelArranque(p, idOrden) {
+  const dt = await p.request().input('idOrden', idOrden).query(`
+    SELECT pa.Paso, pa.Respuesta FROM SEL_ProtocoloArranque pa
+    WHERE pa.id_ejecucion = (SELECT TOP 1 IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden ORDER BY IdEjecucion ASC)
+      AND pa.Paso = 'pistas'
+    ORDER BY pa.Id ASC
+  `);
+  return pistasDeLosPasos(dt.recordset);
+}
 
 // En que paso quedo un protocolo a medias, o null si no hay ninguno pendiente para esta orden.
 // Se deduce de lo que hay en la BASE (no de nada guardado en el navegador), para que el protocolo
@@ -10265,7 +11303,15 @@ async function obtenerProtocoloPendiente(p, idOrden) {
     if (EstadoOrden === 'Pendiente') {
       const quimico = [...pasos].reverse().find(x => x.Paso === 'peligro_quimico');
       if (!quimico || quimico.Respuesta !== 'No') return { idOrden: Number(idOrden), paso: 'peligro_quimico' };
-      return { idOrden: Number(idOrden), paso: 'rollo' };
+      // 14/10/2026: el primer rollo ya quedo escaneado y el alistamiento no ha empezado -- se sigue
+      // por la lista de rollos (o directo al alistamiento con una sola pista), no por volver a
+      // escanear. Desde la lista se puede cambiar el primero ("📷 Cambiar el primer rollo").
+      if (dtPendienteAutocura.recordset.length > 0) return { idOrden: Number(idOrden), paso: 'rollos_adicionales' };
+      // 14/10/2026: antes del primer rollo, el numero de pistas (paso propio). Un protocolo que ya
+      // venia a medias sin ese paso tambien lo pide.
+      const pistas = pistasDeLosPasos(pasos);
+      if (!pistas) return { idOrden: Number(idOrden), paso: 'pistas' };
+      return { idOrden: Number(idOrden), paso: 'rollo', pistas };
     }
 
     // PROTOCOLO YA TERMINADO -> no hay nada pendiente. El ultimo paso es 'amperaje' desde el
@@ -10476,7 +11522,7 @@ async function bloqueoArranquePorOrdenActiva(p, idOrden) {
     .query(`SELECT Estado FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
   if (dt.recordset.length === 0 || dt.recordset[0].Estado !== 'Pendiente') return null;
   if (await esOrdenSuspendidaReanudada(p, idOrden)) {
-    return 'Esta orden fue suspendida y ya tiene producción: se retoma con "▶ Iniciar" desde la cola de la máquina, sin volver a arrancarla.';
+    return 'Esta orden fue suspendida y ya tiene producción: se reanuda con "⏯ Reanudar" desde la cola de la máquina, sin volver a arrancarla.';
   }
   return bloqueoPorOtraOrdenDeLaMaquina(p, idOrden);
 }
@@ -10576,56 +11622,103 @@ app.get('/api/selladora/orden/:idOrden/puede-iniciar', requireLogin, async (req,
 // operario la termina como cualquier pausa.
 app.post('/api/selladora/orden/:idOrden/reanudar-suspendida', requireLogin, async (req, res) => {
   const idOrden = Number(req.params.idOrden);
-  const miOperario = req.session.usuario.codigoOperarioPRD;
-  if (!miOperario || miOperario <= 0) return res.json({ ok: false, error: 'Su usuario no tiene un operario de planta asignado.' });
-  let tx;
   try {
     const p = await getPool();
     if (!(await esOrdenSuspendidaReanudada(p, idOrden))) {
       return res.json({ ok: false, error: 'Esta orden no es una orden suspendida pendiente de retomar.' });
     }
-    const bloqueo = await bloqueoPorOtraOrdenDeLaMaquina(p, idOrden);
-    if (bloqueo) return res.json({ ok: false, error: bloqueo });
+    const r = await retomarOrdenSuspendida(p, req, idOrden, {
+      estadoEsperado: 'Pendiente', motivo: 'Orden suspendida retomada desde la tableta'
+    });
+    res.json({ ok: true, maquina: r.maquina });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
 
-    tx = new sql.Transaction(p);
-    await tx.begin();
-    const dt = await tx.request().input('idOrden', idOrden).query(`
-      SELECT ord.Estado, ord.Maquina, ISNULL(ord.NumeroPedido, '') AS NumeroPedido, ord.Linea, ej.IdEjecucion, ej.Operario
-      FROM SEL_OrdenProduccion ord WITH (UPDLOCK)
-      INNER JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
-      WHERE ord.IdOrden = @idOrden ORDER BY ej.IdEjecucion ASC
-    `);
-    const o = dt.recordset[0];
-    if (!o || o.Estado !== 'Pendiente') throw new Error('La orden ya no está pendiente de retomar.');
+// El nucleo de /reanudar-suspendida, compartido desde el 14/10/2026 con /reanudar-con-firmas: alli la
+// orden sigue 'Suspendida' (Programacion no la ha devuelto a la cola) y la reanudacion la autorizan
+// el Lider de Sellado y el Jefe de Planta desde la tableta. estadoEsperado: 'Pendiente' o 'Suspendida'.
+// firmas: texto con quien firmo, para el movimiento (null sin firmas). Revienta con el error.
+async function retomarOrdenSuspendida(p, req, idOrden, { estadoEsperado, motivo, firmas = null }) {
+  const miOperario = req.session.usuario.codigoOperarioPRD;
+  if (!miOperario || miOperario <= 0) throw new Error('Su usuario no tiene un operario de planta asignado.');
+  const bloqueo = await bloqueoPorOtraOrdenDeLaMaquina(p, idOrden);
+  if (bloqueo) throw new Error(bloqueo);
 
-    // El bulto suspendido vuelve a la línea: 'Activo' si alcanzó a tener paquetes (suspensión sin
-    // terminar el bulto), 'Temporal' si es el reservado vacío (suspensión al terminar el bulto).
-    const dtBulto = await tx.request().input('idEjecucion', o.IdEjecucion).query(`
-      DECLARE @IdBulto INT = (SELECT TOP 1 id FROM SEL_Bultos
-                              WHERE id_ejecucion = @idEjecucion AND estado = 'Suspendido' ORDER BY id DESC);
-      UPDATE SEL_Bultos
-      SET estado = CASE WHEN EXISTS (SELECT 1 FROM SEL_PesajeElemento pe WHERE pe.id_bulto = @IdBulto)
-                        THEN 'Activo' ELSE 'Temporal' END
-      WHERE id = @IdBulto;
-      SELECT @IdBulto AS IdBulto, (SELECT estado FROM SEL_Bultos WHERE id = @IdBulto) AS Estado;
-    `);
-    await tx.request().input('idOrden', idOrden).query(`UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden = @idOrden`);
-    // Una pausa abierta se respeta (igual que tomar-control-ejecucion); si no, queda 'Activa'.
-    await tx.request().input('idEjecucion', o.IdEjecucion).input('operario', miOperario).query(`
-      UPDATE SEL_EjecucionOrden
-      SET Operario = @operario, Estado = CASE WHEN Estado = 'En pausa' THEN 'En pausa' ELSE 'Activa' END
-      WHERE IdEjecucion = @idEjecucion
-    `);
-    const bulto = dtBulto.recordset[0] || {};
+  // 14/10/2026: turno y bitacora tambien ANTES de la transaccion, por si hay que reservar un bulto
+  // (crearBultoReanudacion) -- mismo motivo que en reabrirOrdenFinalizada. Despues se vuelven a
+  // llamar como siempre; con la bitacora ya abierta solo la reutilizan.
+  const dtMaq = await p.request().input('idOrden', idOrden).query(`SELECT Maquina FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+  if (dtMaq.recordset[0]) {
+    await activarTurnoDeSesion(p, req, dtMaq.recordset[0].Maquina);
+    await abrirOReanudarBitacora(p, dtMaq.recordset[0].Maquina, miOperario);
+  }
+
+  let tx = new sql.Transaction(p);
+  await tx.begin();
+  try {
+    // 14/10/2026: una orden 'Suspendida' de un grupo de sellado en paralelo se reanuda con todo su
+    // grupo -- la suspension desde la tableta (POST /suspender) suspende el grupo entero, igual que
+    // Finalizar. La 'Pendiente' que devolvio Programacion sigue siendo una sola orden, como antes.
+    const ids = estadoEsperado === 'Suspendida'
+      ? await idsConEstado(tx, await idsGrupoSelladoDeOrden(tx, idOrden), 'Suspendida')
+      : [idOrden];
+    if (!ids.includes(idOrden)) ids.unshift(idOrden);
+    let o = null;
+    let bulto = {};
+    for (const id of ids) {
+      const dt = await tx.request().input('idOrden', id).query(`
+        SELECT ord.Estado, ord.Maquina, ISNULL(ord.NumeroPedido, '') AS NumeroPedido, ord.Linea, ej.IdEjecucion, ej.Operario
+        FROM SEL_OrdenProduccion ord WITH (UPDLOCK)
+        INNER JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
+        WHERE ord.IdOrden = @idOrden ORDER BY ej.IdEjecucion ASC
+      `);
+      const fila = dt.recordset[0];
+      if (!fila || fila.Estado !== estadoEsperado) throw new Error('La orden ya no está pendiente de retomar.');
+      if (id === idOrden) o = fila;
+
+      // El bulto suspendido vuelve a la línea: 'Activo' si alcanzó a tener paquetes (suspensión sin
+      // terminar el bulto), 'Temporal' si es el reservado vacío (suspensión al terminar el bulto).
+      // En un grupo solo uno tiene bulto suspendido (las hermanas esperan en 'EnEspera'); si
+      // apareciera un segundo, va a 'EnEspera' para que la máquina nunca vea dos a la vez.
+      const dtBulto = await tx.request().input('idEjecucion', fila.IdEjecucion).input('yaHayUno', bulto.IdBulto ? 1 : 0).query(`
+        DECLARE @IdBulto INT = (SELECT TOP 1 id FROM SEL_Bultos
+                                WHERE id_ejecucion = @idEjecucion AND estado = 'Suspendido' ORDER BY id DESC);
+        UPDATE SEL_Bultos
+        SET estado = CASE WHEN @yaHayUno = 1 THEN 'EnEspera'
+                          WHEN EXISTS (SELECT 1 FROM SEL_PesajeElemento pe WHERE pe.id_bulto = @IdBulto)
+                          THEN 'Activo' ELSE 'Temporal' END
+        WHERE id = @IdBulto;
+        SELECT @IdBulto AS IdBulto, (SELECT estado FROM SEL_Bultos WHERE id = @IdBulto) AS Estado;
+      `);
+      if (!bulto.IdBulto && dtBulto.recordset[0] && dtBulto.recordset[0].IdBulto) bulto = dtBulto.recordset[0];
+
+      await tx.request().input('idOrden', id).query(`UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden = @idOrden`);
+      // Una pausa abierta se respeta (igual que tomar-control-ejecucion); si no, queda 'Activa'.
+      await tx.request().input('idEjecucion', fila.IdEjecucion).input('operario', miOperario).query(`
+        UPDATE SEL_EjecucionOrden
+        SET Operario = @operario, Estado = CASE WHEN Estado = 'En pausa' THEN 'En pausa' ELSE 'Activa' END
+        WHERE IdEjecucion = @idEjecucion
+      `);
+    }
+    // 14/10/2026: sin bulto suspendido (ni uno Activo/Temporal) la máquina no tendría dónde pesar --
+    // se le reserva uno vacío, igual que al reanudar un pedido finalizado.
+    if (!bulto.IdBulto) {
+      const nuevo = await crearBultoReanudacion(tx, req, { idOrden, idEjecucion: o.IdEjecucion, estado: 'Temporal' });
+      if (nuevo) bulto = { IdBulto: nuevo, Estado: 'Temporal (nuevo)' };
+    }
     await tx.request()
       .input('idOrden', idOrden).input('ref', `Pedido ${o.NumeroPedido} línea ${o.Linea}`.slice(0, 40))
       .input('usuario', usuarioNumerico(req.session.usuario))
-      .input('resumen', (bulto.IdBulto ? `Bulto ${bulto.IdBulto} Suspendido -> ${bulto.Estado}` : 'Sin bulto suspendido') + `, operario ${miOperario}`)
+      .input('motivo', motivo)
+      .input('resumen', ((ids.length > 1 ? `Órdenes ${ids.join(', ')}. ` : '') +
+                         (bulto.IdBulto ? `Bulto ${bulto.IdBulto} Suspendido -> ${bulto.Estado}` : 'Sin bulto suspendido') +
+                         `, operario ${miOperario}` + (firmas ? `. ${firmas}` : '')).slice(0, 500))
       .query(`
         IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
           INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
-          VALUES ('SELLADORA', 'REANUDAR_SUSPENDIDA', @idOrden, @ref, GETDATE(), @usuario, 'Tableta',
-                  'Orden suspendida retomada desde la tableta', @resumen);
+          VALUES ('SELLADORA', 'REANUDAR_SUSPENDIDA', @idOrden, @ref, GETDATE(), @usuario, 'Tableta', @motivo, @resumen);
       `);
     await tx.commit();
     tx = null;
@@ -10643,13 +11736,14 @@ app.post('/api/selladora/orden/:idOrden/reanudar-suspendida', requireLogin, asyn
     // Mismo criterio de usuario que materializarInicioOrden al reanudar la OT.
     await reanudarOTDeOrden(p, { idOrden, usuario: Number(req.session.usuario.codigo) || null });
 
-    console.log(`Orden suspendida ${idOrden} (pedido ${o.NumeroPedido} línea ${o.Linea}) retomada por ${req.session.usuario.codigo}`);
-    res.json({ ok: true, maquina: o.Maquina });
+    console.log(`Orden suspendida ${idOrden} (pedido ${o.NumeroPedido} línea ${o.Linea}) retomada por ${req.session.usuario.codigo}` +
+                (firmas ? ` -- ${firmas}` : ''));
+    return { maquina: o.Maquina };
   } catch (err) {
     try { if (tx) await tx.rollback(); } catch (e) { /* ya abortada */ }
-    res.json({ ok: false, error: err.message });
+    throw err;
   }
-});
+}
 
 // 06/10/2026 (a pedido del usuario): "Cancelar arranque" -- deshace un protocolo de arranque que
 // quedó a medias (orden equivocada, se arrepintió) y deja la orden Pendiente como si nunca hubiera
@@ -11086,6 +12180,12 @@ app.post('/api/comando', requireLogin, async (req, res) => {
     return res.status(400).json({ ok: false, error: 'Comando inválido.' });
   }
   try {
+    // 09/10/2026: imprimir, cerrar bulto y residuos solo con el control de la ejecucion (ver
+    // retomaPendiente). Calidad no: la tableta solo la pide a quien ya tiene el control.
+    if (comando !== 'calidad' && Number(idOrden) > 0) {
+      const retoma = await retomaPendiente(await getPool(), idOrden, req.session.usuario.codigoOperarioPRD);
+      if (retoma) return res.json({ ok: false, error: mensajeRetomaPendiente(retoma) });
+    }
     await enviarComandoANodeRed({
       comando,
       idOrden: Number(idOrden),
@@ -11128,6 +12228,20 @@ app.post('/api/selladora/orden/:idOrden/finalizar', requireLogin, async (req, re
     const p = await getPool();
     maquinaCodigo = await obtenerCodigoMaquinaDeOrden(p, idOrden);
 
+    // 09/10/2026: solo finaliza quien tiene el control de la ejecucion (ver retomaPendiente).
+    const retoma = await retomaPendiente(p, idOrden, usuario.codigoOperarioPRD);
+    if (retoma) throw new Error(mensajeRetomaPendiente(retoma));
+
+    // 14/10/2026: con menos del PORCENTAJE_MINIMO_FINALIZAR de avance no se finaliza sin la firma del
+    // Lider de Sellado o del Jefe de Planta (ver "Firmas especiales de un pedido"). Va en el servidor
+    // por lo mismo que la firma del turno de abajo: Finalizar es un form POST normal.
+    const bajas = await referenciasBajoMinimo(p, idOrden);
+    const firmaBajoMeta = bajas.length > 0 ? firmaVigente(req, idOrden, 'finalizar', 'liderOJefe') : null;
+    if (bajas.length > 0 && !firmaBajoMeta) {
+      throw new Error(`El porcentaje de avance no ha completado el 100% (${textoBajas(bajas)}). ` +
+                      `Para finalizar con menos del ${PORCENTAJE_MINIMO_FINALIZAR}% se necesita la firma del Líder de Sellado o del Jefe de Planta.`);
+    }
+
     // Sin la firma de un lider no se finaliza (22/09/2026). La comprobacion va EN EL SERVIDOR y no
     // solo en el modal: Finalizar es un form POST normal, asi que un navegador que no corra el
     // script -- o alguien que mande el POST a mano -- se saltaria un bloqueo que viviera solo en
@@ -11149,9 +12263,28 @@ app.post('/api/selladora/orden/:idOrden/finalizar', requireLogin, async (req, re
       }
     }
 
+    // Salida contra MP (16/10/2026): no bloquea, solo deja rastro si se finaliza con exceso. Se
+    // calcula ANTES de finalizarOrden, con los bultos todavia como los vio el operario en el aviso.
+    const balanceMP = await balanceMPParaFinalizar(p, idOrden);
+
     // OperarioFinal (distinto del que inicio) -- mismo bloqueo que EjecucionSelladora.vb si el
     // usuario logueado no tiene SISUsuarios.CodigoOperarioPRD configurado.
     await finalizarOrden(p, idOrden, usuario.generadoPor, usuario.codigoOperarioPRD);
+    if (balanceMP && balanceMP.excede) {
+      await registrarMovimientoSelladora(p, req, {
+        idOrden, subtipo: 'FINALIZAR_EXCESO_MP',
+        motivo: 'Finalizada con la salida por encima de la materia prima escaneada',
+        resumen: textoBalanceMP(balanceMP)
+      });
+    }
+    if (firmaBajoMeta) {
+      consumirFirmas(req, idOrden, 'finalizar');
+      await registrarMovimientoSelladora(p, req, {
+        idOrden, subtipo: 'FINALIZAR_BAJO_META',
+        motivo: `Finalizada con avance menor al ${PORCENTAJE_MINIMO_FINALIZAR}%`,
+        resumen: `${textoBajas(bajas)}. Autorizó: ${textoFirma(firmaBajoMeta)}`
+      });
+    }
     res.redirect(`/selladora/${maquinaCodigo}`);
   } catch (err) {
     res.status(400).send(renderErrorSimple(err.message, maquinaCodigo ? `/selladora/${maquinaCodigo}` : '/'));
@@ -11247,46 +12380,7 @@ app.post('/api/selladora/orden/:idOrden/observacion', requireLogin, async (req, 
 
   try {
     const p = await getPool();
-    const dtOrden = await p.request().input('idOrden', idOrden)
-      .query(`SELECT Maquina FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
-    if (dtOrden.recordset.length === 0) return res.json({ ok: false, error: 'Orden no encontrada.' });
-    const maquina = dtOrden.recordset[0].Maquina;
-
-    // Las tres son opcionales: si alguna falla, la observacion se guarda igual. Perder el texto que
-    // el operario acaba de escribir porque su maquina no tiene bitacora abierta seria absurdo.
-    let idEjecucion = null, idOrdenAncla = null, idBitacora = null;
-    try {
-      const dtEj = await p.request().input('idOrden', idOrden).query(
-        `SELECT TOP 1 IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden ORDER BY IdEjecucion ASC`
-      );
-      if (dtEj.recordset.length > 0) idEjecucion = dtEj.recordset[0].IdEjecucion;
-    } catch (e) { /* sin ejecucion todavia: la orden puede estar Pendiente */ }
-    try {
-      const ancla = await obtenerAnclaGrupoSellado(p, idOrden);
-      if (ancla) idOrdenAncla = ancla.IdOrden;
-    } catch (e) { /* orden suelta, sin grupo de sellado */ }
-    try {
-      const dtBi = await p.request().input('maquina', maquina).query(
-        `SELECT TOP 1 IdBitacora FROM SEL_BitacoraTurno WHERE Maquina = @maquina AND HoraCierre IS NULL`
-      );
-      if (dtBi.recordset.length > 0) idBitacora = dtBi.recordset[0].IdBitacora;
-    } catch (e) { /* maquina sin bitacora abierta -- ver la nota del script SQL */ }
-
-    await p.request()
-      .input('idOrden', idOrden)
-      .input('idOrdenAncla', idOrdenAncla)
-      .input('idEjecucion', idEjecucion)
-      .input('operario', req.session.usuario.codigoOperarioPRD || null)
-      .input('maquina', maquina)
-      .input('idBitacora', idBitacora)
-      .input('observacion', texto.slice(0, 500))
-      .input('origen', origen)
-      .query(`
-        INSERT INTO SEL_ObservacionOperario
-          (IdOrden, IdOrdenAncla, id_ejecucion, Operario, Maquina, IdBitacora, Observacion, Origen)
-        VALUES
-          (@idOrden, @idOrdenAncla, @idEjecucion, @operario, @maquina, @idBitacora, @observacion, @origen)
-      `);
+    await guardarObservacionOperario(p, { idOrden, operario: req.session.usuario.codigoOperarioPRD, texto, origen });
     res.json({ ok: true });
   } catch (err) {
     // Mismo criterio que /protocolo/respuesta y /ajustar-consumo: si falta correr el script, se
@@ -11300,6 +12394,51 @@ app.post('/api/selladora/orden/:idOrden/observacion', requireLogin, async (req, 
     });
   }
 });
+
+// Inserta la fila en SEL_ObservacionOperario. Sacada del endpoint de arriba el 14/10/2026 para
+// reusarla al suspender un pedido desde la tableta (Origen 'Suspension'). Revienta con el error.
+async function guardarObservacionOperario(p, { idOrden, operario, texto, origen }) {
+  const dtOrden = await p.request().input('idOrden', idOrden)
+    .query(`SELECT Maquina FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+  if (dtOrden.recordset.length === 0) throw new Error('Orden no encontrada.');
+  const maquina = dtOrden.recordset[0].Maquina;
+
+  // Las tres son opcionales: si alguna falla, la observacion se guarda igual. Perder el texto que
+  // el operario acaba de escribir porque su maquina no tiene bitacora abierta seria absurdo.
+  let idEjecucion = null, idOrdenAncla = null, idBitacora = null;
+  try {
+    const dtEj = await p.request().input('idOrden', idOrden).query(
+      `SELECT TOP 1 IdEjecucion FROM SEL_EjecucionOrden WHERE IdOrden = @idOrden ORDER BY IdEjecucion ASC`
+    );
+    if (dtEj.recordset.length > 0) idEjecucion = dtEj.recordset[0].IdEjecucion;
+  } catch (e) { /* sin ejecucion todavia: la orden puede estar Pendiente */ }
+  try {
+    const ancla = await obtenerAnclaGrupoSellado(p, idOrden);
+    if (ancla) idOrdenAncla = ancla.IdOrden;
+  } catch (e) { /* orden suelta, sin grupo de sellado */ }
+  try {
+    const dtBi = await p.request().input('maquina', maquina).query(
+      `SELECT TOP 1 IdBitacora FROM SEL_BitacoraTurno WHERE Maquina = @maquina AND HoraCierre IS NULL`
+    );
+    if (dtBi.recordset.length > 0) idBitacora = dtBi.recordset[0].IdBitacora;
+  } catch (e) { /* maquina sin bitacora abierta -- ver la nota del script SQL */ }
+
+  await p.request()
+    .input('idOrden', idOrden)
+    .input('idOrdenAncla', idOrdenAncla)
+    .input('idEjecucion', idEjecucion)
+    .input('operario', operario || null)
+    .input('maquina', maquina)
+    .input('idBitacora', idBitacora)
+    .input('observacion', texto.slice(0, 500))
+    .input('origen', origen)
+    .query(`
+      INSERT INTO SEL_ObservacionOperario
+        (IdOrden, IdOrdenAncla, id_ejecucion, Operario, Maquina, IdBitacora, Observacion, Origen)
+      VALUES
+        (@idOrden, @idOrdenAncla, @idEjecucion, @operario, @maquina, @idBitacora, @observacion, @origen)
+    `);
+}
 
 // La orden Activa a nombre de este operario, o null. La usa el "Cerrar sesión" para saber si vale
 // la pena preguntar por una observacion antes de salir.
@@ -11559,6 +12698,514 @@ app.post('/api/selladora/orden/:idOrden/autorizacion', requireLogin, async (req,
           '20260925_autorizacion_por_bitacora.sql contra esta base.'
         : err.message
     });
+  }
+});
+
+// ---------------- Firmas especiales de un pedido (14/10/2026, a pedido del usuario) ----------------
+// Dos reglas nuevas:
+//  - Finalizar con un avance de produccion menor a PORCENTAJE_MINIMO_FINALIZAR pide la firma del
+//    Lider de Sellado O del Jefe de Planta (rol 'liderOJefe').
+//  - Reanudar desde la tableta un pedido Suspendido o finalizado por accidente (PendienteValidacion)
+//    pide la firma del Lider de Sellado O del Jefe de Planta (17/10/2026; antes pedia las dos).
+// Cada firma se valida sola (POST /firma, usuario+clave+cargo) y queda guardada en la SESION del
+// operario por FIRMA_VIGENCIA_MS, atada a la orden y al proposito; la accion (Finalizar o
+// /reanudar-con-firmas) la exige en el servidor y la consume. Asi la contrasena del lider viaja una
+// sola vez y no hay forma de saltarse la firma mandando el POST a mano. Sin tabla nueva: quien firmo
+// queda en SISMovimientos (FINALIZAR_BAJO_META, REANUDAR_SUSPENDIDA, REANUDAR_FINALIZADA).
+const PORCENTAJE_MINIMO_FINALIZAR = 95;
+const FIRMA_VIGENCIA_MS = 10 * 60 * 1000;
+const ROLES_FIRMA = {
+  lider: { cargos: CARGOS_LIDER_SELLADO, nombre: 'Líder de Sellado' },
+  jefe: { cargos: CARGOS_JEFE_PLANTA, nombre: 'Jefe de Planta' },
+  liderOJefe: { cargos: [...CARGOS_LIDER_SELLADO, ...CARGOS_JEFE_PLANTA], nombre: 'Líder de Sellado o Jefe de Planta' }
+};
+const ROLES_POR_PROPOSITO = { finalizar: ['liderOJefe'], suspender: ['liderOJefe'], reanudar: ['liderOJefe'] };
+
+function firmasDeOrden(req, idOrden, proposito) {
+  if (!req.session.firmasPedido) req.session.firmasPedido = {};
+  const clave = `${Number(idOrden)}:${proposito}`;
+  if (!req.session.firmasPedido[clave]) req.session.firmasPedido[clave] = {};
+  return req.session.firmasPedido[clave];
+}
+
+function firmaVigente(req, idOrden, proposito, rol) {
+  const f = firmasDeOrden(req, idOrden, proposito)[rol];
+  return f && f.expira > Date.now() ? f : null;
+}
+
+function consumirFirmas(req, idOrden, proposito) {
+  if (req.session.firmasPedido) delete req.session.firmasPedido[`${Number(idOrden)}:${proposito}`];
+}
+
+function textoFirma(f) {
+  return `${f.nombre} (${f.cargo}, usuario ${f.codigo})`;
+}
+
+// Nunca revienta: el movimiento es rastro, no puede deshacer la accion ya hecha.
+async function registrarMovimientoSelladora(p, req, { idOrden, subtipo, motivo, resumen }) {
+  try {
+    const o = await datosOrdenParaAviso(p, idOrden);
+    await p.request()
+      .input('idOrden', idOrden)
+      .input('ref', (o ? `Pedido ${o.NumeroPedido} línea ${o.Linea}` : `Orden ${idOrden}`).slice(0, 40))
+      .input('usuario', usuarioNumerico(req.session.usuario))
+      .input('subtipo', subtipo).input('motivo', motivo).input('resumen', String(resumen).slice(0, 500))
+      .query(`
+        IF OBJECT_ID('dbo.SISMovimientos') IS NOT NULL
+          INSERT INTO SISMovimientos (Tipo, Subtipo, IdReferencia, Referencia, FechaHora, Usuario, Origen, Motivo, Resumen)
+          VALUES ('SELLADORA', @subtipo, @idOrden, @ref, GETDATE(), @usuario, 'Tableta', @motivo, @resumen);
+      `);
+  } catch (err) {
+    console.error(`No se pudo registrar el movimiento ${subtipo} de la orden ${idOrden}:`, err.message);
+  }
+}
+
+// Las referencias que se finalizarian juntas con idOrden (todo su grupo Activo) y que van por debajo
+// del minimo. Una orden sin meta configurada (ver obtenerAvanceProduccion) no cuenta.
+async function referenciasBajoMinimo(p, idOrden) {
+  const ids = await idsConEstado(p, await idsGrupoSelladoDeOrden(p, idOrden), 'Activa');
+  const bajas = [];
+  for (const id of ids) {
+    const a = await obtenerAvanceProduccion(p, id);
+    if (!a.tipo || a.porcentaje >= PORCENTAJE_MINIMO_FINALIZAR) continue;
+    const o = await datosOrdenParaAviso(p, id);
+    bajas.push({
+      idOrden: id,
+      descripcion: o ? `Pedido ${o.NumeroPedido} · ${o.Referencia || ''}`.trim() : `Orden ${id}`,
+      porcentaje: Math.round(a.porcentaje * 10) / 10,
+      producido: formatearCantidadAvance(a.producido, a.tipo),
+      programado: formatearCantidadAvance(a.programado, a.tipo)
+    });
+  }
+  return bajas;
+}
+
+function textoBajas(bajas) {
+  return bajas.map(b => `${b.descripcion}: ${b.porcentaje.toLocaleString('es-CO')}% (${b.producido} de ${b.programado})`).join('; ');
+}
+
+// Salida contra materia prima al Finalizar (16/10/2026): igual que el tope de Produccion.vb al
+// guardar parciales -- (Cantidad - cono) + residuos <= MP del historial --, pero en la tableta es
+// solo un AVISO (se puede finalizar igual). Sin tolerancia: lo que entra es el maximo (decision del
+// usuario), asi que avisa con cualquier exceso. Se compara a centesimas para que un residuo de coma
+// flotante no dispare el aviso. Sin MP escaneada (entrada 0) no se avisa, como Produccion.vb.
+
+// Nunca revienta: si no se puede calcular, devuelve null y el Finalizar sigue como siempre.
+async function balanceMPParaFinalizar(p, idOrden) {
+  try {
+    const b = await obtenerBalanceMPSellado(p, idOrden);
+    if (!b || !(b.entrada > 0)) return null;
+    return { ...b, excede: Math.round(b.diferencia * 100) > 0 };
+  } catch (err) {
+    console.error(`No se pudo calcular el balance de MP de la orden ${idOrden}:`, err.message);
+    return null;
+  }
+}
+
+function textoBalanceMP(b) {
+  const kg = n => `${n.toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} kg`;
+  return `MP escaneada ${kg(b.entrada)}; salida ${kg(b.salida)} (bultos ${kg(b.bultos)} + residuos ${kg(b.residuos)}); exceso ${kg(b.diferencia)}`;
+}
+
+// Lo consulta confirmarFinalizar antes de preguntar nada: si hay referencias por debajo del minimo
+// y todavia no hay firma, la tableta avisa y pide la firma. Tambien trae el balance de MP para el
+// aviso de "la salida supera la materia prima escaneada".
+app.get('/api/selladora/orden/:idOrden/finalizar/requisitos', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  try {
+    const p = await getPool();
+    const bajas = await referenciasBajoMinimo(p, idOrden);
+    res.json({
+      ok: true, minimo: PORCENTAJE_MINIMO_FINALIZAR, bajas,
+      firmado: !!firmaVigente(req, idOrden, 'finalizar', 'liderOJefe'),
+      balance: await balanceMPParaFinalizar(p, idOrden)
+    });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// Una firma: valida usuario+clave+cargo para el rol pedido y la guarda en la sesion.
+app.post('/api/selladora/orden/:idOrden/firma', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  const { proposito, rol, codigo, password } = req.body || {};
+  try {
+    if (!(ROLES_POR_PROPOSITO[proposito] || []).includes(rol)) {
+      return res.json({ ok: false, error: 'Firma no reconocida.' });
+    }
+    const p = await getPool();
+    const intento = await validarFirmaCargo(p, codigo, password, ROLES_FIRMA[rol].cargos);
+    if (!intento.ok) return res.json({ ok: false, error: intento.error });
+
+    const firmas = firmasDeOrden(req, idOrden, proposito);
+    // Las dos firmas de la reanudacion son de dos personas distintas (cada usuario tiene un solo
+    // cargo, asi que en la practica ya lo son -- esto es por si algun dia cambia).
+    const otra = Object.entries(firmas).find(([r, f]) => r !== rol && f.expira > Date.now() && f.codigo === intento.usuario.codigo);
+    if (otra) return res.json({ ok: false, error: `${intento.usuario.nombre} ya firmó como ${ROLES_FIRMA[otra[0]].nombre}. La otra firma debe ser de otra persona.` });
+
+    firmas[rol] = {
+      codigo: intento.usuario.codigo,
+      nombre: intento.usuario.nombre,
+      cargo: intento.usuario.cargoAutorizado,
+      expira: Date.now() + FIRMA_VIGENCIA_MS
+    };
+    res.json({ ok: true, firma: { nombre: intento.usuario.nombre, cargo: intento.usuario.cargoAutorizado } });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// Reanudar con la firma del Lider de Sellado o del Jefe de Planta un pedido Suspendido (sin esperar a
+// que Programacion lo devuelva a la cola) o uno finalizado por accidente que el digitador todavia no
+// ha cerrado.
+app.post('/api/selladora/orden/:idOrden/reanudar-con-firmas', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  try {
+    const firma = firmaVigente(req, idOrden, 'reanudar', 'liderOJefe');
+    if (!firma) {
+      return res.json({ ok: false, error: 'Falta la firma del Líder de Sellado o del Jefe de Planta (o ya venció). Vuelva a pedirla.' });
+    }
+    const firmas = `Firmó: ${textoFirma(firma)}`;
+    const p = await getPool();
+    const dt = await p.request().input('idOrden', idOrden).query(`SELECT Estado FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
+    const estado = dt.recordset[0] && dt.recordset[0].Estado;
+    let r;
+    if (estado === 'Suspendida') {
+      r = await retomarOrdenSuspendida(p, req, idOrden, {
+        estadoEsperado: 'Suspendida', motivo: 'Orden suspendida reanudada desde la tableta con firmas', firmas
+      });
+    } else if (estado === 'PendienteValidacion') {
+      r = await reabrirOrdenFinalizada(p, req, idOrden, firmas);
+    } else {
+      return res.json({ ok: false, error: 'Solo se puede reanudar un pedido suspendido o finalizado (pendiente de validación).' });
+    }
+    consumirFirmas(req, idOrden, 'reanudar');
+    res.json({ ok: true, maquina: r.maquina });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// Suspender un pedido desde la tableta (14/10/2026, a pedido del usuario). Hasta ahora solo lo podia
+// pedir Programacion (bandera 'PendienteSuspension', ver /responder-suspension). Pide la firma del
+// Lider de Sellado o del Jefe de Planta y un motivo. Los mismos dos caminos de siempre:
+//  terminarBulto=true  -> la ejecucion que la maquina esta llenando pasa a 'SuspensionEnCurso' y
+//                         trg_SEL_Bultos_SuspenderTemporal la suspende cuando el PLC cierre el bulto
+//                         (con la OT incluida). Si el bulto en curso no tiene paquetes no hay nada
+//                         que terminar y se suspende de una vez.
+//  terminarBulto=false -> se suspende ya: los bultos Activo y Temporal pasan a 'Suspendido' (el
+//                         Temporal tambien, a diferencia de /responder-suspension: si se queda
+//                         Temporal el PLC lo seguiria llenando con la orden suspendida).
+// Sellado en paralelo: se suspende todo el grupo Activo, igual que Finalizar; las hermanas que
+// esperan en 'EnEspera' quedan suspendidas de una vez (la maquina no las esta llenando).
+app.post('/api/selladora/orden/:idOrden/suspender', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  const terminarBulto = !!(req.body && req.body.terminarBulto);
+  const motivo = String((req.body && req.body.motivo) || '').trim().slice(0, 150);
+  try {
+    if (motivo.length < 3) return res.json({ ok: false, error: 'Escriba el motivo de la suspensión.' });
+    const firma = firmaVigente(req, idOrden, 'suspender', 'liderOJefe');
+    if (!firma) {
+      return res.json({ ok: false, error: 'Falta la firma del Líder de Sellado o del Jefe de Planta (o ya venció). Vuelva a pedirla.' });
+    }
+    const p = await getPool();
+    const retoma = await retomaPendiente(p, idOrden, req.session.usuario.codigoOperarioPRD);
+    if (retoma) return res.json({ ok: false, error: mensajeRetomaPendiente(retoma) });
+
+    const r = await suspenderOrdenDesdeTableta(p, req, idOrden, { terminarBulto, motivo, firma });
+    consumirFirmas(req, idOrden, 'suspender');
+    res.json({ ok: true, esperaBulto: r.esperaBulto });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+async function suspenderOrdenDesdeTableta(p, req, idOrden, { terminarBulto, motivo, firma }) {
+  const ids = await idsConEstado(p, await idsGrupoSelladoDeOrden(p, idOrden), 'Activa');
+  if (!ids.includes(idOrden)) throw new Error('Solo se puede suspender un pedido que esté Activo.');
+
+  const dt = await p.request().query(`
+    SELECT ej.IdOrden, ej.IdEjecucion, ej.Estado,
+           (SELECT COUNT(*) FROM SEL_Bultos b
+            WHERE b.id_ejecucion = ej.IdEjecucion AND b.estado IN ('Activo', 'Temporal')) AS EnLinea,
+           (SELECT COUNT(*) FROM SEL_PesajeElemento pe INNER JOIN SEL_Bultos b ON b.id = pe.id_bulto
+            WHERE b.id_ejecucion = ej.IdEjecucion AND b.estado = 'Activo') AS PaquetesEnCurso
+    FROM SEL_EjecucionOrden ej
+    WHERE ej.IdOrden IN (${ids.map(Number).join(',')}) AND ej.HoraFinReal IS NULL
+  `);
+  const ejecuciones = dt.recordset;
+  if (ejecuciones.length === 0) throw new Error('No se encontró la ejecución de esta orden.');
+  if (ejecuciones.some(e => e.Estado === 'En pausa')) {
+    throw new Error('La orden está en pausa: termine la pausa antes de suspender.');
+  }
+  const esperaBulto = terminarBulto && ejecuciones.some(e => e.EnLinea > 0 && e.PaquetesEnCurso > 0);
+
+  let tx = new sql.Transaction(p);
+  await tx.begin();
+  try {
+    for (const e of ejecuciones) {
+      if (esperaBulto && e.EnLinea > 0) {
+        await tx.request().input('idEjecucion', e.IdEjecucion)
+          .query(`UPDATE SEL_EjecucionOrden SET Estado = 'SuspensionEnCurso' WHERE IdEjecucion = @idEjecucion`);
+        continue;
+      }
+      await tx.request().input('idEjecucion', e.IdEjecucion).query(`
+        UPDATE SEL_Bultos SET estado = 'Suspendido' WHERE id_ejecucion = @idEjecucion AND estado IN ('Activo', 'Temporal');
+        UPDATE SEL_EjecucionOrden SET Estado = 'Suspendida' WHERE IdEjecucion = @idEjecucion;
+      `);
+      await tx.request().input('idOrden', e.IdOrden)
+        .query(`UPDATE SEL_OrdenProduccion SET Estado = 'Suspendida' WHERE IdOrden = @idOrden`);
+    }
+    await tx.commit();
+    tx = null;
+  } catch (err) {
+    try { if (tx) await tx.rollback(); } catch (e) { /* ya abortada */ }
+    throw err;
+  }
+
+  // Esperando el bulto, la OT la suspende el trigger al cerrarlo; si no, se suspende ya (como en
+  // /responder-suspension). Nunca revienta.
+  if (!esperaBulto) {
+    await suspenderOTDeOrden(p, {
+      idOrden, usuario: Number(req.session.usuario && req.session.usuario.codigo) || null,
+      motivo: `Suspendida desde la tableta: ${motivo}`
+    });
+  }
+  await registrarMovimientoSelladora(p, req, {
+    idOrden, subtipo: 'SUSPENDER', motivo,
+    resumen: (ids.length > 1 ? `Órdenes ${ids.join(', ')}. ` : '') +
+             (esperaBulto ? 'Se suspende al cerrar el bulto en curso' : 'Suspendida de una vez') +
+             `. Autorizó: ${textoFirma(firma)}`
+  });
+  // 14/10/2026 (a pedido del usuario): tambien en observaciones, Origen 'Suspension'. Nunca revienta.
+  try {
+    await guardarObservacionOperario(p, {
+      idOrden, operario: req.session.usuario.codigoOperarioPRD, origen: 'Suspension',
+      texto: `Pedido suspendido ${esperaBulto ? 'al terminar el bulto en curso' : 'de una vez'}. ` +
+             `Motivo: ${motivo}. Autorizó: ${textoFirma(firma)}`
+    });
+  } catch (err) {
+    console.error(`No se pudo guardar la observacion de la suspension de la orden ${idOrden}:`, err.message);
+  }
+  console.log(`Orden ${idOrden} suspendida desde la tableta por ${req.session.usuario.codigo} (${motivo}) -- ${textoFirma(firma)}`);
+  return { esperaBulto };
+}
+
+// Bulto vacio para que la maquina tenga donde pesar al reanudar. No hace nada si la ejecucion ya
+// tiene uno abierto. Sin materia prima (el rollo ya se registro al iniciar) y con la OT que ya tiene
+// la orden. Devuelve el id del bulto nuevo o null.
+async function crearBultoReanudacion(tx, req, { idOrden, idEjecucion, estado }) {
+  const dt = await tx.request().input('idEjecucion', idEjecucion).input('idOrden', idOrden).query(`
+    SELECT (SELECT COUNT(*) FROM SEL_Bultos WHERE id_ejecucion = @idEjecucion
+            AND estado IN ('Activo', 'Temporal', 'EnEspera')) AS Abiertos,
+           (SELECT BolsasxGolpe FROM SEL_EjecucionOrden WHERE IdEjecucion = @idEjecucion) AS BolsasxGolpe,
+           (SELECT TOP 1 pp.OrdenProduccion FROM SEL_Bultos b
+            INNER JOIN PRDProduccion pp ON pp.Detalle = b.serialPadre
+            INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+            WHERE ej.IdOrden = @idOrden AND pp.OrdenProduccion IS NOT NULL ORDER BY b.id DESC) AS OT
+  `);
+  const f = dt.recordset[0];
+  if (f.Abiertos > 0) return null;
+  await crearBultoInicial(tx, {
+    idOrden, idEjecucion, codOperario: req.session.usuario.codigoOperarioPRD,
+    serial: null, cantidad: null, lote: null, bolsasXGolpe: f.BolsasxGolpe != null ? f.BolsasxGolpe : 0,
+    generadoPor: req.session.usuario.generadoPor, sinMateriaPrima: true, estadoInicial: estado,
+    ordenProduccion: f.OT || null
+  });
+  const dtNuevo = await tx.request().input('idEjecucion', idEjecucion)
+    .query(`SELECT TOP 1 id FROM SEL_Bultos WHERE id_ejecucion = @idEjecucion ORDER BY id DESC`);
+  return dtNuevo.recordset[0] ? dtNuevo.recordset[0].id : null;
+}
+
+// Deshace un Finalizar (ver finalizarOrden en ejecucion-selladora.js) mientras el digitador no haya
+// cerrado la orden: todas las referencias del grupo que se finalizaron juntas vuelven a 'Activa' sobre
+// su MISMA ejecucion (sin HoraFinReal ni OperarioFinal, a nombre de quien reanuda), la OT y sus
+// controles vuelven a 'Activa'/'EnProceso' (reabrirOTDeOrden) y se reserva un bulto vacio: 'Temporal'
+// en la referencia que se reanudo, 'EnEspera' en las hermanas del grupo -- igual que al Iniciar. Lo
+// ya producido y lo que el digitador ya haya validado bulto a bulto no se toca. Sin protocolo.
+async function reabrirOrdenFinalizada(p, req, idOrden, firmas) {
+  const miOperario = req.session.usuario.codigoOperarioPRD;
+  if (!miOperario || miOperario <= 0) throw new Error('Su usuario no tiene un operario de planta asignado.');
+  const ids = await idsConEstado(p, await idsGrupoSelladoDeOrden(p, idOrden), 'PendienteValidacion');
+  if (!ids.includes(idOrden)) throw new Error('Esta orden no está finalizada (pendiente de validación).');
+
+  const dtOtra = await p.request().input('idOrden', idOrden).query(`
+    SELECT TOP 1 ord2.IdOrden, ISNULL(ord2.NumeroPedido, '') AS NumeroPedido, ord2.Linea, ie.Referencia, ie.Nombre
+    FROM SEL_OrdenProduccion ord1
+    INNER JOIN SEL_OrdenProduccion ord2 ON ord2.Maquina = ord1.Maquina AND ord2.IdOrden <> ord1.IdOrden AND ord2.Estado = 'Activa'
+    LEFT JOIN INVElementos ie ON ie.Codigo = ord2.Elemento
+    WHERE ord1.IdOrden = @idOrden
+  `);
+  if (dtOtra.recordset.length > 0) {
+    throw new Error(`La máquina ya está trabajando la orden ${describirOrden(dtOtra.recordset[0])}. Finalícela antes de reanudar esta.`);
+  }
+  const aMedias = await ordenConProtocoloAMedias(p, idOrden);
+  if (aMedias) throw new Error(`La orden ${describirOrden(aMedias)} ya empezó el protocolo de arranque. Continúelo o cancélelo antes de reanudar esta.`);
+
+  // Turno y bitacora ANTES de la transaccion: crearBultoInicial abre la bitacora con otra conexion,
+  // y si tuviera que cerrar la de otro turno (cerrarBitacora lee SEL_EjecucionOrden/SEL_Bultos/
+  // PRDProduccion) se quedaria esperando las filas que esta transaccion tiene bloqueadas. Abierta
+  // aqui, adentro solo se reutiliza.
+  const maquina = (await p.request().input('idOrden', idOrden)
+    .query(`SELECT Maquina FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`)).recordset[0].Maquina;
+  await activarTurnoDeSesion(p, req, maquina);
+  await abrirOReanudarBitacora(p, maquina, miOperario);
+
+  let tx = new sql.Transaction(p);
+  await tx.begin();
+  try {
+    const ejecuciones = [];
+    for (const id of ids) {
+      const dt = await tx.request().input('idOrden', id).query(`
+        SELECT TOP 1 ej.IdEjecucion, ord.Estado
+        FROM SEL_OrdenProduccion ord WITH (UPDLOCK)
+        INNER JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
+        WHERE ord.IdOrden = @idOrden ORDER BY ej.IdEjecucion DESC
+      `);
+      const e = dt.recordset[0];
+      if (!e || e.Estado !== 'PendienteValidacion') throw new Error('La orden ya no está pendiente de validación.');
+      await tx.request().input('idEjecucion', e.IdEjecucion).input('operario', miOperario).query(`
+        UPDATE SEL_EjecucionOrden SET HoraFinReal = NULL, OperarioFinal = NULL, Operario = @operario, Estado = 'Activa'
+        WHERE IdEjecucion = @idEjecucion
+      `);
+      await tx.request().input('idOrden', id).query(`UPDATE SEL_OrdenProduccion SET Estado = 'Activa' WHERE IdOrden = @idOrden`);
+      ejecuciones.push({ idOrden: id, idEjecucion: e.IdEjecucion });
+    }
+
+    const ot = await reabrirOTDeOrden(tx, { idOrden });
+    const bultos = [];
+    for (const e of ejecuciones) {
+      const nuevo = await crearBultoReanudacion(tx, req, {
+        idOrden: e.idOrden, idEjecucion: e.idEjecucion, estado: e.idOrden === idOrden ? 'Temporal' : 'EnEspera'
+      });
+      if (nuevo) bultos.push(nuevo);
+    }
+    await tx.commit();
+    tx = null;
+
+    await registrarMovimientoSelladora(p, req, {
+      idOrden, subtipo: 'REANUDAR_FINALIZADA', motivo: 'Pedido finalizado por accidente, reanudado desde la tableta',
+      resumen: `Órdenes ${ids.join(', ')} de PendienteValidacion a Activa` + (ot ? `, OT ${ot}` : '') +
+               (bultos.length ? `, bulto(s) nuevo(s) ${bultos.join(', ')}` : '') + `, operario ${miOperario}. ${firmas}`
+    });
+    console.log(`Orden finalizada ${idOrden} reanudada por ${req.session.usuario.codigo} -- ${firmas}`);
+    return { maquina };
+  } catch (err) {
+    try { if (tx) await tx.rollback(); } catch (e) { /* ya abortada */ }
+    throw err;
+  }
+}
+
+// ---------------- Rollos adicionales del arranque (14/10/2026, a pedido del usuario) ----------------
+// Al Iniciar ya no se pide "Bolsas x golpe" sino el numero de PISTAS (se guarda en la misma columna
+// BolsasxGolpe: cada pista da una bolsa por golpe). Con mas de una pista la tableta pregunta
+// "¿Se monta otro rollo?" -- dos pistas no siempre son dos rollos (a veces un rollo da dos pistas),
+// asi que es el operario el que dice cuantos van, hasta uno por pista contando el principal. Los
+// adicionales quedan PENDIENTES en SEL_ProtocoloArranque (Paso 'rollo_adicional') y salen del
+// inventario recien al terminar el alistamiento (montarRollosAdicionales en scan-rollo.js). Cada
+// uno pasa antes por el chequeo 4.1/4.2 de siempre. Si el operario le da "Sí" por equivocacion,
+// "Cancelar" vuelve a la pregunta sin agregar nada. Cambiar el primer rollo vacia la lista (ver
+// confirmarRollo), asi que nunca quedan mas rollos que pistas.
+
+// La lista del arranque en curso: el rollo principal pendiente y los adicionales. null si la orden
+// ya no esta en el arranque (no esta Pendiente, o todavia no tiene el principal escaneado).
+async function rollosDelArranque(p, idOrden) {
+  const dt = await p.request().input('idOrden', idOrden).query(`
+    SELECT TOP 1 ord.Estado, ej.IdEjecucion, rp.Serial, rp.Cantidad, rp.Lote, rp.BolsasXGolpe, ie.Referencia
+    FROM SEL_OrdenProduccion ord
+    INNER JOIN SEL_EjecucionOrden ej ON ej.IdOrden = ord.IdOrden
+    LEFT JOIN SEL_RolloPendienteInicio rp ON rp.IdEjecucion = ej.IdEjecucion AND rp.Procesado = 0
+    OUTER APPLY (SELECT TOP 1 Elemento FROM INVExistencias WHERE Detalle = rp.Serial) ex
+    LEFT JOIN INVElementos ie ON ie.Codigo = ex.Elemento
+    WHERE ord.IdOrden = @idOrden
+    ORDER BY ej.IdEjecucion ASC, rp.Id DESC
+  `);
+  const f = dt.recordset[0];
+  if (!f || f.Estado !== 'Pendiente' || !f.Serial) return null;
+  const dtAd = await p.request().input('idEjecucion', f.IdEjecucion).query(`
+    SELECT pa.Serial, ex.Cantidad, ie.Referencia
+    FROM SEL_ProtocoloArranque pa
+    OUTER APPLY (SELECT TOP 1 Cantidad, Elemento FROM INVExistencias WHERE Detalle = pa.Serial) ex
+    LEFT JOIN INVElementos ie ON ie.Codigo = ex.Elemento
+    WHERE pa.id_ejecucion = @idEjecucion AND pa.Paso = 'rollo_adicional' AND pa.Respuesta = 'Pendiente'
+    ORDER BY pa.Id ASC
+  `);
+  return {
+    idEjecucion: f.IdEjecucion,
+    pistas: Number(f.BolsasXGolpe) || 1,
+    principal: { serial: String(f.Serial).trim(), cantidad: f.Cantidad, lote: f.Lote,
+                 referencia: f.Referencia ? String(f.Referencia).trim() : '' },
+    adicionales: await Promise.all(dtAd.recordset.map(async r => ({
+      serial: String(r.Serial).trim(), cantidad: r.Cantidad, referencia: r.Referencia ? String(r.Referencia).trim() : '',
+      lote: await obtenerLoteRollo(p, String(r.Serial).trim()).catch(() => '')
+    })))
+  };
+}
+
+// Valida un rollo adicional sin escribir nada. Devuelve la consulta del serial (para la vista
+// previa) o revienta con un mensaje para el operario.
+async function validarRolloAdicional(p, idOrden, serial, lista) {
+  if (!lista) throw new Error('El arranque de esta orden ya terminó: para montar otro rollo use "+ Rollo".');
+  const tSerial = String(serial || '').trim();
+  if (!tSerial) throw new Error('Escanee o escriba el serial del rollo.');
+  if (tSerial === lista.principal.serial || lista.adicionales.some(r => r.serial === tSerial)) {
+    throw new Error('Ese rollo ya está en la lista.');
+  }
+  if (lista.adicionales.length + 1 >= lista.pistas) {
+    throw new Error(`Con ${lista.pistas} pista(s) van máximo ${lista.pistas} rollo(s), y ya están todos.`);
+  }
+  const consulta = await consultarSerial(p, { idOrden, serial: tSerial, esNuevoRollo: false });
+  if (!consulta.ok) throw new Error(consulta.error);
+  // Misma regla que "+ Rollo": todos los rollos del proceso, de la misma bodega que el principal.
+  const principal = await consultarSerial(p, { idOrden, serial: lista.principal.serial, esNuevoRollo: false });
+  if (principal.ok && consulta.bodega && principal.bodega &&
+      String(consulta.bodega).trim().toUpperCase() !== String(principal.bodega).trim().toUpperCase()) {
+    throw new Error(`Este rollo es de la bodega "${consulta.bodegaNombre}", pero el primer rollo es de "${principal.bodegaNombre}". ` +
+                    'Escanee un rollo de la misma bodega.');
+  }
+  return consulta;
+}
+
+app.get('/api/selladora/orden/:idOrden/rollos-arranque', requireLogin, async (req, res) => {
+  try {
+    const lista = await rollosDelArranque(await getPool(), Number(req.params.idOrden));
+    if (!lista) return res.json({ ok: false, error: 'El arranque de esta orden ya terminó.' });
+    res.json({ ok: true, pistas: lista.pistas, principal: lista.principal, adicionales: lista.adicionales });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// Vista previa de un rollo adicional (no escribe).
+app.post('/api/selladora/orden/:idOrden/rollos-arranque/consultar', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  try {
+    const p = await getPool();
+    const consulta = await validarRolloAdicional(p, idOrden, req.body && req.body.serial, await rollosDelArranque(p, idOrden));
+    res.json(consulta);
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+// Agrega el rollo adicional a la lista (ya con su chequeo 4.1/4.2 respondido).
+app.post('/api/selladora/orden/:idOrden/rollos-arranque', requireLogin, async (req, res) => {
+  const idOrden = Number(req.params.idOrden);
+  try {
+    const p = await getPool();
+    const lista = await rollosDelArranque(p, idOrden);
+    const consulta = await validarRolloAdicional(p, idOrden, req.body && req.body.serial, lista);
+    await p.request()
+      .input('idEjecucion', lista.idEjecucion).input('idOrden', idOrden)
+      .input('operario', req.session.usuario.codigoOperarioPRD || null)
+      .input('serial', String(consulta.serial).slice(0, 30))
+      .query(`
+        INSERT INTO SEL_ProtocoloArranque (id_ejecucion, IdOrden, Operario, Paso, Respuesta, Serial)
+        VALUES (@idEjecucion, @idOrden, @operario, 'rollo_adicional', 'Pendiente', @serial)
+      `);
+    res.json({ ok: true });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
   }
 });
 

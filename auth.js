@@ -91,13 +91,27 @@ const CARGOS_AUTORIZAN_PEDIDO = [
   { idCargo: 6,  nombre: 'Líder de Sellado' }   // carlixplastPrueba (a pedido del usuario, 24/09/2026)
 ];
 
-// Valida usuario+clave y ADEMAS que tenga uno de los cargos de arriba.
+// Firmas especiales de un pedido (14/10/2026, a pedido del usuario): finalizar con menos del 95% de
+// avance (firma el Lider de Sellado O el Jefe de Planta) y reanudar desde la tableta un pedido
+// suspendido o finalizado por accidente (firman los DOS: primero el Lider, luego el Jefe). Solo
+// esos dos cargos -- el Director de Calidad sigue firmando el turno, pero no esto. Mismos ids que
+// arriba (comprobados en SISCargos de produccion el 14/10/2026: 27 Jefe de Planta, 31 Lider de
+// Sellado). En carlixplastPrueba no existe el cargo Jefe de Planta.
+const CARGOS_LIDER_SELLADO = [
+  { idCargo: 31, nombre: 'Líder de Sellado' },
+  { idCargo: 6,  nombre: 'Líder de Sellado' }   // carlixplastPrueba
+];
+const CARGOS_JEFE_PLANTA = [
+  { idCargo: 27, nombre: 'Jefe de Planta' }
+];
+
+// Valida usuario+clave y ADEMAS que tenga uno de los cargos de la lista.
 //
 // Devuelve { ok: true, usuario } o { ok: false, error }. A diferencia de validarLogin (que
 // devuelve null para todo fallo), aca se distingue la causa: "esa clave no es" y "usted no tiene
 // el cargo" son dos problemas distintos para quien esta parado frente a la tableta, y mezclarlos
 // hace que un lider con el cargo mal puesto se quede intentando su contrasena una y otra vez.
-async function validarAutorizadorPedido(pool, codigo, passwordEscrito) {
+async function validarFirmaCargo(pool, codigo, passwordEscrito, cargos) {
   const tCodigo = (codigo || '').trim();
   if (!tCodigo || !passwordEscrito) {
     return { ok: false, error: 'Escriba usuario y contraseña.' };
@@ -109,18 +123,23 @@ async function validarAutorizadorPedido(pool, codigo, passwordEscrito) {
     return { ok: false, error: 'Usuario o contraseña incorrectos.' };
   }
 
-  const permitido = CARGOS_AUTORIZAN_PEDIDO.find(c => c.idCargo === usuario.idCargo);
+  const permitido = cargos.find(c => c.idCargo === usuario.idCargo);
   if (!permitido) {
     return {
       ok: false,
       error: `${usuario.nombre} no puede autorizar: su cargo es "${usuario.cargo || 'sin cargo asignado'}". ` +
-             `Solo pueden ${CARGOS_AUTORIZAN_PEDIDO.map(c => c.nombre).join(', ')}.`
+             `Solo pueden ${[...new Set(cargos.map(c => c.nombre))].join(', ')}.`
     };
   }
 
   return { ok: true, usuario: { ...usuario, cargoAutorizado: permitido.nombre } };
 }
 
+// La firma del turno (cargos de CARGOS_AUTORIZAN_PEDIDO).
+function validarAutorizadorPedido(pool, codigo, passwordEscrito) {
+  return validarFirmaCargo(pool, codigo, passwordEscrito, CARGOS_AUTORIZAN_PEDIDO);
+}
+
 module.exports = { validarLogin, requireLogin, requireAdmin, ADMIN_CODIGO,
                    validarAutorizadorPedido, CARGOS_AUTORIZAN_PEDIDO, AUTORIZACION_LIDER_ACTIVA,
-                   AUTORIZACION_LIDER_OBLIGATORIA };
+                   AUTORIZACION_LIDER_OBLIGATORIA, validarFirmaCargo, CARGOS_LIDER_SELLADO, CARGOS_JEFE_PLANTA };

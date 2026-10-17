@@ -2031,6 +2031,37 @@ async function reanudarOTDeOrden(db, { idOrden, usuario, origen }) {
   }
 }
 
+// 14/10/2026 (a pedido del usuario): reanudar desde la tableta un pedido finalizado por accidente.
+// Deshace lo que finalizarControlParcialSellado le hizo a la OT: PRDOrdenesProduccion vuelve de
+// 'PendienteValidacion' a 'Activa' (sin HoraFinReal) y sus controles de 'PendienteValidacion' a
+// 'EnProceso'. A diferencia de suspenderOTDeOrden/reanudarOTDeOrden, SI revienta hacia afuera: corre
+// dentro de la transaccion de la reanudacion, y si el digitador ya cerro la OT o alguno de sus
+// controles ("Cerrar Definitivo", Merma ya calculada) no se puede reabrir desde la tableta.
+// Sin OT (orden sin bultos cerrados) no hay nada que reabrir. Devuelve la OT o null.
+async function reabrirOTDeOrden(db, { idOrden }) {
+  const r = await db.request().input('idOrden', idOrden).query(`
+    ${SQL_OT_DE_ORDEN}
+    SELECT @OT AS OT,
+           (SELECT Estado FROM PRDOrdenesProduccion WHERE OrdenProduccion = @OT) AS Estado,
+           (SELECT COUNT(*) FROM PRDExtrusionControl
+            WHERE Estado = 'Cerrado' AND IdExtrusionControl IN (${SQL_CONTROLES_DE_OT})) AS ControlesCerrados;
+  `);
+  const fila = r.recordset[0] || {};
+  if (!fila.OT) return null;
+  if (fila.ControlesCerrados > 0 || !['PendienteValidacion', 'Activa'].includes(fila.Estado)) {
+    throw new Error(`La orden de trabajo ${fila.OT} ya fue cerrada por el digitador (estado ${fila.Estado || 'desconocido'}): ` +
+                    'no se puede reanudar desde la tableta.');
+  }
+  await db.request().input('idOrden', idOrden).query(`
+    ${SQL_OT_DE_ORDEN}
+    UPDATE PRDOrdenesProduccion SET Estado = 'Activa', HoraFinReal = NULL
+    WHERE OrdenProduccion = @OT AND Estado = 'PendienteValidacion';
+    UPDATE PRDExtrusionControl SET Estado = 'EnProceso', FechaUltimaModificacion = GETDATE()
+    WHERE Estado = 'PendienteValidacion' AND IdExtrusionControl IN (${SQL_CONTROLES_DE_OT});
+  `);
+  return fila.OT;
+}
+
 // FIX 24/09/2026 (a pedido del usuario): la bitacora se cierra cuando TERMINA SU TURNO, no cuando
 // alguien abre la siguiente (antes una bitacora podia quedar abierta dias si nadie tomaba control).
 // El fin del turno sale del turno guardado en la bitacora (el que tiene asignado la maquina en
@@ -2247,20 +2278,44 @@ async function abrirOReanudarBitacora(p, maquinaCodigo, operarioCodigo) {
 // de las tres juntas. Comparar C contra la salida de una sola referencia dejaria pasar ajustes
 // imposibles (devolver kilos que en realidad ya se convirtieron en bultos de una hermana).
 async function obtenerSalidaRealSellado(db, idsOrdenes) {
-  if (!idsOrdenes || idsOrdenes.length === 0) return 0;
+  const s = await obtenerSalidaDetalladaSellado(db, idsOrdenes);
+  return s.bultos + s.residuos;
+}
+
+// La misma salida, partida en bultos y residuos (16/10/2026, aviso de "salida supera la materia
+// prima" al Finalizar). Los residuos son las columnas espejo del bulto padre que escribe
+// 03_residuo_insertar.sql cuando el operario los registra en la tableta (las filas hijo no se
+// suman: no tienen bulto, asi que no entran por el JOIN y no se cuentan dos veces).
+// Un bulto que todavia no esta Cerrado tiene su PRDProduccion reservada en Cantidad = 0 hasta que
+// trg_SEL_Bultos_CierreBulto le escribe SUM(PesoPaqueGr); para el es esa misma suma desde ya. Asi el
+// Finalizar ve los 'EnEspera' de un grupo (que finalizarOrden cierra recien dentro de su
+// transaccion) y el bulto en curso. Con todo cerrado (ajuste de consumo) el resultado no cambia.
+async function obtenerSalidaDetalladaSellado(db, idsOrdenes) {
+  if (!idsOrdenes || idsOrdenes.length === 0) return { bultos: 0, residuos: 0 };
   const dt = await db.request().query(`
-    SELECT ISNULL(SUM(
-      (ISNULL(p.Cantidad, 0) - ISNULL(p.PesoCono, 0))
-      + ISNULL(p.Torta, 0) + ISNULL(p.NuevoRetal, 0)
-      + ISNULL(p.ResiduoTroquelado, 0) + ISNULL(p.ResiduoRefilado, 0)
-      + ISNULL(p.ResiduoNoConforme, 0)
-    ), 0) AS Salida
+    SELECT
+      ISNULL(SUM(
+        CASE WHEN b.estado = 'Cerrado' THEN ISNULL(p.Cantidad, 0) ELSE ISNULL(pe.Peso, 0) END
+        - ISNULL(p.PesoCono, 0)
+      ), 0) AS Bultos,
+      ISNULL(SUM(
+        ISNULL(p.Torta, 0) + ISNULL(p.NuevoRetal, 0)
+        + ISNULL(p.ResiduoTroquelado, 0) + ISNULL(p.ResiduoRefilado, 0)
+        + ISNULL(p.ResiduoNoConforme, 0)
+      ), 0) AS Residuos
     FROM PRDProduccion p
     INNER JOIN SEL_Bultos b ON b.serialPadre = p.Detalle
     INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+    OUTER APPLY (
+      SELECT SUM(x.PesoPaqueGr) AS Peso FROM SEL_PesajeElemento x
+      WHERE x.id_bulto = b.id AND b.estado <> 'Cerrado'
+    ) pe
     WHERE ej.IdOrden IN (${idsOrdenes.join(',')})
   `);
-  return Number(dt.recordset[0].Salida) || 0;
+  return {
+    bultos: Number(dt.recordset[0].Bultos) || 0,
+    residuos: Number(dt.recordset[0].Residuos) || 0
+  };
 }
 
 // Todos los miembros del grupo de sellado (incluida la orden pedida), de este y de otros
@@ -2583,6 +2638,26 @@ async function obtenerEstadoAjusteConsumo(pool, idOrden) {
   };
 }
 
+// Balance materia prima vs salida de una orden (o de su grupo de sellado), para el aviso al Finalizar
+// de la tableta (16/10/2026). Mismo calculo que el tope de Produccion.vb al guardar parciales:
+// (Cantidad - cono) + residuos contra la MP del historial. Entrada: la MP escaneada en el ancla,
+// leida en el momento (PRDExtrusionControl.MaterialTotalKg se calcula una sola vez al crear el
+// control y no ve los rollos de +Rollo). Devuelve null si no hay como calcularla (orden sin bultos
+// todavia): el que llama no avisa nada.
+async function obtenerBalanceMPSellado(db, idOrden) {
+  let listado;
+  try {
+    listado = await listarRollosOrden(db, idOrden);
+  } catch (err) {
+    return null;
+  }
+  const entrada = listado.rollos.reduce((acc, r) => acc + (Number(r.CantidadActual) || 0), 0);
+  const idsGrupo = await obtenerMiembrosGrupoSellado(db, listado.ancla.idOrdenAncla);
+  const { bultos, residuos } = await obtenerSalidaDetalladaSellado(db, idsGrupo);
+  const salida = bultos + residuos;
+  return { entrada, bultos, residuos, salida, diferencia: salida - entrada };
+}
+
 // El ajuste completo, en UNA sola transaccion (seccion 5 del documento).
 //
 // Que se toca y en que orden:
@@ -2846,6 +2921,7 @@ module.exports = {
   cerrarBitacorasPorFinTurno,
   suspenderOTDeOrden,
   reanudarOTDeOrden,
+  reabrirOTDeOrden,
   abrirOReanudarBitacora,
   obtenerSalidaRealSellado,
   obtenerMiembrosGrupoSellado,
@@ -2853,5 +2929,6 @@ module.exports = {
   listarRollosOrden,
   recalcularControlSellado,
   obtenerEstadoAjusteConsumo,
+  obtenerBalanceMPSellado,
   ajustarConsumoRollo
 };
