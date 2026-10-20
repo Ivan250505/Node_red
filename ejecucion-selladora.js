@@ -239,7 +239,6 @@ async function finalizarOrden(pool, idOrden, generadoPor, operarioFinal) {
     }
 
     await tx.commit();
-    return { ok: true };
   } catch (err) {
     // FIX 16/09/2026 (ver DIAGNOSTICO_FINALIZAR_ORDEN.md -- bug real "Transaction has been
     // aborted" al dar Finalizar): si la transaccion ya quedo abortada por un error anterior
@@ -251,6 +250,27 @@ async function finalizarOrden(pool, idOrden, generadoPor, operarioFinal) {
       console.error('Rollback fallido tras el error real:', errRollback.message);
     }
     throw err;
+  }
+
+  // 20/10/2026 (a pedido del usuario): si el digitador ya validó e imprimió TODOS los bultos antes de
+  // este Finalizar, la orden (o el grupo) se cierra de una vez -- merma, control, OT y orden de la
+  // tableta -- con sp_SEL_CerrarOrdenSiCompleta (la misma regla que Validación Selladora en Mirane).
+  // Va DESPUÉS del commit: el Finalizar ya quedó guardado y un fallo aquí no lo revierte; la orden
+  // queda en 'PendienteValidacion' y el digitador la cierra desde "Órdenes listas para cerrar".
+  const cierre = await cerrarOrdenSiCompleta(pool, idsActivos[0]);
+  return { ok: true, cierre };
+}
+
+async function cerrarOrdenSiCompleta(pool, idOrden) {
+  try {
+    const existe = await pool.request().query(`SELECT OBJECT_ID('dbo.sp_SEL_CerrarOrdenSiCompleta', 'P') AS Id`);
+    if (existe.recordset[0].Id == null) return null;
+    const r = await pool.request().input('idOrden', sql.Int, idOrden).input('origen', sql.VarChar(30), 'Tableta')
+      .execute('sp_SEL_CerrarOrdenSiCompleta');
+    return r.recordset && r.recordset[0] ? r.recordset[0] : null;
+  } catch (err) {
+    console.error('Cierre automático tras Finalizar (orden ' + idOrden + '):', err.message);
+    return null;
   }
 }
 
