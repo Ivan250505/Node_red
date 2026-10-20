@@ -8809,20 +8809,24 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
         </div>
         <a class="btn-accion btn-isla btn-info" href="/selladora/${maquinaCodigo}/grupo/${idGrupo}/bultos">📦 Ver bultos</a>
       </div>
-      ${botonObservacion ? `<div class="isla isla-con-boton">
+    </div>
+    <!-- 20/10/2026: Autorizacion y Observaciones en su propia fila, debajo de Produccion y Ver
+         bultos (a pedido del usuario). -->
+    ${botonObservacion ? `<div class="islas-fila">
+      ${AUTORIZACION_LIDER_ACTIVA ? `<div class="isla isla-con-boton">
+        <div class="isla-texto">
+          <div class="label">Autorización del turno</div>
+        </div>
+        ${botonAutorizacion}
+      </div>` : ''}
+      <div class="isla isla-con-boton">
         <div class="isla-texto">
           <div class="label">Observaciones</div>
           <div class="isla-detalle">Deje por escrito lo que vio en el turno</div>
         </div>
         ${botonObservacion}
       </div>
-      ${AUTORIZACION_LIDER_ACTIVA ? `<div class="isla isla-con-boton">
-        <div class="isla-texto">
-          <div class="label">Autorización del turno</div>
-        </div>
-        ${botonAutorizacion}
-      </div>` : ''}` : ''}
-    </div>
+    </div>` : ''}
     <h2 style="font-size:15px;margin:0 0 10px;">Referencias de salida</h2>
     ${tarjetasReferencia}
     <h2 style="font-size:15px;margin:22px 0 10px;">Historial de consumo de rollos (todo el grupo)</h2>
