@@ -743,6 +743,14 @@ function estilosBase() {
     .btn-anadir { background: #0078d7; }
     .btn-traslado { background: #8e44ad; }
     .seccion-traslado { margin-top: 16px; }
+    /* Desplegable (20/10/2026): el encabezado entero abre/cierra, con la misma flecha que
+       "Paquetes pesados" de las tarjetas de bulto. */
+    .seccion-traslado .traslado-summary { cursor: pointer; list-style: none; }
+    .seccion-traslado .traslado-summary::-webkit-details-marker { display: none; }
+    .seccion-traslado .traslado-summary .bulto-num::before { content: '▸ '; }
+    .seccion-traslado[open] .traslado-summary .bulto-num::before { content: '▾ '; }
+    .seccion-traslado[open] .traslado-summary { margin-bottom: 12px; }
+    .seccion-traslado:not([open]) .traslado-summary > :last-child { margin-bottom: 0; }
     .seccion-traslado .traslado-campo { margin-bottom: 12px; }
     .seccion-traslado .traslado-campo:last-of-type { margin-bottom: 16px; }
     .grupo-sellado-box { margin-bottom: 16px; background: #f3e9f9; border: 1px solid #d9bfe8; }
@@ -6522,10 +6530,14 @@ function renderSeccionTraslado(bultos, pesajesPorBulto, opciones, destinoExtra =
     </div>`;
   }
 
+  // 20/10/2026 (a pedido del usuario): la tarjeta es desplegable, igual que las de los bultos --
+  // sale cerrada y el encabezado (titulo + referencia) la abre y la cierra.
   const encabezado = `
-  <div class="card seccion-traslado"${modoGrupo ? ` data-ref="${opciones.referencia}" data-orden="${opciones.idOrden}" style="--color-ref:${opciones.color};"` : ''}>
-    <div class="card-top"><span class="bulto-num">🔀 Trasladar paquete entre bultos${modoGrupo ? ` — ${opciones.referencia}` : ''}</span></div>
-    ${modoGrupo ? `<div class="bulto-ref"><div class="bulto-ref-subrayado"></div><div class="bulto-ref-nombre">${opciones.nombreReferencia || ''}</div></div>` : ''}`;
+  <details class="card seccion-traslado"${modoGrupo ? ` data-ref="${opciones.referencia}" data-orden="${opciones.idOrden}" style="--color-ref:${opciones.color};"` : ''}>
+    <summary class="traslado-summary">
+      <div class="card-top"><span class="bulto-num">🔀 Trasladar paquete entre bultos${modoGrupo ? ` — ${opciones.referencia}` : ''}</span></div>
+      ${modoGrupo ? `<div class="bulto-ref"><div class="bulto-ref-subrayado"></div><div class="bulto-ref-nombre">${opciones.nombreReferencia || ''}</div></div>` : ''}
+    </summary>`;
 
   if (motivoSinOpciones) {
     return `${encabezado}
@@ -6533,7 +6545,7 @@ function renderSeccionTraslado(bultos, pesajesPorBulto, opciones, destinoExtra =
       Ahora no hay paquetes que se puedan trasladar. ${motivoSinOpciones}<br>
       <span style="font-size:12px;">Solo se traslada entre bultos vecinos sin validar: el primer paquete al bulto anterior, o el último al siguiente.</span>
     </div>
-  </div>`;
+  </details>`;
   }
 
   return `${encabezado}
@@ -6553,7 +6565,7 @@ function renderSeccionTraslado(bultos, pesajesPorBulto, opciones, destinoExtra =
     </div>
     <button type="button" class="btn-accion btn-traslado" onclick="confirmarTraslado(this)">🔀 Trasladar</button>
     <button type="button" class="btn-accion btn-traslado" style="margin-top:8px;background:#8e44ad;" onclick="confirmarTrasladoBulto(this)">📦 Trasladar bulto completo</button>
-  </div>`;
+  </details>`;
 }
 
 // Boton "🖨️" de cada paquete ya pesado (dentro del desplegable "Paquetes pesados" de cada bulto,
@@ -8810,8 +8822,10 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
         <a class="btn-accion btn-isla btn-info" href="/selladora/${maquinaCodigo}/grupo/${idGrupo}/bultos">📦 Ver bultos</a>
       </div>
     </div>
-    <!-- 20/10/2026: Autorizacion y Observaciones en su propia fila, debajo de Produccion y Ver
-         bultos (a pedido del usuario). -->
+    <h2 style="font-size:15px;margin:0 0 10px;">Referencias de salida</h2>
+    ${tarjetasReferencia}
+    <!-- 20/10/2026: Autorizacion y Observaciones en su propia fila, debajo de las tarjetas de las
+         referencias (a pedido del usuario). -->
     ${botonObservacion ? `<div class="islas-fila">
       ${AUTORIZACION_LIDER_ACTIVA ? `<div class="isla isla-con-boton">
         <div class="isla-texto">
@@ -8827,8 +8841,6 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
         ${botonObservacion}
       </div>
     </div>` : ''}
-    <h2 style="font-size:15px;margin:0 0 10px;">Referencias de salida</h2>
-    ${tarjetasReferencia}
     <h2 style="font-size:15px;margin:22px 0 10px;">Historial de consumo de rollos (todo el grupo)</h2>
     <div class="ejecucion-box">${filasHistorial}</div>
     ${seccionOrdenTrabajo(otInfo, esSup)}
