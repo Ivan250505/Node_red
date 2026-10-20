@@ -6365,42 +6365,89 @@ function renderSeccionTraslado(bultos, pesajesPorBulto, opciones, destinoExtra =
   // acepta el PRIMER paquete del origen hacia otra referencia (regla 51011), asi que solo se
   // ofrecen al primero.
   const extraValido = eb => eb && !Number(eb.Validado) && (Number(eb.maxPaquete) || 0) < 99;
+  // 19/10/2026 (a pedido del usuario): en grupo multi-referencia el operario no distinguía en el
+  // desplegable si el destino era de su misma referencia o de otra ("Bulto 1", "Bulto 1",
+  // "Bulto 2"). Ahora escoge primero "Misma referencia" (igual que en main, solo vecinos) u "Otra
+  // referencia" (escoge cuál -- puede haber 3 o más -- y luego paquete y bulto de esa referencia).
+  // Cada <option> lleva data-modo; los de "otra" llevan en data-destinos "id:num:idxRef" (idxRef =
+  // posición en refsOtras, no el código, que puede traer espacios o signos) y el script filtra por
+  // la referencia escogida (ver filtrarPaquetesTraslado).
   const opcionesPaquete = [];
+  const refsOtras = new Map(); // referencia -> { idx, nombre }, solo las que tienen algún destino válido
+  const idxRef = eb => {
+    if (!refsOtras.has(eb.etiquetaRef)) refsOtras.set(eb.etiquetaRef, { idx: refsOtras.size, nombre: eb.nombreRef || '' });
+    return refsOtras.get(eb.etiquetaRef).idx;
+  };
   bultos.forEach((b, i) => {
     if (esValidado(b)) return;
     const anterior = bultos[i - 1], siguiente = bultos[i + 1];
     const pesajes = pesajesPorBulto.get(b.id) || [];
     pesajes.forEach(pe => {
+      const textoPaquete = `Bulto ${b.numRelativo} — Paquete ${pe.ConsecutivoPaquete} (${Number(pe.PesoPaqueGr)} kg)`;
       // Al anterior solo el primer paquete; al siguiente solo el último.
       const destinos = [];
       if (Number(pe.EsPrimero) === 1 && destinoValido(anterior)) destinos.push(anterior);
       if (Number(pe.EsUltimo) === 1 && destinoValido(siguiente)) destinos.push(siguiente);
+      if (destinos.length > 0) {
+        const dataDestinos = destinos.map(d => `${d.id}:${d.numRelativo}`).join(',');
+        const textoDestinos = destinos.map(d => `Bulto ${d.numRelativo}`).join(' o ');
+        opcionesPaquete.push(
+          `<option value="${pe.id_paquete}" data-modo="misma" data-bulto="${b.id}" data-destinos="${dataDestinos}">${textoPaquete} → ${textoDestinos}</option>`
+        );
+      }
+      // A otra referencia solo el primer paquete del bulto (regla 51011 del SP).
       if (Number(pe.EsPrimero) === 1) {
-        for (const eb of extras) {
-          if (extraValido(eb) && !destinos.some(d => d.id === eb.id)) destinos.push(eb);
+        const destinosOtra = extras.filter(extraValido);
+        if (destinosOtra.length > 0) {
+          const dataDestinos = destinosOtra.map(d => `${d.id}:${d.numRelativo}:${idxRef(d)}`).join(',');
+          opcionesPaquete.push(
+            `<option value="${pe.id_paquete}" data-modo="otra" data-bulto="${b.id}" data-destinos="${dataDestinos}">${textoPaquete}</option>`
+          );
         }
       }
-      if (destinos.length === 0) return;
-      const dataDestinos = destinos.map(d => `${d.id}:${d.numRelativo}`).join(',');
-      const textoDestinos = destinos.map(d => `Bulto ${d.numRelativo}${d.etiquetaRef ? ` (${d.etiquetaRef})` : ''}`).join(' o ');
-      opcionesPaquete.push(
-        `<option value="${pe.id_paquete}" data-bulto="${b.id}" data-destinos="${dataDestinos}">Bulto ${b.numRelativo} — Paquete ${pe.ConsecutivoPaquete} (${Number(pe.PesoPaqueGr)} kg) → ${textoDestinos}</option>`
-      );
     });
   });
+  const hayMisma = opcionesPaquete.some(o => o.includes('data-modo="misma"'));
+  const hayOtra = refsOtras.size > 0;
   // Sin paquetes pesados todavía no hay nada que mostrar. Con paquetes pero sin ningún traslado
   // válido (06/10/2026, a pedido del usuario) la tarjeta sigue saliendo con el motivo -- si
   // desaparecía, el operario no sabía por qué.
   const hayPaquetes = bultos.some(b => (pesajesPorBulto.get(b.id) || []).length > 0);
   if (!hayPaquetes) return '';
-  let motivoSinOpciones = '';
-  if (opcionesPaquete.length === 0) {
-    motivoSinOpciones = bultos.every(esValidado)
-      ? 'Todos los bultos ya fueron validados por el digitador.'
-      : bultos.some((b, i) => !esValidado(b) && (pesajesPorBulto.get(b.id) || []).length > 0
-                              && (bultos[i - 1] || bultos[i + 1]) && ![bultos[i - 1], bultos[i + 1]].some(destinoValido))
-        ? 'Los bultos vecinos ya fueron validados por el digitador (o llegaron al paquete #99).'
-        : 'Ningún paquete cumple las reglas de traslado.';
+  const motivoMisma = bultos.every(esValidado)
+    ? 'Todos los bultos ya fueron validados por el digitador.'
+    : bultos.some((b, i) => !esValidado(b) && (pesajesPorBulto.get(b.id) || []).length > 0
+                            && (bultos[i - 1] || bultos[i + 1]) && ![bultos[i - 1], bultos[i + 1]].some(destinoValido))
+      ? 'Los bultos vecinos ya fueron validados por el digitador (o llegaron al paquete #99).'
+      : 'Ningún paquete cumple las reglas de traslado.';
+  const motivoSinOpciones = opcionesPaquete.length === 0 ? motivoMisma : '';
+
+  // Selector Misma/Otra referencia: solo cuando el grupo tiene otras referencias. Sin ellas la
+  // sección queda igual que en main.
+  let selectorModo = '';
+  if (extras.length > 0 && !motivoSinOpciones) {
+    const nombreRadio = `modo-traslado-${opciones && opciones.idOrden ? opciones.idOrden : 'x'}`;
+    const modoInicial = hayMisma ? 'misma' : 'otra';
+    const opcionesRef = [...refsOtras.entries()].map(([ref, r]) =>
+      `<option value="${r.idx}"${refsOtras.size === 1 ? ' selected' : ''}>${escapeHtmlTurno(ref)}${r.nombre ? ' · ' + escapeHtmlTurno(r.nombre) : ''}</option>`
+    ).join('');
+    selectorModo = `
+    <div class="traslado-campo">
+      <label>¿A dónde va el paquete?</label>
+      <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:15px;">
+        <label style="font-weight:normal;"><input type="radio" name="${nombreRadio}" class="rad-modo-traslado" value="misma" onchange="cambioModoTraslado(this)"${modoInicial === 'misma' ? ' checked' : ''}${hayMisma ? '' : ' disabled'}> Misma referencia</label>
+        <label style="font-weight:normal;"><input type="radio" name="${nombreRadio}" class="rad-modo-traslado" value="otra" onchange="cambioModoTraslado(this)"${modoInicial === 'otra' ? ' checked' : ''}${hayOtra ? '' : ' disabled'}> Otra referencia</label>
+      </div>
+      ${hayMisma ? '' : `<div style="font-size:12px;color:#64748b;margin-top:4px;">Misma referencia: ${motivoMisma}</div>`}
+      ${hayOtra ? '' : `<div style="font-size:12px;color:#64748b;margin-top:4px;">Otra referencia: solo el primer paquete de un bulto puede pasar, y los bultos de las otras referencias deben estar sin validar y por debajo del paquete #99.</div>`}
+    </div>
+    <div class="traslado-campo campo-ref-destino"${modoInicial === 'otra' ? '' : ' style="display:none;"'}>
+      <label>Referencia destino</label>
+      <select class="sel-ref-destino" onchange="filtrarPaquetesTraslado(this.closest('.seccion-traslado'))">
+        ${refsOtras.size === 1 ? '' : '<option value="">Seleccione…</option>'}
+        ${opcionesRef}
+      </select>
+    </div>`;
   }
 
   const encabezado = `
@@ -6418,6 +6465,7 @@ function renderSeccionTraslado(bultos, pesajesPorBulto, opciones, destinoExtra =
   }
 
   return `${encabezado}
+    ${selectorModo}
     <div class="traslado-campo">
       <label>Paquete a mover</label>
       <select class="sel-paquete-origen" onchange="cambioPaqueteTraslado(this)">
@@ -6690,11 +6738,54 @@ function scriptTraslado(idOrden, maquinaCodigo) {
     // desplegables se buscan dentro de la seccion del boton que se toco, no por id global.
     // Rearma "Bulto destino" con los destinos válidos del paquete escogido (data-destinos =
     // "idBulto:numRelativo,..." -- ver renderSeccionTraslado). Si solo hay uno, queda escogido.
+    // 19/10/2026: en grupo multi-referencia la sección trae "Misma referencia" / "Otra referencia"
+    // (ver renderSeccionTraslado). Sin el selector todo es "misma", igual que en main.
+    function modoTraslado(seccion) {
+      var rad = seccion.querySelector('.rad-modo-traslado:checked');
+      return rad ? rad.value : 'misma';
+    }
+    function refTraslado(seccion) {
+      var sel = seccion.querySelector('.sel-ref-destino');
+      return sel ? sel.value : '';
+    }
+    // Destinos de la opción escogida que aplican al modo/referencia actual: [[idBulto, num], ...]
+    function destinosTraslado(seccion, opcion) {
+      if (!opcion || !opcion.dataset.destinos) return [];
+      var otra = modoTraslado(seccion) === 'otra', ref = refTraslado(seccion);
+      return opcion.dataset.destinos.split(',').map(function(d) { return d.split(':'); })
+        .filter(function(p) { return !otra || (ref !== '' && p[2] === ref); });
+    }
+    function cambioModoTraslado(rad) {
+      var seccion = rad.closest('.seccion-traslado');
+      var campoRef = seccion.querySelector('.campo-ref-destino');
+      if (campoRef) campoRef.style.display = modoTraslado(seccion) === 'otra' ? '' : 'none';
+      filtrarPaquetesTraslado(seccion);
+    }
+    // Deja visibles en "Paquete a mover" solo los paquetes del modo actual (y, en "otra", con algún
+    // bulto destino en la referencia escogida), y limpia la selección.
+    function filtrarPaquetesTraslado(seccion) {
+      var selOrigen = seccion.querySelector('.sel-paquete-origen');
+      if (!selOrigen) return;
+      var modo = modoTraslado(seccion);
+      Array.prototype.forEach.call(selOrigen.options, function(opt) {
+        if (!opt.value) return;
+        var visible = (opt.dataset.modo || 'misma') === modo && destinosTraslado(seccion, opt).length > 0;
+        opt.hidden = !visible;
+        opt.disabled = !visible;
+      });
+      selOrigen.value = '';
+      selOrigen.options[0].text = (modo === 'otra' && !refTraslado(seccion)) ? 'Primero escoja la referencia…' : 'Seleccione…';
+      cambioPaqueteTraslado(selOrigen);
+    }
+    document.addEventListener('DOMContentLoaded', function() {
+      document.querySelectorAll('.seccion-traslado').forEach(filtrarPaquetesTraslado);
+    });
+
     function cambioPaqueteTraslado(selOrigen) {
       var seccion = selOrigen.closest('.seccion-traslado');
       var selDestino = seccion.querySelector('.sel-bulto-destino');
       var opcion = selOrigen.options[selOrigen.selectedIndex];
-      var destinos = (opcion && opcion.dataset.destinos) ? opcion.dataset.destinos.split(',') : [];
+      var destinos = destinosTraslado(seccion, opcion);
       selDestino.innerHTML = '';
       if (destinos.length === 0) {
         selDestino.add(new Option('Primero escoja el paquete…', ''));
@@ -6702,11 +6793,17 @@ function scriptTraslado(idOrden, maquinaCodigo) {
         return;
       }
       if (destinos.length > 1) selDestino.add(new Option('Seleccione…', ''));
-      destinos.forEach(function(d) {
-        var partes = d.split(':');
-        selDestino.add(new Option('Bulto ' + partes[1], partes[0]));
+      destinos.forEach(function(p) {
+        selDestino.add(new Option('Bulto ' + p[1], p[0]));
       });
       selDestino.disabled = false;
+    }
+    // Texto para la confirmación cuando el paquete cambia de referencia ('' si es la misma).
+    function avisoCambioRef(seccion) {
+      if (modoTraslado(seccion) !== 'otra') return '';
+      var selRef = seccion.querySelector('.sel-ref-destino');
+      var refDestino = selRef && selRef.selectedIndex >= 0 ? selRef.options[selRef.selectedIndex].text.split(' · ')[0] : '';
+      return 'El paquete pasa de ' + (seccion.dataset.ref || 'esta referencia') + ' a ' + refDestino + ' (cambia el producto). ';
     }
 
     function confirmarTraslado(boton) {
@@ -6724,8 +6821,8 @@ function scriptTraslado(idOrden, maquinaCodigo) {
       var textoBulto = selDestino.options[selDestino.selectedIndex].text;
       Swal.fire({
         icon: 'warning',
-        title: '¿Trasladar ' + textoPaquete + ' a ' + textoBulto + '?',
-        text: 'El paquete queda reetiquetado con el serial del bulto destino.',
+        title: '¿Trasladar ' + textoPaquete.split(' → ')[0] + ' a ' + textoBulto + '?',
+        text: avisoCambioRef(seccion) + 'El paquete queda reetiquetado con el serial del bulto destino.',
         showCancelButton: true,
         confirmButtonText: 'Sí, trasladar',
         cancelButtonText: 'Cancelar',
@@ -6792,7 +6889,7 @@ function scriptTraslado(idOrden, maquinaCodigo) {
       Swal.fire({
         icon: 'warning',
         title: '¿Trasladar TODO el bulto a ' + textoBulto + '?',
-        text: 'Se mueven todos sus paquetes en orden. El origen queda eliminado (si estaba cerrado) o Temporal en 0.',
+        text: (selDestino.value ? avisoCambioRef(seccion) : '') + 'Se mueven todos sus paquetes en orden. El origen queda eliminado (si estaba cerrado) o Temporal en 0.',
         showCancelButton: true,
         confirmButtonText: 'Sí, trasladar todo',
         cancelButtonText: 'Cancelar',
@@ -8759,7 +8856,7 @@ function renderBultosGrupo(idGrupo, numeroPedido, maquinaCodigo, datosPorReferen
       for (const b of o.bultos) {
         extras.push({
           id: b.id, numRelativo: b.numRelativo, Validado: b.Validado,
-          maxPaquete: maxDe(o.pesajesPorBulto, b.id), etiquetaRef: o.referencia
+          maxPaquete: maxDe(o.pesajesPorBulto, b.id), etiquetaRef: o.referencia, nombreRef: o.nombre
         });
       }
     });
