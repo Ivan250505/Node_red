@@ -20,7 +20,7 @@ const {
   infoOTParaCorreccion, turnosParaCorregirOT, corregirTurnoOT,
   abrirOReanudarBitacora, suspenderOTDeOrden, reanudarOTDeOrden, reabrirOTDeOrden, horaServidorBD,
   candidatosTurnoMaquina, activarTurnoMaquina, turnosParaCorregir, corregirTurnoMaquina,
-  obtenerAnclaGrupoSellado, obtenerMiembrosGrupoSellado: miembrosGrupoPorOrden, obtenerEstadoAjusteConsumo, ajustarConsumoRollo,
+  obtenerAnclaGrupoSellado, obtenerMiembrosGrupoSellado: miembrosGrupoPorOrden, obtenerEstadoAjusteConsumo, ajustarConsumoRollo, MENSAJE_AJUSTE_SOLO_AL_FINALIZAR,
   obtenerLoteRollo, obtenerBalanceMPSellado
 } = require('./sel-inventario-mp');
 
@@ -3566,37 +3566,77 @@ function scriptObservaciones() {
   `;
 }
 
+// Ajuste del consumo real del rollo DENTRO del Finalizar (20/10/2026, a pedido de Carlos): el ajuste
+// se hace antes de finalizar el pedido, no despues en "Pend. validacion" (hasta el 19/10 era un
+// boton aparte en esa etapa). confirmarFinalizar llama a preguntarAjusteConsumo, que pregunta si va a
+// ajustar algun rollo y resuelve true para seguir con el Finalizar o false si el operario cancela.
+// Ver AJUSTE_CANTIDAD_CONSUMIDA_ROLLO_18092026.md (seccion 0, cambio del 20/10/2026).
+// Se inyecta dentro de scriptConfirmarFinalizar(): sale en todas las paginas que tienen Finalizar.
 function scriptAjusteConsumo() {
   return `
     function kg(n) { return (Number(n) || 0).toFixed(2); }
 
-    function abrirAjusteConsumo(idOrden) {
-      Swal.fire({ title: 'Cargando rollos...', didOpen: function() { Swal.showLoading(); }, allowOutsideClick: false });
-      fetch('/api/selladora/orden/' + idOrden + '/rollos-consumo')
-        .then(function(r) { return r.json(); })
+    // Estado del ajuste en curso. "vista" sube cada vez que se abre una ventana nueva: si SweetAlert
+    // resuelve tarde la promesa de una ventana que ya se reemplazo, su .then lo ve y no hace nada.
+    window.__ajusteFin = null;
+
+    function consultarRollosConsumo(idOrden) {
+      return fetch('/api/selladora/orden/' + idOrden + '/rollos-consumo').then(function(r) { return r.json(); });
+    }
+
+    // Si la orden no tiene rollos, o ya no hay margen para devolver (la salida alcanzo la MP), no se
+    // pregunta nada. Si la consulta falla, tampoco: el Finalizar sigue como antes.
+    function preguntarAjusteConsumo(idOrden) {
+      return consultarRollosConsumo(idOrden)
         .then(function(datos) {
-          if (!datos.ok) {
-            Swal.fire({ icon: 'error', title: 'No se puede ajustar', text: datos.error, confirmButtonColor: '#71bf44' });
-            return;
-          }
-          if (!datos.rollos.length) {
-            Swal.fire({ icon: 'info', title: 'Sin rollos', text: 'Esta orden no tiene materia prima registrada.', confirmButtonColor: '#71bf44' });
-            return;
-          }
-          listaAjusteConsumo(idOrden, datos);
+          if (!datos.ok || !datos.rollos || !datos.rollos.length || !(datos.margenDevolucion > 0.0001)) return true;
+          return Swal.fire({
+            icon: 'question',
+            title: '¿Va a ajustar algún rollo consumido?',
+            html: '<div style="text-align:left;font-size:15px;line-height:1.5;">' +
+                    'Si algún rollo <b>no se gastó completo</b>, corrija ahora los Kg consumidos. ' +
+                    'Después de finalizar el pedido ya no se puede ajustar desde la tableta.' +
+                  '</div>',
+            width: 520,
+            showDenyButton: true,
+            showCancelButton: true,
+            confirmButtonText: 'Sí, ajustar rollo',
+            confirmButtonColor: '#006984',
+            denyButtonText: 'No, finalizar',
+            denyButtonColor: '#71bf44',
+            cancelButtonText: 'Cancelar',
+            cancelButtonColor: '#6b7280',
+            allowOutsideClick: false
+          }).then(function(r) {
+            if (r.isDenied) return true;
+            if (!r.isConfirmed) return false;
+            return new Promise(function(resolver) {
+              window.__ajusteFin = { idOrden: idOrden, datos: datos, resolver: resolver, vista: 0 };
+              listaAjusteConsumo();
+            });
+          });
         })
-        .catch(function() {
-          Swal.fire({ icon: 'error', title: 'Error de conexión', text: 'No se pudo consultar los rollos de esta orden.', confirmButtonColor: '#71bf44' });
-        });
+        .catch(function() { return true; });
+    }
+
+    function terminarAjusteConsumo(sigue) {
+      var a = window.__ajusteFin;
+      window.__ajusteFin = null;
+      if (a) a.resolver(sigue);
     }
 
     // La lista muestra, por rollo, lo que se escaneo (R) y lo que hay registrado ahora (C). Mientras
     // nadie ajuste nada los dos valores son iguales -- se muestran igual para que se vea de una que
-    // R es el techo y que un rollo ya ajustado no vuelve a partir de cero.
-    function listaAjusteConsumo(idOrden, datos) {
+    // R es el techo y que un rollo ya ajustado no vuelve a partir de cero. Despues de cada ajuste se
+    // vuelve aqui, para corregir otro rollo o seguir con el Finalizar.
+    function listaAjusteConsumo() {
+      var a = window.__ajusteFin;
+      if (!a) return;
+      var datos = a.datos;
+      var miVista = ++a.vista;
       var filas = datos.rollos.map(function(ro, i) {
         var ajustado = ro.ajustes > 0;
-        return '<button type="button" class="swal-rollo-item" onclick="pedirConsumoRollo(' + idOrden + ', ' + i + ')">' +
+        return '<button type="button" class="swal-rollo-item" onclick="pedirConsumoRollo(' + i + ')">' +
                  '<div class="swal-rollo-serial">' + ro.serial + '</div>' +
                  '<div class="swal-rollo-meta">' + ro.referencia + (ro.lote !== '—' ? ' · Lote ' + ro.lote : '') +
                    (ajustado ? ' · <b>ya ajustado</b>' : '') + '</div>' +
@@ -3605,8 +3645,6 @@ function scriptAjusteConsumo() {
                  '</div>' +
                '</button>';
       }).join('');
-
-      window.__ajusteConsumo = datos;
 
       Swal.fire({
         title: 'Ajustar consumo de rollo',
@@ -3621,16 +3659,25 @@ function scriptAjusteConsumo() {
                 filas +
               '</div>',
         width: 520,
-        showConfirmButton: false,
         showCancelButton: true,
-        cancelButtonText: 'Cerrar',
-        cancelButtonColor: '#6b7280'
+        confirmButtonText: 'Seguir con el finalizar',
+        confirmButtonColor: '#71bf44',
+        cancelButtonText: 'Cancelar finalizar',
+        cancelButtonColor: '#6b7280',
+        allowOutsideClick: false
+      }).then(function(r) {
+        var actual = window.__ajusteFin;
+        if (!actual || actual.vista !== miVista) return; // la reemplazo la ventana de un rollo
+        terminarAjusteConsumo(!!r.isConfirmed);
       });
     }
 
-    function pedirConsumoRollo(idOrden, indice) {
-      var datos = window.__ajusteConsumo;
+    function pedirConsumoRollo(indice) {
+      var a = window.__ajusteFin;
+      if (!a) return;
+      var datos = a.datos;
       var ro = datos.rollos[indice];
+      var miVista = ++a.vista;
 
       // Piso de ESTE rollo: lo que la salida real exige menos lo que aportan los demas rollos. Es la
       // misma cuenta que revalida el servidor adentro de la transaccion; aca solo sirve para que el
@@ -3659,8 +3706,9 @@ function scriptAjusteConsumo() {
         showCancelButton: true,
         confirmButtonText: 'Confirmar ajuste',
         confirmButtonColor: '#71bf44',
-        cancelButtonText: 'Cancelar',
+        cancelButtonText: 'Volver',
         cancelButtonColor: '#6b7280',
+        allowOutsideClick: false,
         focusConfirm: false,
         preConfirm: function() {
           var contenedor = Swal.getHtmlContainer();
@@ -3678,12 +3726,19 @@ function scriptAjusteConsumo() {
           return { cantidad: valor, motivo: motivo };
         }
       }).then(function(resultado) {
-        if (!resultado.isConfirmed) return;
-        confirmarAjusteConsumo(idOrden, ro.serial, resultado.value.cantidad, resultado.value.motivo);
+        var actual = window.__ajusteFin;
+        if (!actual || actual.vista !== miVista) return;
+        if (!resultado.isConfirmed) { listaAjusteConsumo(); return; }
+        confirmarAjusteConsumo(ro.serial, resultado.value.cantidad, resultado.value.motivo);
       });
     }
 
-    function confirmarAjusteConsumo(idOrden, serial, cantidad, motivo) {
+    // Aplica el ajuste y vuelve a la lista con los datos releidos (el servidor pudo moverlos).
+    function confirmarAjusteConsumo(serial, cantidad, motivo) {
+      var a = window.__ajusteFin;
+      if (!a) return;
+      var idOrden = a.idOrden;
+      a.vista++;
       Swal.fire({ title: 'Aplicando ajuste...', didOpen: function() { Swal.showLoading(); }, allowOutsideClick: false });
       fetch('/api/selladora/orden/' + idOrden + '/rollo/ajustar-consumo', {
         method: 'POST',
@@ -3693,14 +3748,14 @@ function scriptAjusteConsumo() {
         .then(function(r) { return r.json(); })
         .then(function(datos) {
           if (!datos.ok) {
-            Swal.fire({ icon: 'error', title: 'No se pudo ajustar', text: datos.error, confirmButtonColor: '#71bf44', width: 520 });
-            return;
+            return Swal.fire({ icon: 'error', title: 'No se pudo ajustar', text: datos.error, confirmButtonColor: '#71bf44', width: 520, allowOutsideClick: false })
+              .then(volverALaLista);
           }
           var devuelto = Number(datos.devuelto) || 0;
           var lineaInventario = devuelto > 0
             ? '<div><span>Devuelto al inventario</span><b>' + kg(devuelto) + ' Kg</b></div>'
             : (devuelto < 0 ? '<div><span>Descontado del inventario</span><b>' + kg(-devuelto) + ' Kg</b></div>' : '');
-          Swal.fire({
+          return Swal.fire({
             icon: 'success',
             title: 'Consumo ajustado',
             html: '<div style="text-align:left;"><div class="swal-ajuste-resumen">' +
@@ -3716,12 +3771,30 @@ function scriptAjusteConsumo() {
                   '</div>',
             width: 520,
             confirmButtonText: 'Entendido',
-            confirmButtonColor: '#71bf44'
-          }).then(function() { location.reload(); });
+            confirmButtonColor: '#71bf44',
+            allowOutsideClick: false
+          }).then(volverALaLista);
         })
         .catch(function() {
-          Swal.fire({ icon: 'error', title: 'Error de conexión', text: 'No se pudo aplicar el ajuste.', confirmButtonColor: '#71bf44' });
+          Swal.fire({ icon: 'error', title: 'Error de conexión', text: 'No se pudo aplicar el ajuste.', confirmButtonColor: '#71bf44', allowOutsideClick: false })
+            .then(volverALaLista);
         });
+
+      function volverALaLista() {
+        consultarRollosConsumo(idOrden)
+          .then(function(nuevos) {
+            var actual = window.__ajusteFin;
+            if (!actual) return;
+            if (!nuevos.ok) {
+              Swal.fire({ icon: 'error', title: 'No se puede ajustar', text: nuevos.error, confirmButtonColor: '#71bf44' })
+                .then(function() { terminarAjusteConsumo(false); });
+              return;
+            }
+            actual.datos = nuevos;
+            listaAjusteConsumo();
+          })
+          .catch(function() { listaAjusteConsumo(); });
+      }
     }
   `;
 }
@@ -3945,13 +4018,19 @@ function scriptConfirmarFinalizar() {
 
     // Resuelve true si se puede seguir con el Finalizar: avance >= 95% (o sin meta), o ya firmado.
     // Si la consulta falla se deja seguir -- el servidor tiene la misma regla y rechaza el POST.
-    // Antes del avance, el aviso de salida contra materia prima (avisarExcesoMP).
+    // Antes del avance, el aviso de salida contra materia prima (avisarExcesoMP) y, 20/10/2026, la
+    // pregunta de si va a ajustar algun rollo consumido (preguntarAjusteConsumo, scriptAjusteConsumo).
+    // Si la salida ya supera la MP no se pregunta: bajar el consumo seria imposible (C > S).
     function revisarAvanceAntesDeFinalizar(idOrden) {
       return fetch('/api/selladora/orden/' + idOrden + '/finalizar/requisitos')
         .then(function(r) { return r.json(); })
         .then(function(datos) {
           if (!datos.ok) return true;
           return avisarExcesoMP(datos.balance).then(function(sigue) {
+            if (!sigue) return false;
+            if (datos.balance && datos.balance.excede) return true;
+            return preguntarAjusteConsumo(idOrden);
+          }).then(function(sigue) {
             if (!sigue) return false;
             return revisarAvance(idOrden, datos);
           });
@@ -4192,6 +4271,7 @@ function scriptConfirmarFinalizar() {
       return false;
     }
     ${scriptElegirTurno()}
+    ${scriptAjusteConsumo()}
   `;
 }
 
@@ -5854,11 +5934,9 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
         </div>`).join('')
     : `<div class="pesaje-vacio">Sin materia prima registrada todavía.</div>`;
 
-  // Ajuste del consumo real del rollo (18/09/2026, ver AJUSTE_CANTIDAD_CONSUMIDA_ROLLO_18092026.md):
-  // solo en PendienteValidacion. Antes (Activa) la maquina sigue gastando rollo, asi que todavia no
-  // se sabe cuanto se consumio; despues (Finalizada) el digitador ya cerro el proceso y calculo la
-  // merma con estos mismos kilos -- corregirlos ahi descuadraria una merma ya cerrada, igual que
-  // pasa con "Volver a pesar" y con la correccion de bolsas.
+  // Ajuste del consumo real del rollo: desde el 20/10/2026 ya no hay boton aqui (salia en
+  // PendienteValidacion). Se pregunta dentro del Finalizar, antes de cerrar el pedido -- ver
+  // scriptAjusteConsumo y AJUSTE_CANTIDAD_CONSUMIDA_ROLLO_18092026.md.
   // Observacion libre del operario (22/09/2026). Sin condicion de estado a proposito: lo que el
   // operario vio no depende de si la orden esta corriendo o ya se finalizo, y anotar nunca cambia
   // nada -- solo agrega una fila a SEL_ObservacionOperario. La OTRA puerta de entrada es la
@@ -5878,10 +5956,6 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   const botonAutorizacion = `<button type="button" class="btn-accion btn-info"
          onclick="abrirAutorizacion(${orden.IdOrden})">🔑 Autorización</button>`;
 
-  const botonAjusteConsumo = orden.Estado === 'PendienteValidacion'
-    ? `<button type="button" class="btn-accion btn-isla btn-info" style="margin-bottom:10px;"
-         onclick="abrirAjusteConsumo(${orden.IdOrden})">⚖ Ajustar consumo de rollo</button>`
-    : '';
 
   // FIX 01/09/2026: el boton de Pausa se movio aca (junto a Finalizar) desde el bloque de Imprimir
   // etiqueta/Cierre bulto -- a pedido del usuario. Solo aparece si NO esta ya pausada (mientras esta
@@ -6062,7 +6136,6 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
     <h2 style="font-size:15px;margin:0 0 10px;">Especificaciones</h2>
     <div class="ejecucion-box"><div class="ejecucion-grid">${especificaciones}</div></div>
     <h2 style="font-size:15px;margin:22px 0 10px;">Historial de consumo de rollos</h2>
-    ${botonAjusteConsumo}
     <div class="ejecucion-box">${filasHistorial}</div>
     ${seccionOrdenTrabajo(otInfo, esSup)}
   </main>
@@ -6077,7 +6150,6 @@ function renderOrdenDetalle(orden, totalBultos, historial, usuario, maquinaCodig
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
   <script>${scriptProtocoloArranque(maquinaCodigo)}</script>
   <script>${scriptConfirmarFinalizar()}</script>
-  <script>${scriptAjusteConsumo()}</script>
   <script>${scriptAvisoSuspension(maquinaCodigo)}</script>
   ${activa ? `<script>${scriptComandos(orden.IdOrden, maquinaCodigo, calidadFlags, protocoloPendiente ? null : pausaActiva, calidadHabilitada)}</script><script>${scriptPesoEnVivo()}</script><script>${scriptResumenBultoActivo(orden.IdOrden, maquinaCodigo)}</script>` : ''}
   ${protocoloPendiente ? `<script>
@@ -8620,10 +8692,9 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
         </div>`).join('')
     : `<div class="pesaje-vacio">Sin materia prima registrada todavía.</div>`;
 
-  // Ajuste del consumo real -- ver la nota en renderOrdenDetalle. En un grupo la materia prima vive
-  // toda bajo la ancla (los hermanos se crearon con sinMateriaPrima=true), asi que da igual desde
-  // que miembro se pida: resolverAnclaMateriaPrima lo redirige solo. Se usa el primer miembro en
-  // PendienteValidacion porque el Finalizar pasa a las 3 referencias juntas.
+  // Primer miembro finalizado por accidente (PendienteValidacion): el Finalizar pasa a las 3
+  // referencias juntas. Lo usa el "⏯ Reanudar" de abajo. (Hasta el 19/10/2026 tambien sacaba el
+  // boton de ajuste de consumo; desde el 20/10 el ajuste se pregunta al Finalizar.)
   const miembroParaAjuste = (miembros || []).find(m => m.Estado === 'PendienteValidacion') || null;
   // Observacion libre del operario (22/09/2026). Sin condicion de estado a proposito: lo que el
   // operario vio no depende de si la orden esta corriendo o ya se finalizo, y anotar nunca cambia
@@ -8642,10 +8713,6 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
   const botonAutorizacion = miembroParaObservacion
     ? `<button type="button" class="btn-accion btn-isla btn-info"
          onclick="abrirAutorizacion(${miembroParaObservacion.IdOrden})">🔑 Autorización</button>`
-    : '';
-  const botonAjusteConsumo = miembroParaAjuste
-    ? `<button type="button" class="btn-accion btn-isla btn-info" style="margin-bottom:10px;"
-         onclick="abrirAjusteConsumo(${miembroParaAjuste.IdOrden})">⚖ Ajustar consumo de rollo</button>`
     : '';
 
   // Orden de izquierda a derecha: Rollo, Pausa, Finalizar. El boton Turno se quito de aca
@@ -8759,7 +8826,6 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
     <h2 style="font-size:15px;margin:0 0 10px;">Referencias de salida</h2>
     ${tarjetasReferencia}
     <h2 style="font-size:15px;margin:22px 0 10px;">Historial de consumo de rollos (todo el grupo)</h2>
-    ${botonAjusteConsumo}
     <div class="ejecucion-box">${filasHistorial}</div>
     ${seccionOrdenTrabajo(otInfo, esSup)}
   </main>
@@ -8777,7 +8843,6 @@ function renderGrupoSelladoDetalle(idGrupo, numeroPedido, maquinaNombre, maquina
   <script>${scriptAvisoPesaje(maquinaCodigo)}</script>
   <script>${scriptPreguntaActividadInicial()}</script>
   <script>${scriptConfirmarFinalizar()}</script>
-  <script>${scriptAjusteConsumo()}</script>
   <script>${scriptEscanearRollo(maquinaCodigo)}</script>
   <!-- scriptProtocoloArranque aporta preguntarEstadoRolloNuevo, el chequeo del rollo (buen estado /
        peligro fisico) que el boton "+ Rollo" de arriba exige antes de confirmar el rollo -- y
@@ -12403,13 +12468,10 @@ app.get('/api/selladora/orden/:idOrden/rollos-consumo', requireLogin, async (req
   try {
     const p = await getPool();
     const estado = await obtenerEstadoAjusteConsumo(p, idOrden);
-    if (estado.estado !== 'PendienteValidacion') {
-      return res.json({
-        ok: false,
-        error: estado.estado === 'Activa'
-          ? 'Esta orden todavía está activa: la máquina sigue consumiendo rollo, así que aún no se sabe cuánto se gastó. Finalícela primero.'
-          : 'El consumo solo se puede ajustar mientras la orden está pendiente de validación. Esta ya fue cerrada por el digitador -- el ajuste tiene que hacerse desde el escritorio.'
-      });
+    // 20/10/2026: el ajuste se hace en el Finalizar, con la orden todavia Activa (antes era solo en
+    // PendienteValidacion). Ver scriptAjusteConsumo.
+    if (estado.estado !== 'Activa') {
+      return res.json({ ok: false, error: MENSAJE_AJUSTE_SOLO_AL_FINALIZAR });
     }
     res.json({ ok: true, ...estado });
   } catch (err) {

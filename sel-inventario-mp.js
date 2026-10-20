@@ -2671,15 +2671,20 @@ async function obtenerBalanceMPSellado(db, idOrden) {
 //   8. SEL_AjusteConsumoRollo                             (bitacora del ajuste)
 //
 // La merma NO se escribe (punto 8 del documento): en Node no se calcula -- la calcula el escritorio
-// en "Cerrar Definitivo" leyendo SUM(PRDProduccionMateriaPrima.Cantidad). Por eso el ajuste se
-// limita a PendienteValidacion: es la ventana que va desde el Finalizar de la tableta (que no
-// calcula merma) hasta el cierre del digitador, asi que la merma se calcula despues del ajuste y
-// con los numeros ya corregidos, sin que haya nada que recalcular a mano.
+// en "Cerrar Definitivo" leyendo SUM(PRDProduccionMateriaPrima.Cantidad), asi que se calcula despues
+// del ajuste y con los numeros ya corregidos.
+//
+// CAMBIO 20/10/2026 (a pedido de Carlos): el ajuste se hace ANTES de finalizar el pedido, dentro del
+// Finalizar de la tableta (scriptAjusteConsumo en server.js), con la orden todavia Activa. Hasta el
+// 19/10 era solo en PendienteValidacion. La salida real S ya cuenta el bulto en curso
+// (obtenerSalidaDetalladaSellado), asi que el piso C > S vale igual en ese momento.
 //
 // D se calcula contra la cantidad ACTUAL, no contra R: en un segundo ajuste (50 -> 40 -> 35) los
 // primeros 10 kilos ya volvieron al inventario, y devolver R - C otra vez los duplicaria. Si C
 // SUBE (el operario se corrigio al reves), D queda negativo y se vuelve a descontar por el mismo
 // camino que la salida original, con su misma guardia de existencia insuficiente.
+const MENSAJE_AJUSTE_SOLO_AL_FINALIZAR = 'El consumo del rollo se ajusta al finalizar el pedido, cuando la tableta pregunta si va a ajustar algún rollo consumido. Esta orden ya no está activa: para corregirlo hay que reanudarla y volver a finalizar, o hacerlo desde el escritorio.';
+
 async function ajustarConsumoRollo(pool, { idOrden, serial, cantidadNueva, motivo, generadoPor, usuario }) {
   const tSerial = (serial || '').trim();
   if (!tSerial) throw new Error('Serial vacío.');
@@ -2692,8 +2697,8 @@ async function ajustarConsumoRollo(pool, { idOrden, serial, cantidadNueva, motiv
   const dtOrden = await pool.request().input('idOrden', idOrden)
     .query(`SELECT Estado FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden`);
   if (dtOrden.recordset.length === 0) throw new Error('Orden no encontrada.');
-  if (dtOrden.recordset[0].Estado !== 'PendienteValidacion') {
-    throw new Error('Solo se puede ajustar el consumo mientras la orden está pendiente de validación. Una vez que el digitador la cierra definitivamente, su merma ya está calculada y el ajuste tiene que hacerse desde el escritorio.');
+  if (dtOrden.recordset[0].Estado !== 'Activa') {
+    throw new Error(MENSAJE_AJUSTE_SOLO_AL_FINALIZAR);
   }
 
   const tx = new sql.Transaction(pool);
@@ -2929,6 +2934,7 @@ module.exports = {
   listarRollosOrden,
   recalcularControlSellado,
   obtenerEstadoAjusteConsumo,
+  MENSAJE_AJUSTE_SOLO_AL_FINALIZAR,
   obtenerBalanceMPSellado,
   ajustarConsumoRollo
 };

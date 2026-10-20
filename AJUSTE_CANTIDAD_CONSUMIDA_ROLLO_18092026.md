@@ -3,6 +3,16 @@
 Fecha: 18/09/2026 · Estado: **implementado en Node el 18/09/2026.**
 Para: el programador que haga el cambio (el diseño de abajo se conserva tal cual se escribió).
 
+> **Cambio del 20/10/2026 (a pedido de Carlos): el ajuste ahora se hace ANTES de finalizar.**
+> Ya no hay botón "⚖ Ajustar consumo de rollo" en *Pend. validación*. Al dar **■ Finalizar**, después
+> del aviso de salida contra MP y antes del avance y las firmas, la tableta pregunta
+> **"¿Va a ajustar algún rollo consumido?"** (Sí, ajustar rollo / No, finalizar / Cancelar). Con
+> "Sí" sale la lista de rollos; tras cada ajuste vuelve a la lista, y "Seguir con el finalizar"
+> continúa. El servidor (`/rollos-consumo` y `ajustarConsumoRollo`) solo acepta la orden **Activa**;
+> en *Pend. validación* responde que hay que reanudar y volver a finalizar, o hacerlo desde el
+> escritorio. No se pregunta si la orden no tiene rollos, si no queda margen (C > S) o si la salida
+> ya supera la MP. Donde dice abajo "solo en PendienteValidacion", léase "solo al finalizar".
+
 ## 0. Estado de la implementación (18/09/2026)
 
 
