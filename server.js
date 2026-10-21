@@ -8430,11 +8430,13 @@ function scriptAccionesReferencia(maquinaCodigo, idOrdenActivaAhora) {
       if (comando !== 'cierre_bulto') return enviarComando(comando, boton, null, idOrden);
       var resumen = window.resumenPorOrden[idOrden] || {};
       return enviarComando('cierre_bulto', boton, null, idOrden).then(function(cmd) {
-        if (!cmd.ok || !resumen.idBulto || !resumen.ultimo) return;
+        if (!cmd.ok || !resumen.idBulto || !resumen.ultimo) return cmd;
+        // Devuelve el resultado del cierre (no el de la reimpresion) para que accionReferencia sepa
+        // si el servidor alterno de referencia (cmd.alterno) y recargue la pagina.
         return enviarComando('reimprimir_etiqueta', null, {
           idBulto: resumen.idBulto, consecutivoPaquete: resumen.ultimo.consecutivo,
           pesoGr: resumen.ultimo.pesoKg, serialBulto: null
-        }, idOrden);
+        }, idOrden).then(function() { return cmd; });
       });
     }
 
@@ -8472,7 +8474,9 @@ function scriptAccionesReferencia(maquinaCodigo, idOrdenActivaAhora) {
             if (!esCierre && data && data.ok) cerrarTarjetaReferencia(idOrden);
             // Solo si se cambio de referencia: la pagina se recarga para que "+ Rollo" y el avance
             // queden apuntando a la referencia correcta. El retraso deja ver "Comando enviado".
-            if (hayQueAlternar) setTimeout(function() { location.reload(); }, 1600);
+            // 21/10/2026: tambien si el que alterno fue el servidor (data.alterno) porque
+            // refActivaAhora estaba desactualizado.
+            if (hayQueAlternar || (data && data.alterno)) setTimeout(function() { location.reload(); }, 1600);
           });
         });
       });
@@ -12364,6 +12368,25 @@ app.post('/api/comando', requireLogin, async (req, res) => {
       const retoma = await retomaPendiente(await getPool(), idOrden, req.session.usuario.codigoOperarioPRD);
       if (retoma) return res.json({ ok: false, error: mensajeRetomaPendiente(retoma) });
     }
+    // 21/10/2026 (a pedido del usuario): en un grupo de Sellado, Node-RED cierra/imprime sobre el
+    // bulto Activo de la MAQUINA, sin mirar la referencia. La tableta decidia si alternar con
+    // window.refActivaAhora, que solo se carga al abrir la pagina: si la referencia activa cambio
+    // despues (otra tableta, suspension...), "Cierre bulto" de Mixta cerraba el bulto de Mollejas.
+    // Ahora lo decide el servidor con la base: si el bulto Activo no es de esta referencia, primero
+    // la vuelve Activa (las demas a EnEspera) y despues manda el comando. alternarParaSimulador
+    // hace justo eso (null si ya estaba activa, true si alterno).
+    let alterno = false;
+    if ((comando === 'cierre_bulto' || comando === 'imprimir_etiqueta') && Number(idOrden) > 0) {
+      try {
+        const p = await getPool();
+        if (await obtenerIdGrupoSelladoDeOrden(p, Number(idOrden)) != null) {
+          const nMaquinaOrden = await obtenerCodigoMaquinaDeOrden(p, Number(idOrden));
+          alterno = (await alternarParaSimulador(p, req, Number(idOrden), nMaquinaOrden)) === true;
+        }
+      } catch (errAlternar) {
+        return res.json({ ok: false, error: 'No se pudo cambiar a esta referencia antes del comando: ' + errAlternar.message });
+      }
+    }
     await enviarComandoANodeRed({
       comando,
       idOrden: Number(idOrden),
@@ -12392,7 +12415,7 @@ app.post('/api/comando', requireLogin, async (req, res) => {
         console.error('Error guardando el chequeo de Calidad:', errGuardar.message);
       }
     }
-    res.json({ ok: true });
+    res.json({ ok: true, alterno });
   } catch (err) {
     res.status(502).json({ ok: false, error: 'No se pudo contactar a Node-RED: ' + err.message });
   }
