@@ -298,4 +298,7 @@ FROM INVElementos ie WHERE ie.Codigo=@Elemento;
 
 COMMIT TRANSACTION;
 
-SELECT @Serial AS SerialHijo, @LineaHijo AS LineaHijo, @NumeroMov35 AS MovimientoTipo35;
+-- 20/10/2026: Tipo y Cantidad también, que son los que imprime "Preparar datos etiqueta peso" (sin ellos
+-- la etiqueta del residuo salía con "TIPO:" y el peso en blanco).
+SELECT @Serial AS SerialHijo, @LineaHijo AS LineaHijo, @NumeroMov35 AS MovimientoTipo35,
+       @TipoTexto AS Tipo, @Cantidad AS Cantidad;

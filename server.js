@@ -6442,8 +6442,8 @@ function renderSeccionTraslado(bultos, pesajesPorBulto, opciones, destinoExtra =
 
   // `bultos` viene ordenado por id y sin anulados -- los vecinos son los mismos que calcula el SP.
   // Tarjeta #10: los extras son bultos de otras referencias del grupo (misma OT). El SP solo
-  // acepta el PRIMER paquete del origen hacia otra referencia (regla 51011), asi que solo se
-  // ofrecen al primero.
+  // acepta el ÚLTIMO paquete del origen hacia otra referencia (regla 51011; 21/10/2026, antes era
+  // el primero y movía la hora de inicio del bulto), asi que solo se ofrecen al último.
   const extraValido = eb => eb && !Number(eb.Validado) && (Number(eb.maxPaquete) || 0) < 99;
   // 19/10/2026 (a pedido del usuario): en grupo multi-referencia el operario no distinguía en el
   // desplegable si el destino era de su misma referencia o de otra ("Bulto 1", "Bulto 1",
@@ -6475,8 +6475,8 @@ function renderSeccionTraslado(bultos, pesajesPorBulto, opciones, destinoExtra =
           `<option value="${pe.id_paquete}" data-modo="misma" data-bulto="${b.id}" data-destinos="${dataDestinos}">${textoPaquete} → ${textoDestinos}</option>`
         );
       }
-      // A otra referencia solo el primer paquete del bulto (regla 51011 del SP).
-      if (Number(pe.EsPrimero) === 1) {
+      // A otra referencia solo el último paquete del bulto (regla 51011 del SP).
+      if (Number(pe.EsUltimo) === 1) {
         const destinosOtra = extras.filter(extraValido);
         if (destinosOtra.length > 0) {
           const dataDestinos = destinosOtra.map(d => `${d.id}:${d.numRelativo}:${idxRef(d)}`).join(',');
@@ -6519,7 +6519,7 @@ function renderSeccionTraslado(bultos, pesajesPorBulto, opciones, destinoExtra =
         <label style="font-weight:normal;"><input type="radio" name="${nombreRadio}" class="rad-modo-traslado" value="otra" onchange="cambioModoTraslado(this)"${modoInicial === 'otra' ? ' checked' : ''}${hayOtra ? '' : ' disabled'}> Otra referencia</label>
       </div>
       ${hayMisma ? '' : `<div style="font-size:12px;color:#64748b;margin-top:4px;">Misma referencia: ${motivoMisma}</div>`}
-      ${hayOtra ? '' : `<div style="font-size:12px;color:#64748b;margin-top:4px;">Otra referencia: solo el primer paquete de un bulto puede pasar, y los bultos de las otras referencias deben estar sin validar y por debajo del paquete #99.</div>`}
+      ${hayOtra ? '' : `<div style="font-size:12px;color:#64748b;margin-top:4px;">Otra referencia: solo el último paquete de un bulto puede pasar, y los bultos de las otras referencias deben estar sin validar y por debajo del paquete #99.</div>`}
     </div>
     <div class="traslado-campo campo-ref-destino"${modoInicial === 'otra' ? '' : ' style="display:none;"'}>
       <label>Referencia destino</label>
@@ -8429,12 +8429,13 @@ function scriptAccionesReferencia(maquinaCodigo, idOrdenActivaAhora) {
     function ejecutarComandoReferencia(comando, boton, idOrden) {
       if (comando !== 'cierre_bulto') return enviarComando(comando, boton, null, idOrden);
       var resumen = window.resumenPorOrden[idOrden] || {};
+      // Devuelve la respuesta del cierre (no la de la reimpresion): accionReferencia mira su codigo.
       return enviarComando('cierre_bulto', boton, null, idOrden).then(function(cmd) {
-        if (!cmd.ok || !resumen.idBulto || !resumen.ultimo) return;
+        if (!cmd.ok || !resumen.idBulto || !resumen.ultimo) return cmd;
         return enviarComando('reimprimir_etiqueta', null, {
           idBulto: resumen.idBulto, consecutivoPaquete: resumen.ultimo.consecutivo,
           pesoGr: resumen.ultimo.pesoKg, serialBulto: null
-        }, idOrden);
+        }, idOrden).then(function() { return cmd; });
       });
     }
 
@@ -8465,6 +8466,17 @@ function scriptAccionesReferencia(maquinaCodigo, idOrdenActivaAhora) {
         preparado.then(function(listo) {
           if (!listo) return;
           return Promise.resolve(ejecutarComandoReferencia(comando, boton, idOrden)).then(function(data) {
+            // 21/10/2026: window.refActivaAhora estaba viejo (otra tableta/pestaña alterno) y el
+            // servidor no dejo cerrar el bulto de otra referencia -- se alterna a esta y se reintenta
+            // una sola vez. Ver el chequeo de cierre_bulto en /api/comando.
+            if (esCierre && !hayQueAlternar && data && data.codigo === 'OTRA_REFERENCIA_ACTIVA') {
+              return alternarSilencioso(idOrden).then(function(listo) {
+                if (!listo) return;
+                return Promise.resolve(ejecutarComandoReferencia(comando, boton, idOrden)).then(function() {
+                  setTimeout(function() { location.reload(); }, 1600);
+                });
+              });
+            }
             // Imprimir etiqueta: la tarjeta de ESA referencia se cierra apenas el comando sale
             // (11/09/2026). Si el comando fallo se deja abierta -- el operario todavia tiene algo
             // que hacer ahi. Cierre bulto no cierra la tarjeta: despues del cierre se sigue
@@ -12363,6 +12375,34 @@ app.post('/api/comando', requireLogin, async (req, res) => {
     if (comando !== 'calidad' && Number(idOrden) > 0) {
       const retoma = await retomaPendiente(await getPool(), idOrden, req.session.usuario.codigoOperarioPRD);
       if (retoma) return res.json({ ok: false, error: mensajeRetomaPendiente(retoma) });
+    }
+    // 21/10/2026 (pedido 10089): el cierre de Node-RED (02_cierre_bulto.sql) cierra el bulto
+    // Activo/Temporal de la MAQUINA, sin mirar la referencia. En sellado en paralelo la tableta
+    // alterna antes segun window.refActivaAhora, que se fija al cargar la pagina -- con la pagina
+    // vieja se salto el cambio y "Cierre bulto" de MIXTA cerro vacio el bulto 450 de MOLLEJAS. Se
+    // comprueba aca contra la base: si el bulto abierto es de otra referencia se devuelve
+    // OTRA_REFERENCIA_ACTIVA (accionReferencia alterna y reintenta) y un bulto sin paquetes no se
+    // cierra (quedaria un bulto Cerrado vacio).
+    if (comando === 'cierre_bulto' && Number(idOrden) > 0) {
+      const dtAbierto = await (await getPool()).request().input('idOrden', Number(idOrden)).query(`
+        SELECT TOP 1 ej.IdOrden,
+               (SELECT COUNT(*) FROM SEL_PesajeElemento pe WHERE pe.id_bulto = b.id) AS Paquetes
+        FROM SEL_Bultos b
+        INNER JOIN SEL_EjecucionOrden ej ON ej.IdEjecucion = b.id_ejecucion
+        WHERE b.id_maquina = (SELECT Maquina FROM SEL_OrdenProduccion WHERE IdOrden = @idOrden)
+          AND b.estado IN ('Activo', 'Temporal')
+        ORDER BY b.id DESC
+      `);
+      const abierto = dtAbierto.recordset[0];
+      if (!abierto || Number(abierto.IdOrden) !== Number(idOrden)) {
+        return res.json({ ok: false, codigo: 'OTRA_REFERENCIA_ACTIVA',
+                          error: abierto
+                            ? 'La máquina está recibiendo paquetes de otra referencia. Recargue la pantalla e intente de nuevo.'
+                            : 'La máquina no tiene un bulto abierto para esta referencia. Recargue la pantalla e intente de nuevo.' });
+      }
+      if (Number(abierto.Paquetes) === 0) {
+        return res.json({ ok: false, error: 'El bulto de esta referencia todavía no tiene paquetes: no se cierra vacío.' });
+      }
     }
     await enviarComandoANodeRed({
       comando,
