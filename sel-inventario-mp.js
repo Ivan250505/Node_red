@@ -1421,6 +1421,10 @@ async function corregirTurnoMaquina(p, { maquina, codigoTurno, usuario, motivo }
 // se abre sola cuando termine la del turno anterior (ver abrirBitacorasPendientes).
 
 const MINUTOS_ENTRADA_ANTICIPADA = 30;
+// 22/10/2026 (caso real máquina 7, 16/10): en los últimos MINUTOS_FIN_TURNO_SIN_RELEVO de un turno, quien
+// entra es el del turno siguiente, no un relevo. El login le preselecciona el turno siguiente y la
+// bitácora del turno que termina ya no pasa a su nombre (ver turnosParaLogin y pasarBitacoraSiAnteriorSalio).
+const MINUTOS_FIN_TURNO_SIN_RELEVO = 30;
 
 // Cache de "¿existe esta columna?" -- los scripts de la base pueden no estar corridos todavía.
 const _columnasCache = new Map();
@@ -1512,6 +1516,14 @@ async function turnosParaLogin(p, maquinaCodigo, ahora) {
     const cubren = opciones.filter(o => o.cubreAhora).sort((a, b) => (a.fin - a.inicio) - (b.fin - b.inicio));
     if (cubren.length > 0) preseleccion = cubren[0].codigo;
   }
+  // 22/10/2026: si el turno preseleccionado se acaba en MINUTOS_FIN_TURNO_SIN_RELEVO o menos, se
+  // preselecciona el que empieza al terminar ése. El 16/10 a las 21:59 el login dejaba marcada la
+  // tarde (la bitácora abierta) y el operario de la noche entró con ella sin darse cuenta.
+  const sel = opciones.find(o => o.codigo === preseleccion);
+  if (sel && sel.cubreAhora && sel.fin - ahora <= MINUTOS_FIN_TURNO_SIN_RELEVO * 60000) {
+    const siguiente = opciones.find(o => !o.cubreAhora && o.inicio >= sel.fin - 60000);
+    if (siguiente) preseleccion = siguiente.codigo;
+  }
   return { opciones, preseleccion };
 }
 
@@ -1578,7 +1590,7 @@ async function sincronizarBitacoraAlEntrar(p, { maquina, operario, codigoTurno, 
   const mismoTurno = Number(abierta.Turno) === Number(codigoTurno) && abierta.FechaTurno === turno.fechaTurno;
   if (mismoTurno) {
     await activarTurnoMaquina(p, maquina, codigoTurno);
-    await pasarBitacoraSiAnteriorSalio(p, abierta, operario);
+    await pasarBitacoraSiAnteriorSalio(p, abierta, operario, maquina);
     return { accion: 'reusada', idBitacora: abierta.IdBitacora, turno };
   }
 
@@ -2146,10 +2158,22 @@ async function operarioSalioDeSesion(p, operarioPRD) {
 // relevo corto dentro del turno y la bitácora se queda con él. Lo hecho por el anterior sigue a su
 // nombre fila por fila (tiempos muertos, bultos, protocolo) -- solo cambia el encabezado, que es el
 // operario de la planilla. Deja rastro en SISMovimientos. Nunca revienta hacia afuera.
-async function pasarBitacoraSiAnteriorSalio(p, abierta, operarioCodigo) {
+async function pasarBitacoraSiAnteriorSalio(p, abierta, operarioCodigo, maquina) {
   try {
     if (!operarioCodigo || abierta.Operario == null || Number(abierta.Operario) === Number(operarioCodigo)) return;
     if (!(await operarioSalioDeSesion(p, abierta.Operario))) return;
+    // 22/10/2026 (caso real máquina 7, 16/10): en los últimos MINUTOS_FIN_TURNO_SIN_RELEVO del turno de la
+    // bitácora, quien entra es el del turno siguiente -- la bitácora que termina se queda con su dueño.
+    // El operario de la noche entró a las 21:59:33 con la tarde (preseleccionada), 7 s después de que el
+    // de la tarde cerró sesión, y la bitácora de la tarde pasó a su nombre.
+    if (maquina != null && abierta.Turno != null) {
+      const f = (await franjasMaquinaOBase(p, maquina)).find(x => Number(x.CodigoTurno) === Number(abierta.Turno));
+      if (f) {
+        const ahora = await horaServidorBD(p);
+        const t = turnoAJson(f, ahora);
+        if (t.cubreAhora && t.fin - ahora <= MINUTOS_FIN_TURNO_SIN_RELEVO * 60000) return;
+      }
+    }
     // 28/09/2026: si el que llega declaró en el login OTRO turno (entró antes para el turno
     // siguiente), esta bitácora no es la suya: la suya se abre al terminar ésta (abrirBitacorasPendientes).
     if (await columnaExiste(p, 'SISAccesos', 'Turno')) {
@@ -2216,7 +2240,7 @@ async function abrirOReanudarBitacora(p, maquinaCodigo, operarioCodigo) {
       // tableta (fin de turno / primer retomar del turno), pasa al que toma el control -- ver
       // pasarBitacoraSiAnteriorSalio.
       if (mismoTurno) {
-        await pasarBitacoraSiAnteriorSalio(p, abierta, operarioCodigo);
+        await pasarBitacoraSiAnteriorSalio(p, abierta, operarioCodigo, maquinaCodigo);
         return abierta.IdBitacora;
       }
       await cerrarBitacora(p, abierta.IdBitacora, 'cambio_turno');
