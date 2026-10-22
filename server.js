@@ -1154,9 +1154,11 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
   // FIX 09/09/2026 (a pedido del usuario, screenshot de las 2 tarjetas "Pend. validación" sueltas
   // del Pedido 11408): también se fusiona en 'PendienteValidacion' -- las 3 referencias siempre
   // terminan el Finalizar juntas (finalizarOrden las pasa a las 3 a la vez), así que mostrarlas
-  // sueltas ahí no aporta nada y rompe la uniformidad con las tarjetas Pendiente/Activa. Si algún
-  // miembro necesita "tomar control" de su ejecución (ver necesitaTomarControlMiembro más abajo),
-  // NO se fusiona -- se muestra cada una individual, para no esconder esa acción puntual.
+  // sueltas ahí no aporta nada y rompe la uniformidad con las tarjetas Pendiente/Activa.
+  // CAMBIO 21/10/2026 (a pedido del usuario): si algún miembro necesita "tomar control" de su
+  // ejecución (ver necesitaTomarControlMiembro más abajo) TAMBIÉN se fusiona -- antes salían las 3
+  // tarjetas sueltas, cada una con su Retomar. Ahora va un solo botón, y tomar-control-ejecucion
+  // retoma de una las ejecuciones de todo el grupo.
   const gruposFusionables = new Map(); // IdGrupoSellado -> [ordenes]
   ordenes.forEach(o => {
     if (o.IdGrupoSellado == null) return;
@@ -1173,8 +1175,7 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
     const todosMismoEstado = miembros.every(m => m.Estado === estadoComun);
     // 14/10/2026: tambien 'Suspendida' -- la suspension desde la tableta suspende el grupo entero.
     const estadoFusionable = ['Pendiente', 'Activa', 'Suspendida', 'PendienteValidacion'].includes(estadoComun);
-    const algunoNecesitaControl = estadoComun === 'Activa' && miembros.some(necesitaTomarControlMiembro);
-    if (!todosMismoEstado || !estadoFusionable || algunoNecesitaControl) gruposFusionables.delete(idGrupo);
+    if (!todosMismoEstado || !estadoFusionable) gruposFusionables.delete(idGrupo);
   }
 
   const idsYaFusionados = new Set();
@@ -1190,7 +1191,18 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
       const referencias = miembros.map(m => `<div>${m.Elemento}</div>`).join('');
       let accionesGrupo, infoFinalizadaGrupo = '';
       const grupoPorRetomar = ancla.Estado === 'Pendiente' && miembros.some(m => m.EsPorRetomar);
-      if (ancla.Estado === 'Pendiente') {
+      // Primera referencia que hay que retomar (cambio de operario o cierre de sesion): su boton
+      // retoma todo el grupo (21/10/2026).
+      const miembroPorTomar = ancla.Estado === 'Activa' ? miembros.find(necesitaTomarControlMiembro) : null;
+      if (miembroPorTomar) {
+        const esElMismo = miOperario != null && miembroPorTomar.OperarioEjecucionCodigo === miOperario;
+        const nombreAsignado = miembroPorTomar.OperarioEjecucionNombre || 'un operario sin nombre configurado';
+        infoFinalizadaGrupo = `<div class="orden-elemento" style="color:var(--naranja);font-weight:600;">Operario anterior: ${nombreAsignado}</div>`;
+        accionesGrupo = `
+          <form method="post" action="/api/selladora/orden/${miembroPorTomar.IdOrden}/tomar-control-ejecucion" onsubmit="return confirmarTomarControlEjecucion(event, this, ${esElMismo}, ${jsString(nombreAsignado).replace(/"/g, '&quot;')});">
+            <button type="submit" class="btn-accion" style="background:#b46200;">${esElMismo ? '▶ Reanudar ejecución' : '🔓 Retomar ejecución'}</button>
+          </form>`;
+      } else if (ancla.Estado === 'Pendiente') {
         // Iniciar un grupo entra por el mismo protocolo de arranque que una orden suelta (ver
         // scriptProtocoloArranque): es un solo proceso fisico -- una sola limpieza, un solo
         // chequeo de peligro quimico, un solo rollo y un solo alistamiento para las 3 referencias.
@@ -1217,7 +1229,7 @@ function renderColaOrdenes(ordenes, maquinaCodigo, miOperario) {
       return `
         <div class="orden-cola">
           <div class="orden-info">
-            <div class="orden-pedido">🔗 Pedido ${pedidosFusion.join(' · ') || ancla.NumeroPedido || '—'} ${grupoPorRetomar ? BADGE_POR_RETOMAR : badgeEstadoOrden(ancla.Estado)}</div>
+            <div class="orden-pedido">🔗 Pedido ${pedidosFusion.join(' · ') || ancla.NumeroPedido || '—'} ${miembroPorTomar ? `<span class="badge badge-temporal">Pendiente de operador</span>` : (grupoPorRetomar ? BADGE_POR_RETOMAR : badgeEstadoOrden(ancla.Estado))}</div>
             <div class="orden-elemento">${referencias}</div>
             <div class="orden-elemento" style="color:var(--texto-suave);">Un solo proceso -- ${miembros.length} referencias de salida</div>
             ${ancla.OrdenProduccion ? `<div class="orden-elemento" style="color:var(--texto-suave);">OP: ${ancla.OrdenProduccion}</div>` : ''}
@@ -8432,6 +8444,7 @@ function scriptAccionesReferencia(maquinaCodigo, idOrdenActivaAhora) {
       // Devuelve la respuesta del cierre (no la de la reimpresion): accionReferencia mira su codigo.
       return enviarComando('cierre_bulto', boton, null, idOrden).then(function(cmd) {
         if (!cmd.ok || !resumen.idBulto || !resumen.ultimo) return cmd;
+        // Tambien lleva cmd.alterno: si el servidor alterno de referencia, accionReferencia recarga.
         return enviarComando('reimprimir_etiqueta', null, {
           idBulto: resumen.idBulto, consecutivoPaquete: resumen.ultimo.consecutivo,
           pesoGr: resumen.ultimo.pesoKg, serialBulto: null
@@ -8448,6 +8461,35 @@ function scriptAccionesReferencia(maquinaCodigo, idOrdenActivaAhora) {
       var tarjeta = document.querySelector('.ref-card[data-orden="' + idOrden + '"]');
       if (tarjeta) tarjeta.open = false;
     }
+
+    // Recarga tras alternar de referencia SIN perder la posicion (a pedido del usuario, 21/10/2026).
+    // La recarga sigue haciendo falta (Calidad, Pausa y "+ Rollo" se arman contra la referencia
+    // activa), pero antes cerraba todas las tarjetas y dejaba la pantalla arriba: las tarjetas
+    // nacen colapsadas, la pagina queda corta y el navegador no puede volver al mismo punto. Se
+    // guarda que tarjetas estaban abiertas y el scroll, y al cargar se reabren y se vuelve ahi.
+    var CLAVE_POSICION = 'posicion-referencias:' + location.pathname;
+
+    function recargarConservandoPosicion() {
+      try {
+        var abiertas = Array.from(document.querySelectorAll('.ref-card[open]')).map(function(t) { return t.dataset.orden; });
+        sessionStorage.setItem(CLAVE_POSICION, JSON.stringify({ abiertas: abiertas, scrollY: window.scrollY }));
+      } catch (e) { /* sin sessionStorage se recarga igual, solo que arriba */ }
+      location.reload();
+    }
+
+    (function restaurarPosicion() {
+      var guardado = null;
+      try {
+        guardado = JSON.parse(sessionStorage.getItem(CLAVE_POSICION) || 'null');
+        sessionStorage.removeItem(CLAVE_POSICION);
+      } catch (e) { return; }
+      if (!guardado) return;
+      (guardado.abiertas || []).forEach(function(idOrden) {
+        var tarjeta = document.querySelector('.ref-card[data-orden="' + idOrden + '"]');
+        if (tarjeta) tarjeta.open = true;
+      });
+      requestAnimationFrame(function() { window.scrollTo(0, guardado.scrollY || 0); });
+    })();
 
     function accionReferencia(comando, boton, idOrden) {
       var esCierre = comando === 'cierre_bulto';
@@ -8473,7 +8515,7 @@ function scriptAccionesReferencia(maquinaCodigo, idOrdenActivaAhora) {
               return alternarSilencioso(idOrden).then(function(listo) {
                 if (!listo) return;
                 return Promise.resolve(ejecutarComandoReferencia(comando, boton, idOrden)).then(function() {
-                  setTimeout(function() { location.reload(); }, 1600);
+                  setTimeout(recargarConservandoPosicion, 1600);
                 });
               });
             }
@@ -8484,7 +8526,10 @@ function scriptAccionesReferencia(maquinaCodigo, idOrdenActivaAhora) {
             if (!esCierre && data && data.ok) cerrarTarjetaReferencia(idOrden);
             // Solo si se cambio de referencia: la pagina se recarga para que "+ Rollo" y el avance
             // queden apuntando a la referencia correcta. El retraso deja ver "Comando enviado".
-            if (hayQueAlternar) setTimeout(function() { location.reload(); }, 1600);
+            // 21/10/2026: tambien si el que alterno fue el servidor (data.alterno) porque
+            // refActivaAhora estaba desactualizado. Las tarjetas abiertas y el scroll se conservan
+            // (recargarConservandoPosicion).
+            if (hayQueAlternar || (data && data.alterno)) setTimeout(recargarConservandoPosicion, 1600);
           });
         });
       });
@@ -9118,11 +9163,12 @@ app.get('/selladora/:codigo/grupo/:idGrupo', requireLogin, async (req, res) => {
     }
     // Tarjeta #9: encabezado con TODOS los pedidos del grupo ("Pedido 11285 · 11286").
     const pedidosGrupo = [...new Set(miembros.map(m => (m.NumeroPedido || '').trim()).filter(Boolean))];
-    // 09/10/2026: cada referencia tiene su propia ejecucion -- una por cada una que haga falta retomar.
+    // 09/10/2026: cada referencia tiene su propia ejecucion. Desde el 21/10/2026 retomar una retoma
+    // todas las del grupo (ver tomar-control-ejecucion), asi que basta UN boton: el de la primera.
     const retomas = [];
     for (const m of miembros) {
       const r = await retomaPendiente(p, m.IdOrden, req.session.usuario.codigoOperarioPRD);
-      if (r) retomas.push(r);
+      if (r) { retomas.push(r); break; }
     }
     res.send(renderGrupoSelladoDetalle(idGrupo, pedidosGrupo.join(' · ') || miembros[0].NumeroPedido, maquinaNombre, codigo, miembros, req.session.usuario.nombre, historial, totalBultos, pausaActiva, calidadHabilitada, protocoloPendiente, textoOT,
       esSupervisor(req.session.usuario), await infoOTParaCorreccion(p, ordenProduccion), simPorOrden, retomas));
@@ -10423,19 +10469,28 @@ app.post('/api/selladora/orden/:idOrden/tomar-control-ejecucion', requireLogin, 
     if (dtEj.recordset.length === 0) {
       return res.status(404).send(renderErrorSimple('No se encontró la ejecución de esta orden.', '/'));
     }
-    const { IdEjecucion, Estado, Operario, Maquina } = dtEj.recordset[0];
+    const { Estado, Operario, Maquina } = dtEj.recordset[0];
+    // 21/10/2026 (a pedido del usuario): en sellado en paralelo cada referencia tiene su propia
+    // ejecucion, pero es un solo proceso fisico -- retomar UNA retoma todas las Activas del grupo
+    // (la cola las muestra en una sola tarjeta con un solo boton). Sin grupo, ids = [idOrden].
+    const ids = await idsConEstado(p, await idsGrupoSelladoDeOrden(p, idOrden), 'Activa');
+    if (!ids.includes(idOrden)) ids.push(idOrden);
     // Mismo OR que renderColaOrdenes -- el flag 'PendienteOperador' cubre el logout explicito
     // (incluso si el operario coincide, sigue habiendo algo que confirmar: pasarla de vuelta a
     // Activa) y la comparacion de Operario cubre el reinicio del servidor sin logout.
-    const hayAlgoQueTomar = Estado === 'PendienteOperador' || Operario !== miOperario;
-    if (!hayAlgoQueTomar) {
+    const filtroPorTomar = `IdOrden IN (${ids.map(Number).join(',')})
+        AND (Estado = 'PendienteOperador' OR Operario IS NULL OR Operario <> @operario)`;
+    const dtPorTomar = await p.request().input('operario', miOperario).query(
+      `SELECT COUNT(*) AS N FROM SEL_EjecucionOrden WHERE ${filtroPorTomar}`
+    );
+    if (dtPorTomar.recordset[0].N === 0) {
       // Alguien mas se adelanto (o ya no aplica) -- no es un error, simplemente ya no hay nada que
       // tomar. Se vuelve a la cola de la maquina, que ya no deberia mostrar este boton.
       return res.redirect(`/selladora/${Maquina}`);
     }
-    await p.request().input('idEjecucion', IdEjecucion).input('operario', miOperario).query(`
+    await p.request().input('operario', miOperario).query(`
       UPDATE SEL_EjecucionOrden SET Operario = @operario, Estado = CASE WHEN Estado = 'En pausa' THEN Estado ELSE 'Activa' END
-      WHERE IdEjecucion = @idEjecucion
+      WHERE ${filtroPorTomar}
     `);
     await p.request().input('maquina', Maquina).input('operario', miOperario).query(`
       MERGE SEL_OperarioActualMaquina AS destino
@@ -12376,13 +12431,33 @@ app.post('/api/comando', requireLogin, async (req, res) => {
       const retoma = await retomaPendiente(await getPool(), idOrden, req.session.usuario.codigoOperarioPRD);
       if (retoma) return res.json({ ok: false, error: mensajeRetomaPendiente(retoma) });
     }
+    // 21/10/2026 (a pedido del usuario): en un grupo de Sellado, Node-RED cierra/imprime sobre el
+    // bulto Activo de la MAQUINA, sin mirar la referencia. La tableta decidia si alternar con
+    // window.refActivaAhora, que solo se carga al abrir la pagina: si la referencia activa cambio
+    // despues (otra tableta, suspension...), "Cierre bulto" de Mixta cerraba el bulto de Mollejas.
+    // Ahora lo decide el servidor con la base: si el bulto Activo no es de esta referencia, primero
+    // la vuelve Activa (las demas a EnEspera) y despues manda el comando. alternarParaSimulador
+    // hace justo eso (null si ya estaba activa, true si alterno).
+    let alterno = false;
+    if ((comando === 'cierre_bulto' || comando === 'imprimir_etiqueta') && Number(idOrden) > 0) {
+      try {
+        const p = await getPool();
+        if (await obtenerIdGrupoSelladoDeOrden(p, Number(idOrden)) != null) {
+          const nMaquinaOrden = await obtenerCodigoMaquinaDeOrden(p, Number(idOrden));
+          alterno = (await alternarParaSimulador(p, req, Number(idOrden), nMaquinaOrden)) === true;
+        }
+      } catch (errAlternar) {
+        return res.json({ ok: false, error: 'No se pudo cambiar a esta referencia antes del comando: ' + errAlternar.message });
+      }
+    }
     // 21/10/2026 (pedido 10089): el cierre de Node-RED (02_cierre_bulto.sql) cierra el bulto
     // Activo/Temporal de la MAQUINA, sin mirar la referencia. En sellado en paralelo la tableta
     // alterna antes segun window.refActivaAhora, que se fija al cargar la pagina -- con la pagina
     // vieja se salto el cambio y "Cierre bulto" de MIXTA cerro vacio el bulto 450 de MOLLEJAS. Se
     // comprueba aca contra la base: si el bulto abierto es de otra referencia se devuelve
     // OTRA_REFERENCIA_ACTIVA (accionReferencia alterna y reintenta) y un bulto sin paquetes no se
-    // cierra (quedaria un bulto Cerrado vacio).
+    // cierra (quedaria un bulto Cerrado vacio). Con el alterno de arriba (merge con Ivan) esto queda
+    // como red de seguridad: normalmente el bulto abierto ya es de esta referencia.
     if (comando === 'cierre_bulto' && Number(idOrden) > 0) {
       const dtAbierto = await (await getPool()).request().input('idOrden', Number(idOrden)).query(`
         SELECT TOP 1 ej.IdOrden,
@@ -12432,7 +12507,7 @@ app.post('/api/comando', requireLogin, async (req, res) => {
         console.error('Error guardando el chequeo de Calidad:', errGuardar.message);
       }
     }
-    res.json({ ok: true });
+    res.json({ ok: true, alterno });
   } catch (err) {
     res.status(502).json({ ok: false, error: 'No se pudo contactar a Node-RED: ' + err.message });
   }
